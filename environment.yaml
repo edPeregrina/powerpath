@@ -1,0 +1,23 @@
+name: path_power_env
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.11
+  - shapely>=2.0
+  - geopandas
+  - jupyter
+  - rasterio
+  - xarray
+  - pytest
+  - black
+  - ruff
+  - openpyxl
+  - numpy
+  - pip
+  - pip:
+    - config
+    - pyarrow
+    - snkit
+    - networkx
+
+
