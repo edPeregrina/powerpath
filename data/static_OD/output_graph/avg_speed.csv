@@ -1,0 +1,9 @@
+,road_types,avg_speed
+0,tertiary_link,50.0
+1,trunk_link,73.4
+2,secondary,50.0
+3,trunk,74.1
+4,residential,31.3
+5,tertiary,46.5
+6,primary,64.9
+7,primary_link,50.0
