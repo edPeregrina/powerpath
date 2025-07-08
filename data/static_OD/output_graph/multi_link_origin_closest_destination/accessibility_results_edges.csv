@@ -1,0 +1,537 @@
+name,highway,maxspeed,oneway,reversed,length,rfid_c,rfid,avgspeed,time,EV1_ma,EV1_fr,EV1_ma_PD1,node_A,node_B,edge_fid,lanes,bridge,width,ref,service,junction,tunnel,access,osmid_original
+Zorgvlietstraat,residential,30,False,False,71.296,169,90,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493643
+Zorgvlietstraat,residential,30,True,False,44.983,"[3, 2678]",2,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211382069
+Zorgvlietstraat,residential,30,False,True,167.27099999999996,"[974, 2671, 2673, 1938, 2675, 2677]",507,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211382070
+Zamenhofstraat,residential,30,False,True,62.767,12,9,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493431
+Zamenhofstraat,residential,30,False,False,11.36,1538,573,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493431
+"['Tripstraat', 'Esperantostraat']",residential,30,False,"[False, True]",209.27700000000002,"[1862, 1769, 1770, 2828, 2271]",597,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[452313374, 319575391]"
+Lage Nieuwstraat,residential,30,True,False,103.92999999999999,"[1152, 38, 1135, 1151, 2303]",25,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477376
+Lange Lombardstraat,residential,50,True,False,56.323,"[9, 21]",7,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477335
+Paviljoensgracht,residential,30,False,True,93.523,"[1272, 18, 20]",540,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477701
+Zamenhofstraat,residential,30,False,True,41.371,"[25, 1540, 1542, 14]",14,30.0,0.001,-9999.0,0.0,2.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493431
+Van Boecopkade,residential,30,True,False,77.0,"[2561, 1863, 72, 75, 2829, 2830, 2831, 2832, 2269]",39,30.0,0.006,-9999.0,0.0,2.0,45129556.0,11695230689.0,45129556_11695230689,nan,nan,nan,nan,nan,nan,nan,nan,7493606
+Wagenstraat,residential,50,False,False,5.98,34,22,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476074
+Stille Veerkade,residential,50,True,False,53.581,"[33, 1642, 724, 1641]",23,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7476032, 44805874]"
+Wagenstraat,residential,30,False,True,4.489,668,406,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,126443284
+Bautersemstraat,residential,30,False,True,131.403,"[2820, 2822, 2824, 74, 54]",38,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493417
+Zamenhofstraat,residential,30,False,True,43.251000000000005,"[2264, 2328, 1945]",658,30.0,0.001,-9999.0,0.0,2.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211382068
+Westeinde,residential,50,False,True,65.839,"[2688, 1128, 16, 1265, 1267, 1815, 1914]",523,50.0,0.001,-9999.0,0.0,0.0,,,nan,3,nan,nan,nan,nan,nan,nan,nan,"[891353010, 7493391]"
+Westeinde,residential,50,False,False,152.07,"[35, 39, 44, 49, 2744, 57, 59]",31,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493391
+Sirtemastraat,residential,30,False,True,166.0,"[2624, 2305, 66, 2307, 1786, 1632, 139, 109, 1776, 81, 1109, 56, 1114, 2620, 2622]",72,30.0,0.012,-9999.0,0.0,0.0,45130349.0,11695230683.0,45130349_11695230683,nan,nan,nan,nan,nan,nan,nan,nan,7493413
+Paviljoensgracht,residential,30,False,False,4.799,1271,539,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477701
+Lutherse Burgwal,residential,30,False,True,67.132,"[48, 726, 1275, 1277, 1279]",28,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477739
+Gedempte Burgwal,residential,30,True,False,191.988,"[32, 2729, 41, 2293, 2294, 63]",21,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477361, 887935843, 887935844]"
+Nieuwe Molstraat,residential,30,True,False,86.039,"[51, 2164]",29,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476047
+Wagenstraat,residential,30,True,False,72.556,"[667, 52, 1812]",30,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476057
+Lange Lombardstraat,residential,50,True,False,94.332,"[37, 1134]",24,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477335
+Korte Beestenmarkt,residential,30,True,False,72.428,"[2616, 673, 46]",26,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[446147162, 7477486]"
+Prinsegracht,tertiary,"['30', '50']",True,False,81.11699999999999,"[1426, 47]",27,40.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[203248363, 203251109]"
+Prinsegracht,tertiary,30,True,False,80.90899999999999,"[1417, 1418, 1419, 1420, 1421, 1422, 1423, 1581, 1843, 1246]",557,30.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[203248352, 203248363]"
+Wagenstraat,residential,30,True,False,128.331,"[64, 729, 1813, 79]",41,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476057
+Westeinde,residential,30,True,False,172.244,"[67, 73, 1131, 1115, 60]",32,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521683
+Varkenmarkt,residential,30,False,True,68.069,"[1156, 671]",408,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477340
+Laan,residential,30,True,False,80.942,"[1129, 1961, 70, 1657]",36,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477380, 335613653]"
+Assendelftstraat,residential,30,True,False,122.106,"[1138, 86]",44,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477491
+Lange Lombardstraat,residential,50,True,False,85.502,68,34,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477335
+Korte Lombardstraat,residential,30,False,True,94.385,"[1162, 77, 85, 1154]",43,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477480
+Laan,residential,30,True,False,61.744,"[1130, 1139, 1335, 71]",37,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477488
+Van Boecopkade,residential,30,True,False,97.0,"[2561, 1863, 72, 75, 2829, 2830, 2831, 2832, 2269]",39,30.0,0.006,-9999.0,0.0,0.0,11695230689.0,45135174.0,11695230689_45135174,nan,nan,nan,nan,nan,nan,nan,nan,7493606
+Gedempte Gracht,residential,30,True,False,128.635,"[1147, 78]",40,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476037
+Westeinde,residential,30,True,False,101.25399999999999,"[1163, 1132, 84, 92, 94, 95]",42,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521683
+Assendelftstraat,residential,30,True,False,74.5,"[98, 1582]",48,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477491
+Noordwal,residential,30,True,False,258.462,"[96, 1545, 1546, 1549, 117, 151]",45,30.0,0.009,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493631
+Bij de Westermolens,residential,"['30', '50']",False,False,27.646,"[107, 1547, 1550, 1552, 2738, 1243, 1245]",52,40.0,0.001,0.3904990255832672,0.02574847956870531,1.0,,,nan,nan,yes,nan,nan,nan,nan,nan,nan,"[144869532, 144869531, 7493580, 1346488021]"
+Vleerstraat,residential,30,False,True,52.022,130,65,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477515
+Westeinde,residential,30,True,False,184.00799999999998,"[2272, 100, 1133, 1110, 1111, 1112, 1338]",49,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,810257036
+De Constant Rebecqueplein,residential,30,False,False,28.171,112,53,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493591
+Veenkade,residential,50,False,False,21.736,"[1840, 946, 923, 955]",489,50.0,0.0,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493579
+Veenkade,residential,"['30', '50']",True,False,59.080999999999996,"[137, 1554, 2740]",70,40.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1346487525, 7493615]"
+Joseph Ledelstraat,residential,30,False,True,15.257,123,61,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493594
+"['Kleine Veenkade', 'Joseph Ledelstraat']",residential,"['30', '50']",True,False,241.29000000000002,"[898, 899, 2660, 2661, 2658, 2659, 1836, 2741, 89, 90, 91, 93]",476,40.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7493704, 7493600, 1346487527]"
+De Constant Rebecquestraat,residential,30,False,True,73.49,125,63,30.0,0.002,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493706
+Dibbetsstraat,residential,30,True,False,209.492,"[1504, 1505, 136, 114, 1503]",56,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493619
+De Constant Rebecquestraat,residential,"['30', '50']",False,False,87.949,"[896, 1501, 2742]",474,40.0,0.002,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[7493706, 1346487526]"
+Korte Vleerstraat,residential,30,False,True,138.88600000000002,"[128, 102, 104, 1103, 2161, 1784]",66,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477336
+Zuilingstraat,residential,30,False,True,105.527,"[1105, 145, 127]",78,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477514
+"['Zuilingstraat', 'Kortenbos']",residential,30,False,False,103.09300000000002,"[1120, 1122, 141, 111, 1777, 1779, 1781, 118, 1116, 1118]",74,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477514, 7477343]"
+De Constant Rebecquestraat,residential,30,False,True,27.45,135,67,30.0,0.001,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493706
+Vleerstraat,residential,30,False,True,31.854,147,77,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477515
+Joseph Ledelstraat,residential,30,False,True,133.605,"[1507, 1509, 1511, 172, 143]",94,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493574
+De Constant Rebecquestraat,residential,30,False,True,157.57,"[132, 1869, 150]",80,30.0,0.005,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493706
+Veenkade,residential,30,True,False,44.51,144,75,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Crispijnstraat,residential,30,True,False,282.914,"[2343, 2344, 2345, 2346, 2347, 2348, 2349, 2350, 2351, 2352, 2353, 2354, 1941, 216, 1819, 1820]",120,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493645
+Sirtemastraat,residential,30,False,True,83.418,1124,521,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493413
+Noordstraat,residential,30,False,True,113.73,"[153, 1107, 171]",92,30.0,0.004,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493640
+Sirtemastraat,residential,30,False,True,195.0,"[2624, 2305, 66, 2307, 1786, 1632, 139, 109, 1776, 81, 1109, 56, 1114, 2620, 2622]",72,30.0,0.012,-9999.0,0.0,1.0,11695230683.0,45141033.0,11695230683_45141033,nan,nan,nan,nan,nan,nan,nan,nan,7493413
+Slijkeinde,residential,30,True,False,176.565,"[154, 166, 1583]",88,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477550
+Veenkade,residential,30,True,False,55.0,156,81,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Helmersstraat,residential,30,True,False,281.763,"[1818, 227, 1940]",130,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493657
+Vleerstraat,residential,30,False,True,60.008,165,86,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477515
+Conradkade,residential,30,True,False,72.093,"[1839, 148, 149, 1497, 1498, 1787]",79,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493614
+Marnixstraat,residential,30,True,False,28.0,"[155, 1500, 173, 1499]",95,30.0,0.004,-9999.0,0.0,1.0,45142500.0,11695230684.0,45142500_11695230684,nan,nan,nan,nan,nan,nan,nan,nan,7493575
+Da Costastraat,residential,30,True,False,283.35200000000003,"[2625, 2626, 2627, 1939, 1816, 1817, 157]",82,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493674
+Veenkade,residential,30,True,False,59.441,168,89,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Conradkade,residential,30,True,False,4.98,162,83,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493652
+Newtonstraat,residential,30,False,True,10.748,"[1456, 1458]",562,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,144094847
+Chasséstraat,residential,30,True,False,123.618,"[178, 187]",103,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493647
+Bakkersstraat,residential,30,True,False,178.482,"[1137, 164, 182]",85,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477623
+Breedstraat,residential,30,True,False,115.583,167,87,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477624
+Geest,residential,30,True,False,69.11699999999999,"[176, 179]",97,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477587
+Veenkade,residential,30,True,False,123.008,768,430,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Noordwal,residential,30,True,False,265.894,"[170, 2282, 181]",91,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493631
+De Perponcherstraat,residential,30,False,True,54.178,186,101,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493585
+Marnixstraat,residential,30,True,False,64.563,"[190, 2663]",105,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493575
+Marnixstraat,residential,30,True,False,83.0,"[155, 1500, 173, 1499]",95,30.0,0.004,-9999.0,0.0,0.0,11695230684.0,45145535.0,11695230684_45145535,nan,nan,nan,nan,nan,nan,nan,nan,7493575
+Pieter van den Zandestraat,residential,30,False,False,100.65299999999999,"[160, 1125, 158]",522,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477317
+Geest,residential,30,False,True,76.601,"[1026, 1127, 1362, 2457, 2079]",635,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521655
+Nobelstraat,residential,30,True,False,46.81,185,99,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477596
+Nobelstraat,residential,30,True,False,53.538,"[2597, 1543, 1544, 1100, 1101, 183, 184]",100,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477567
+Kleine Nobelstraat,residential,30,True,False,54.841,"[1356, 2078, 2455]",546,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521659
+De Perponcherstraat,residential,30,True,False,149.857,188,102,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493658
+Chasséstraat,residential,30,True,False,63.717,"[189, 2662]",104,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,176612389
+Marnixstraat,residential,30,True,False,65.084,"[200, 199]",110,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7493624, 7493575]"
+"['Prinsestraat', 'Kerkplein']",residential,30,True,False,186.092,"[2112, 2113, 194, 2115, 2116, 2114, 1640, 2665, 1353, 177, 1146, 2111]",106,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477673, 694317354, 694317355]"
+Nobelstraat,residential,30,False,True,66.342,"[1144, 1022]",524,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,4.6,nan,nan,nan,nan,nan,7477696
+Prinsestraat,residential,30,True,False,97.286,"[219, 1220]",123,30.0,0.003,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,810257037
+Van Swietenstraat,residential,30,True,False,175.743,"[1530, 1531, 197]",108,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493679
+Chasséstraat,residential,30,True,False,67.243,"[208, 2185, 198, 1833]",109,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[211377394, 176612389]"
+Koningin Emmakade,secondary,50,True,False,24.933,"[201, 951]",111,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,459328811
+Koningin Emmakade,secondary,50,True,False,32.66,1512,568,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,459328811
+Breedstraat,residential,30,True,False,72.707,203,112,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477624
+Snoekstraat,residential,30,True,False,58.474,211,115,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521672
+Veenkade,residential,30,True,False,78.47,206,113,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Westerbaenstraat,residential,30,True,False,156.283,207,114,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493641
+Veenkade,residential,30,True,False,83.745,"[2646, 230]",132,30.0,0.003,0.20294901728630066,0.009637291504586695,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+Kalkoenstraat,residential,30,False,True,32.664,"[1556, 221]",125,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477604
+Snoekstraat,residential,30,True,False,49.47,"[1136, 1370, 2077, 2469]",550,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521672
+Buitenhof,residential,50,False,True,13.922,"[2177, 1963, 2175]",599,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,743633617
+Buitenhof,residential,50,True,False,46.769,"[2642, 756, 761, 757, 1369, 731]",426,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,653973431
+Elandstraat,tertiary,50,False,True,57.106,229,129,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,130801720
+Elandstraat,tertiary,50,False,False,45.157,"[1821, 2355, 2341]",665,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,130801720
+Juffrouw Idastraat,residential,30,False,False,58.184,1145,525,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,916902025
+Prinsestraat,residential,30,True,False,48.191,232,134,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,810257037
+Kalkoenstraat,residential,30,True,False,39.333,222,124,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521656
+Witte de Withstraat,residential,nan,True,False,66.364,"[2818, 223]",126,36.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521687
+Roggeveenstraat,residential,30,True,False,222.403,"[283, 2213]",168,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493696
+Witte de Withstraat,residential,nan,True,False,59.075,"[209, 941]",498,36.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7493659, 211521687]"
+Noordwal,residential,30,True,False,57.388,224,127,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493631
+Koningsplein,residential,30,True,False,60.373999999999995,"[1528, 1529, 226, 235]",128,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493382
+Koningsplein,residential,30,True,False,16.717,1527,571,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493382
+Elandstraat,tertiary,50,False,True,60.106,"[241, 2330, 2735]",140,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,130801720
+Elandplein,residential,30,True,False,38.775000000000006,"[236, 2333]",135,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493673
+Veenkade,residential,30,True,False,127.85900000000001,"[682, 970, 2467, 1386]",503,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493615
+1e De Riemerstraat,residential,30,True,False,149.763,"[2050, 262, 2479, 1399, 1560, 1561]",627,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521693
+Korte Molenstraat,residential,30,False,False,55.252,1774,593,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,379109273
+Prinsestraat,residential,30,True,False,53.003,"[245, 2615]",142,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,3.4,nan,nan,nan,nan,nan,1163938315
+Van Diemenstraat,residential,30,True,False,219.487,"[736, 237, 735]",136,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493709
+Witte de Withstraat,residential,30,True,False,61.866,"[2332, 255]",151,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1215131333
+Noordwal,residential,30,True,False,46.456,"[1157, 1158, 2470, 238, 2557]",137,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[211521663, 7493631]"
+Elandstraat,tertiary,50,False,True,66.376,973,506,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,130801720
+Elandplein,residential,30,True,False,41.462999999999994,"[1633, 1634, 2331, 239]",139,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493724
+Pieterstraat,residential,50,True,False,84.69,"[2612, 244, 2613, 2614]",141,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477606
+Prinsestraat,residential,30,True,False,60.510999999999996,"[976, 2487]",694,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477665
+Koningsplein,residential,30,True,False,12.199,"[1532, 1533, 246]",143,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493382
+Plaats,residential,50,False,True,12.706999999999999,"[249, 1383, 1385]",146,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477414
+Buitenhof,residential,50,True,False,76.32400000000001,"[1376, 1381, 233, 2162, 248, 1023]",145,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,44747522
+Buitenhof,residential,50,True,False,33.546,"[696, 691]",415,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,44747522
+Buitenhof,residential,50,True,False,33.754,"[256, 250, 259]",147,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,55625193
+Buitenhof,residential,50,True,False,75.804,"[234, 758]",423,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,55625193
+Koningsplein,residential,30,True,False,25.22,"[251, 252]",148,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,224013223
+Koningsplein,residential,30,True,False,19.546,"[253, 1534, 1535]",149,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,224013223
+Van Swietenstraat,residential,30,True,False,28.755000000000003,"[1536, 1537, 267]",572,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493712
+Weimarstraat,residential,30,True,False,69.23,"[930, 2580, 271]",492,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7493778, 375396301]"
+Witte de Withstraat,residential,30,True,False,61.190999999999995,"[2569, 254]",150,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493695
+Tasmanstraat,residential,30,True,False,217.87099999999998,"[737, 738, 739, 740, 309]",186,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493715
+Tivolistraat,residential,30,False,False,24.359,1559,574,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521677
+Westerbaenstraat,residential,30,False,True,57.766000000000005,"[261, 2478, 1402, 2042, 1563, 1565]",624,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521685
+Buitenhof,tertiary,50,True,False,13.716,"[263, 2122, 2124, 1393, 692]",154,50.0,0.0,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,44747521
+Lange Vijverberg,tertiary,50,True,False,14.75,"[690, 1387, 1388, 2123]",414,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7476028
+Lange Vijverberg,tertiary,50,True,False,98.0,"[1892, 264, 1389, 2128, 2129, 2130, 2131, 2132, 2133, 278, 2135, 2136, 2137, 2138, 2139, 2134, 1149, 286]",155,50.0,0.006,-9999.0,0.0,,45155959.0,11695230688.0,45155959_11695230688,1,nan,nan,nan,nan,nan,nan,nan,"[1359070465, 694353013]"
+Kneuterdijk,tertiary,50,True,False,77.42699999999999,"[1024, 2690, 265, 2121, 1036, 1394, 694]",156,50.0,0.002,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[129481547, 444310718]"
+Lange Vijverberg,tertiary,50,True,False,14.991,"[266, 2125, 1390, 1391, 1392]",157,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1359070466
+Lange Vijverberg,tertiary,50,True,False,281.026,"[1408, 1413, 305, 693, 2126, 1628, 1889, 1893, 1894, 1895, 1896, 1897, 2154, 1395, 1396, 1403, 1405, 1150, 1407]",646,50.0,0.006,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,203242523
+Witte de Withstraat,residential,30,True,False,61.737,"[2568, 268]",158,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493695
+Van Brakelstraat,residential,30,True,False,213.66800000000003,"[320, 1280, 741, 2791]",194,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493720
+Veenkade,residential,30,False,True,27.797,"[1744, 273, 1747, 2496]",162,30.0,0.001,0.3904990255832672,0.31400723598023533,0.0,,,nan,2,yes,nan,nan,nan,nan,nan,nan,"[7477706, 315380300, 315380301]"
+Veenkade,residential,30,False,True,9.183,"[2576, 1249, 2491, 2493]",537,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477758
+Toussaintkade,residential,30,True,False,239.0,"[2528, 2497, 2825, 1203, 348, 2494]",218,30.0,0.01,0.22834903001785278,0.015028096442476768,0.0,45156145.0,11695230687.0,45156145_11695230687,nan,nan,nan,nan,nan,nan,nan,nan,"[1161106458, 7477451]"
+Hemsterhuisstraat,residential,"['30', '50']",False,False,45.555,"[1573, 2475, 1164, 1168, 2359, 1566]",527,40.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[37744081, 1160226660]"
+Hemsterhuisstraat,residential,30,True,False,221.42299999999997,"[2816, 769, 2817, 1, 5, 242]",431,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493677
+Prinsessewal,residential,50,False,True,292.42,"[353, 2172, 2706, 1206, 2167, 2652, 2654]",221,50.0,0.006,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[738635336, 7477753]"
+Prinsessewal,residential,50,False,False,28.842,"[2488, 777, 2484, 2486]",695,50.0,0.001,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[1125919226, 1125919227, 1316850948, 1316850949]"
+Van Kinsbergenstraat,residential,30,True,False,214.028,279,165,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493520
+Witte de Withstraat,residential,30,True,False,66.268,"[280, 1406]",166,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493695
+Kneuterdijk,tertiary,50,True,False,48.569,"[282, 1030, 1038]",167,50.0,0.001,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[335337587, 444310718]"
+Hoge Nieuwstraat,residential,50,True,False,312.73199999999997,"[2595, 323, 301, 303, 315]",196,50.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,5,nan,nan,nan,nan,nan,7477409
+Prins Hendrikstraat,residential,30,False,True,65.552,"[2215, 295]",176,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493697
+Prins Hendrikstraat,residential,30,False,False,74.60400000000001,"[2211, 943, 2578, 277, 953]",499,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7493697, 7493690]"
+Roggeveenstraat,residential,30,True,False,108.899,312,188,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493728
+Zoutmanstraat,residential,50,False,True,171.049,334,206,50.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1174008419
+Zoutmanstraat,residential,50,True,False,45.159,"[2736, 2033, 2034, 2035, 287]",172,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[694309489, 1174006905]"
+Vondelstraat,residential,50,False,False,7.187,1200,532,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1030143771
+Elandstraat,residential,50,True,False,45.150000000000006,"[289, 2538, 1174]",174,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493717
+Elandstraat,residential,50,True,False,167.2,"[321, 2362, 310, 2703]",195,50.0,0.003,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[1030143769, 7493717]"
+Prins Hendrikstraat,residential,30,False,True,63.146,"[2217, 308]",185,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493697
+Van Diemenstraat,residential,30,True,False,116.61099999999999,"[2218, 326]",200,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493517
+Heulstraat,residential,30,False,True,41.459,1969,602,30.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,37746418
+Kneuterdijk,tertiary,50,True,False,134.98299999999998,"[2689, 1029, 297, 1035, 2732, 1037, 687, 688, 1968, 695]",178,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[72518905, 335337590]"
+Kneuterdijk,residential,50,False,False,16.333,"[1409, 1411, 300]",181,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,72518908
+Kneuterdijk,tertiary,50,True,False,72.268,"[704, 706, 1028, 1995, 1901, 1902, 1903, 1616, 1904, 982, 983]",606,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,228413676
+Kneuterdijk,tertiary,50,True,False,54.424,"[705, 1027, 1031, 1032, 1898, 299, 981]",180,50.0,0.001,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,72518906
+Van Galenstraat,residential,30,True,False,208.821,302,182,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493501
+Tasmanstraat,residential,30,True,False,123.179,"[2792, 306]",183,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493504
+Prins Hendrikstraat,residential,30,False,True,63.918,"[2590, 319]",193,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493697
+Van Speijkstraat,residential,30,True,False,55.538,311,187,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493727
+Van Speijkstraat,residential,30,True,False,66.314,327,198,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493727
+Heemskerckstraat,residential,30,True,False,116.0,"[313, 2645]",189,30.0,0.007,-9999.0,0.0,0.0,45161770.0,11695230686.0,45161770_11695230686,nan,nan,nan,nan,nan,nan,nan,nan,7493508
+Lange Voorhout,residential,30,True,False,288.396,"[1920, 1923, 1925, 1928, 1930, 316, 322, 2762, 2763, 2764, 2765, 2766, 1617, 339, 1888, 354, 2787, 2788, 355, 2283]",190,30.0,0.01,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476180
+Lange Voorhout,residential,30,True,False,336.04999999999995,"[1921, 1922, 1924, 1927, 1929, 2761, 2767, 2768, 2769, 2770, 374, 317]",191,30.0,0.011,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7476273, 7477447]"
+Lange Voorhout,residential,30,True,False,70.828,"[1033, 1034, 701, 1615]",418,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1159455957, 689007389]"
+Prins Hendrikstraat,residential,30,False,True,59.540000000000006,"[330, 2586]",203,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493697
+Barentszstraat,residential,30,True,False,205.903,390,245,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493511
+Elandstraat,residential,50,True,False,52.825,331,204,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030143769
+Tollensstraat,residential,30,True,False,174.18699999999998,"[291, 2055, 1578, 1579, 2826, 1230, 2480, 1201, 1400]",631,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,694312289
+Lange Voorhout,residential,50,False,True,21.451999999999998,"[2144, 698, 2140]",648,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[193081596, 689007388]"
+Van Diemenstraat,residential,30,False,True,91.94399999999999,"[764, 350]",428,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493482
+Van Speijkstraat,residential,30,True,False,62.482,343,213,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493727
+Prins Hendrikstraat,residential,30,False,True,34.51,340,211,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493697
+Van Kinsbergenstraat,residential,30,True,False,129.477,"[328, 1858]",202,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493505
+Elandstraat,residential,50,True,False,86.38499999999999,"[2577, 347]",217,50.0,0.002,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1147998990
+Bilderdijkstraat,residential,30,True,False,218.136,"[1576, 1577, 2058, 2482, 1202, 1398, 281]",633,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521654
+Lange Voorhout,residential,30,True,False,81.786,"[1728, 1993, 332, 1614]",205,30.0,0.003,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[683964132, 55625197]"
+Lange Voorhout,residential,30,True,False,10.762,"[337, 709]",209,30.0,0.0,-9999.0,0.0,,,,nan,nan,nan,nan,nan,driveway,nan,nan,nan,7477460
+Lange Voorhout,residential,30,True,False,47.022,708,419,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,55625197
+Prins Hendrikplein,residential,50,True,False,65.456,"[1184, 1186, 2313, 2314, 2315, 333, 2322, 2326, 1180, 1181, 1182]",207,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,circular,nan,nan,139606617
+Prins Hendrikplein,residential,50,True,False,65.265,"[2316, 2317, 2320, 1588, 341, 1175, 1176, 1177, 1178, 1179]",212,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,circular,nan,nan,139606617
+Jacob van der Doesstraat,residential,30,True,False,260.898,"[2592, 335, 411, 380, 2591]",208,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493507
+Kleine Kazernestraat,residential,30,False,False,86.393,"[1248, 2793, 367]",230,30.0,0.003,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[228457616, 7477443]"
+Prins Hendrikplein,residential,50,True,False,63.276,"[1185, 1187, 1188, 1189, 2030, 2319, 2321, 2324, 1183]",621,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,circular,nan,nan,139606617
+Tasmanstraat,residential,30,False,True,88.365,"[2722, 675, 2790, 2439, 369]",410,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211778321
+Van Speijkstraat,residential,30,True,False,125.374,375,233,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211529614
+Oranjestraat,residential,30,True,False,88.785,364,226,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477662
+Noordeinde,residential,30,True,False,191.874,"[393, 1211]",535,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,335613655
+Piet Heinstraat,residential,50,False,False,6.103,1204,533,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1030143776
+Piet Heinplein,residential,50,True,False,33.669,"[352, 2372, 1239, 2648, 1213]",220,50.0,0.001,0.3904990255832672,0.1605285888744747,1.0,,,nan,1,yes,nan,nan,nan,nan,nan,nan,"[7477450, 144189795, 144189796]"
+Toussaintkade,residential,30,True,False,49.0,"[2528, 2497, 2825, 1203, 348, 2494]",218,30.0,0.01,0.17247900366783142,0.02360903740844722,1.0,11695230687.0,45165088.0,11695230687_45165088,nan,nan,nan,nan,nan,nan,nan,nan,"[1161106458, 7477451]"
+Trompstraat,residential,30,True,False,212.73499999999999,"[427, 396, 2573, 370, 2683, 2684, 2685, 2686]",266,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493488
+Hogewal,residential,50,False,True,199.863,"[1216, 2656, 1209, 2374, 2157, 2708, 2389, 985, 2650, 1215]",674,50.0,0.004,-9999.0,0.0,2.0,,,nan,"['2', '3']",nan,nan,nan,nan,nan,nan,nan,"[1030148546, 142052076, 7476973]"
+Anna Paulownastraat,residential,50,True,False,37.763000000000005,"[2373, 2704, 371, 1207, 1240, 1241]",231,50.0,0.001,0.3904990255832672,0.211131084554354,0.0,,,nan,1,yes,nan,nan,nan,nan,nan,nan,"[144189793, 144189794, 7477445]"
+Prins Hendrikstraat,residential,30,False,True,31.052,362,224,30.0,0.001,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493500
+Prins Hendrikplein,residential,50,True,False,66.592,"[1190, 359, 1192, 1193, 1194, 1191, 360, 2318, 2323, 2325]",223,50.0,0.001,-9999.0,0.0,1.0,,,nan,1,nan,nan,nan,nan,circular,nan,nan,139606617
+Prins Hendrikstraat,residential,30,False,True,60.801,"[2588, 383]",238,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493500
+Piet Heinplein,residential,50,True,False,32.885,"[2168, 2500, 372]",232,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1215583281, 7477446]"
+Amaliastraat,residential,30,True,False,175.53,"[363, 1750, 1751, 1752, 2393]",227,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476974
+Oranjestraat,residential,30,False,True,85.72800000000001,"[2008, 1433, 2548, 1749]",611,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,336008252
+Kazernestraat,residential,30,True,False,35.544,"[1730, 366]",229,30.0,0.001,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477387
+Kazernestraat,residential,30,True,False,90.97900000000001,"[2001, 356, 1630, 1729]",608,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477387
+Kortenaerkade,residential,30,True,False,92.751,"[2169, 391]",246,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477073
+Anna Paulownastraat,residential,50,True,False,204.543,"[2501, 2632, 440, 2681, 2170, 412]",274,50.0,0.004,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[1030143773, 7477455]"
+Van Speijkstraat,residential,30,True,False,74.977,"[2657, 1434, 2027, 2638]",618,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211529614
+Willemstraat,residential,30,True,False,284.80600000000004,"[2284, 2285, 2286, 1714, 376, 2813, 1727]",234,30.0,0.009,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476976
+Kazernestraat,residential,30,True,False,151.59999999999997,"[1724, 1731, 394, 377, 1148, 1725, 1726]",235,30.0,0.005,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,building_passage,nan,"[314271235, 7477387, 314271236]"
+Lange Voorhout,residential,30,True,False,24.288999999999998,"[2776, 381, 1197]",236,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,70877561
+Prins Hendrikstraat,residential,30,False,True,61.408,389,244,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493500
+Heemskerckstraat,residential,30,True,False,89.0,"[313, 2645]",189,30.0,0.007,-9999.0,0.0,1.0,11695230686.0,45168110.0,11695230686_45168110,nan,nan,nan,nan,nan,nan,nan,nan,7493508
+Lange Voorhout,residential,30,False,True,64.872,"[403, 2772, 2774, 2778, 413]",254,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476645
+Lange Voorhout,residential,30,False,True,53.695,"[1932, 2786, 388, 2782]",243,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477061
+Lange Voorhout,residential,30,True,False,198.807,"[386, 1926, 2775]",241,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,55625197
+Lange Voorhout,residential,30,True,False,168.284,"[2784, 387, 707, 357, 373]",242,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476980
+Lange Voorhout,residential,30,True,False,85.081,"[395, 2783, 410, 2779, 2780, 415]",256,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1037217532, 589966126]"
+De Ruijterstraat,residential,30,True,False,219.898,"[2593, 417, 2630, 392, 2682]",247,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477095
+Kortenaerkade,residential,30,True,False,58.077,"[400, 2574]",248,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477073
+Kortenaerkade,residential,30,True,False,77.331,"[2594, 419, 1789]",259,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477073
+Bazarlaan,residential,30,True,False,100.952,"[1635, 2419, 1636, 431]",682,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,building_passage,nan,"[1035347665, 267577292, 267577294]"
+Kazernestraat,residential,30,True,False,107.128,"[401, 1723, 772]",249,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,314271236
+Nieuwe Schoolstraat,residential,30,True,False,318.7420000000001,"[512, 1947, 1948, 1949, 1950, 1951, 1952, 1953, 1954, 1955, 1956, 1957, 1958, 1959, 1960, 1708, 432, 1716, 1717, 1718, 1719, 1720, 1721, 1722, 445]",323,30.0,0.011,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477104
+1e Sweelinckstraat,residential,30,False,False,73.378,"[2227, 2229, 406, 1294]",252,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,190391008
+Tasmanstraat,residential,50,False,False,112.05399999999999,"[1859, 2725, 2440, 397, 2225, 1876, 1429, 378]",559,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493506
+1e Sweelinckstraat,residential,30,False,False,90.40599999999999,"[408, 2220, 429]",267,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211773828
+Vos in tuinstraat,residential,30,False,True,56.741,"[421, 774, 434, 1622, 1624]",270,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476835
+Van de Spiegelstraat,residential,30,False,True,48.628,438,272,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493837
+Hugo de Grootstraat,residential,30,True,False,26.03,426,264,30.0,0.001,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493842
+Zeestraat,residential,50,True,False,183.079,"[656, 418, 1790, 1791]",258,50.0,0.004,-9999.0,0.0,2.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477054, 7477207]"
+Zeestraat,residential,50,True,False,25.008000000000003,"[2380, 1221, 1788]",670,50.0,0.001,0.3611990213394165,0.26326275474408667,2.0,,,nan,nan,yes,nan,nan,nan,nan,nan,nan,"[144189608, 371944946, 1030148547]"
+Zoutmanstraat,residential,50,False,False,10.419,2021,614,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694307743
+Laan van Meerdervoort,tertiary,50,True,False,198.60299999999998,"[2724, 422, 2442, 2452, 1436, 2527]",261,50.0,0.004,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,203267992
+"['Carnegielaan', 'Laan van Meerdervoort']",tertiary,50,True,False,105.04299999999999,"[2179, 2181, 2119, 1672, 1676, 462, 1302, 1592, 2717]",653,50.0,0.002,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[7493922, 204970501, 694347598]"
+Scheveningseveer,residential,50,False,False,66.332,"[1218, 1966, 1753, 988, 990]",600,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477249
+Mauritskade,residential,50,False,True,89.18900000000001,"[1440, 1795, 451, 1223, 2392]",280,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477257
+Hugo de Grootstraat,residential,30,True,False,94.50300000000001,"[1283, 446]",279,30.0,0.003,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493842
+Trompstraat,residential,30,True,False,46.379,428,265,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1178525961
+Bazarstraat,residential,30,True,False,53.783,"[2633, 443]",276,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493838
+1e Sweelinckstraat,residential,30,False,False,104.983,"[2223, 1872, 471, 1593, 1595, 1598]",578,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211773828
+Van Blankenburgstraat,residential,30,True,False,168.308,"[2219, 2222]",655,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493840
+Maliestraat,residential,30,True,False,34.037,433,269,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476650
+Denneweg,residential,30,False,False,36.232,"[456, 775]",285,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1383073536
+Van Speijkstraat,residential,30,True,False,243.23499999999999,"[399, 2640, 2639, 437, 1435]",273,30.0,0.008,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493494
+Van de Spiegelstraat,residential,30,True,False,105.72,"[2641, 463, 483, 2679]",301,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493831
+Anna Paulownaplein,residential,50,False,True,29.755,"[450, 1285, 1288, 460, 2636]",288,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493843
+Anna Paulownaplein,residential,30,True,False,26.028,"[1281, 1282, 2165, 439, 444]",277,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493839
+Anna Paulownastraat,residential,50,True,False,26.362,464,290,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7477455
+Anna Paulownaplein,residential,30,True,False,28.165,"[448, 1289, 466, 1286]",292,30.0,0.001,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,33380031
+Trompstraat,residential,30,True,False,141.819,447,278,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1178525961
+Mauritskade,tertiary,50,False,True,120.73499999999999,"[480, 1442, 1733, 1798, 1224]",298,50.0,0.002,-9999.0,0.0,0.0,,,nan,"['2', '3']",nan,nan,nan,nan,nan,nan,nan,"[1030187714, 7477258]"
+"['Plein 1813', 'Alexanderstraat']",residential,50,True,False,196.71399999999997,"[2752, 1793, 1058, 2756, 453, 2757, 2760, 1002, 2416, 2709, 1238, 2810, 2811, 1981, 2398, 1983]",282,50.0,0.004,0.3895590305328369,0.08423941988886918,0.0,,,nan,"['1', '2']",yes,nan,nan,nan,nan,nan,nan,"[144189510, 137518760, 372255626, 683961613, 1349081726]"
+Parkstraat,tertiary,50,False,True,175.176,"[2016, 1986, 2667, 2009, 2012, 2014]",612,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,683964129
+"['Plein 1813', 'Alexanderstraat']",residential,50,True,False,197.3,"[1792, 1796, 654, 2710, 1057, 1984, 2753, 2754, 2755, 2758, 2759, 1237, 2399, 1001, 2417, 503, 2808, 2809, 2812]",318,50.0,0.004,0.3904990255832672,0.039379959940991506,0.0,,,nan,"['1', '2']",yes,nan,nan,nan,nan,nan,nan,"[144189508, 372255625, 683961612, 137518746, 1349081725]"
+"['Hooistraat', 'Hooikade']",residential,30,True,False,113.845,"[1738, 470, 455]",284,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477186, 7476647]"
+Denneweg,residential,30,True,False,73.015,"[481, 961, 469]",300,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477007
+Carnegielaan,tertiary,50,True,False,66.977,"[1673, 458, 1910, 2118]",286,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493951
+Laan van Meerdervoort,tertiary,50,True,False,149.439,"[1907, 459, 1917]",287,50.0,0.003,0.14018751680850983,0.609718773159082,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[48093609, 7493940]"
+Laan van Meerdervoort,tertiary,50,True,False,103.12100000000001,"[2020, 1671, 1675, 1933, 1591, 2718]",615,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,33083237
+Carnegielaan,tertiary,50,True,False,28.131,"[457, 2180, 2182, 2183]",654,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,655266914
+Anna Paulownaplein,residential,50,False,True,24.652,"[465, 1291, 468, 1293]",291,50.0,0.0,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493847
+Bazarstraat,residential,30,True,False,56.617000000000004,"[2629, 2437, 478]",296,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477208
+Anna Paulownastraat,residential,50,True,False,164.835,"[504, 1305, 2634, 2631]",320,50.0,0.003,0.12092189490795135,0.028560327975709232,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7477455
+Louis Couperusplein,residential,30,True,False,218.391,"[2433, 2434, 1890, 2436, 1891, 2435, 1736, 1710, 1711, 442, 1625, 474, 436, 1626, 473, 1946, 475]",293,30.0,0.007,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477064
+Louis Couperusplein,residential,30,False,True,38.518,"[1800, 1713, 493, 1735]",310,30.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477219
+De Ruijterstraat,residential,30,True,False,167.563,"[489, 477]",295,30.0,0.006,0.06720571219921112,0.00010248013331460685,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477095
+Bazarstraat,residential,30,True,False,48.853,"[2628, 487]",306,30.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477208
+Mauritskade,tertiary,50,False,True,46.411,2404,678,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1030187714
+Spekstraat,residential,30,True,False,56.914,482,299,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477222
+Denneweg,residential,30,True,False,166.63500000000002,"[1802, 1709, 2287, 495, 529, 1715, 1879]",331,30.0,0.006,0.14259374141693115,0.28772410013553446,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477007
+Laan van Meerdervoort,tertiary,50,True,False,135.458,"[2680, 2716, 484]",302,50.0,0.003,0.16004683077335358,0.7520694709197779,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7493940
+Carnegielaan,tertiary,50,True,False,31.893,"[1913, 716, 485, 1668]",303,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493941
+Carnegielaan,tertiary,50,True,False,20.237000000000002,"[2184, 715, 486]",304,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493950
+Bazarlaan,residential,30,False,True,49.991,2420,683,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1035347666
+Bazarstraat,residential,30,True,False,77.836,497,313,30.0,0.003,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477208
+Sophialaan,residential,30,False,True,112.71600000000001,"[1083, 500]",315,30.0,0.004,-9999.0,0.0,3.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477136
+Zeestraat,residential,50,True,False,40.941,"[491, 655]",308,50.0,0.001,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[335613661, 7477207]"
+Louis Couperusplein,residential,50,False,True,5.141,2396,676,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477163
+Mauritskade,tertiary,50,True,False,27.537,"[2408, 1737, 494, 2407]",311,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030187708
+Mauritskade,tertiary,50,True,False,28.487000000000002,"[2402, 2403, 2409, 1801, 1627]",679,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,142052095
+Laan van Meerdervoort,tertiary,50,True,False,73.494,"[496, 1304, 1306]",312,50.0,0.001,0.12092189490795135,0.7285025812690976,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7493940
+Zeestraat,residential,"['30', '50']",True,False,157.592,"[2609, 498, 1060, 510]",314,40.0,0.004,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[7477172, 311137051, 958474772]"
+Plein 1813,residential,30,True,False,68.724,"[649, 1039, 1040, 1041, 499, 501, 2807]",316,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1346438028
+Plein 1813,residential,30,True,False,63.291000000000004,"[648, 1043, 1046, 535, 1052, 1053, 511]",336,30.0,0.002,-9999.0,0.0,3.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1346438029
+Plein 1813,residential,50,True,False,37.459,"[1042, 1971, 2804, 502, 1080, 1048, 1978]",317,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477147
+Plein 1813,residential,50,True,False,57.24,"[665, 1047, 1045, 534, 663, 664, 1049, 666, 1044, 1982]",335,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,137518746
+Laan van Meerdervoort,tertiary,50,True,False,63.504,505,319,50.0,0.001,0.22312502562999725,0.6626395634246891,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,654018984
+Anna Paulownastraat,tertiary,50,True,False,44.47,"[522, 1307, 1918, 1303]",326,50.0,0.001,0.13073931634426117,1.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7493935
+Plein 1813,residential,50,True,False,55.214,"[992, 680, 681, 1003, 651, 526, 662, 506]",321,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,137518760
+Plein 1813,residential,"['30', '50']",True,False,64.678,"[650, 524, 507, 1050, 1051, 1054]",322,40.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1346438027, 683961614]"
+Mauritskade,tertiary,50,False,True,77.998,"[532, 1804, 1806]",334,50.0,0.002,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477246
+Mauritskade,tertiary,50,False,False,94.038,"[1619, 2405]",680,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477246
+Anna Paulownastraat,residential,50,True,False,85.756,"[568, 2795, 2733]",354,50.0,0.002,0.023718755692243576,0.12044581798468895,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493944
+Carnegieplein,tertiary,50,True,False,239.62800000000004,"[2525, 993, 732, 997, 998, 733, 585, 555, 2796, 1681, 2196, 1655, 794, 2715, 572, 2173, 2526]",438,50.0,0.005,0.023718755692243576,0.009967918080237143,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[137537732, 129481477]"
+Laan van Meerdervoort,tertiary,50,True,False,115.11099999999999,"[1059, 523, 2797, 533, 1916, 1086]",327,50.0,0.002,0.16333775222301483,0.17016741050187026,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[654018984, 137474767]"
+Hooigracht,residential,30,True,False,33.132,"[1741, 525]",328,30.0,0.001,0.007733398582786322,0.13446404406526827,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476747
+Cantaloupenburg,residential,30,True,False,113.991,"[1704, 1705, 527]",329,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477032
+Prinses Mariestraat,residential,30,True,False,95.33599999999998,"[528, 1707]",330,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477171
+"['Schelpkade', 'Prinses Mariestraat']",residential,30,True,False,156.644,"[2643, 517, 559]",349,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477171, 336008255]"
+Frederikstraat,residential,"['30', '50']",True,False,48.078,"[1703, 1226, 530, 1811, 1235, 1236, 1878]",332,40.0,0.001,0.2716831862926483,0.08831486212982852,1.0,,,nan,nan,yes,nan,nan,nan,nan,nan,nan,"[144189018, 144189019, 335613646, 7477031]"
+Mauritskade,tertiary,50,False,True,46.923,"[1808, 1810, 542]",340,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477233
+Plein 1813,residential,50,True,False,40.529,"[653, 2802, 1081, 1977, 1980, 2302]",405,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1346438026
+"['Plein 1813', 'Alexanderstraat']",residential,50,True,False,42.783,"[1976, 539, 2411, 1005]",511,50.0,0.001,-9999.0,0.0,3.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[683961610, 137518746]"
+Laan van Roos en Doorn,residential,30,False,False,52.148,"[1227, 551]",345,30.0,0.002,0.06692188233137131,0.4966761449503821,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477168
+Sophialaan,residential,30,False,True,122.52300000000001,"[2669, 2159, 563, 2806, 1085]",351,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477164
+Plein 1813,residential,"['30', '50']",True,False,65.94,"[1056, 546, 547, 2803, 661, 541, 1055]",339,40.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477149, 683961615]"
+Doctor Kuyperstraat,tertiary,50,False,True,56.202000000000005,"[553, 1234, 2299, 1231]",347,50.0,0.001,0.4890131950378418,0.17439126471222857,0.0,,,nan,2,yes,nan,nan,nan,nan,nan,nan,"[144189000, 129481485, 7477247]"
+Hooikade,residential,30,True,False,166.92600000000002,"[1739, 1740]",589,30.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477186
+Javastraat,tertiary,50,True,False,85.134,"[2289, 995, 548, 557]",342,50.0,0.002,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[129481537, 138016164]"
+Scheveningseweg,residential,50,True,False,24.508000000000003,"[549, 1087]",343,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[444309857, 129481626]"
+Frederikstraat,residential,30,True,False,191.75900000000001,"[550, 1706, 560, 2295, 575]",344,30.0,0.006,0.09126561880111694,0.32098553530669327,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[335613648, 144189019]"
+Doctor Kuyperstraat,tertiary,50,False,True,53.22,"[2297, 2301, 1743]",661,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,129481485
+Schelpstraat,residential,30,True,False,43.456,558,348,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477033
+Schelpkade,residential,30,True,False,88.163,"[2570, 588, 2644]",364,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,336008255
+Nassaulaan,residential,"['30', '50']",False,True,181.38,"[1317, 1319, 2572, 1071, 659, 1687, 1883]",581,40.0,0.005,0.5106079578399658,0.09449186943791402,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[7477161, 336008251, 522783694, 137475551]"
+Nassaulaan,residential,30,False,False,155.604,"[1870, 658, 638]",401,30.0,0.005,0.023325202986598015,0.05188612358344207,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[8032826, 137530227]"
+Burgemeester van Karnebeeklaan,residential,50,False,True,193.37399999999997,"[1089, 642, 1765, 581, 1767, 1447, 813, 1199, 1009]",448,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493876
+Carnegieplein,tertiary,50,True,False,201.454,"[2275, 996, 2277, 2647, 2279, 2280, 2281, 2278, 2276, 2292, 2198, 566, 569, 2714]",355,50.0,0.004,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[837553907, 129481669, 67331254]"
+Scheveningseweg,tertiary,50,True,False,119.15299999999999,"[2288, 994, 556, 734]",510,50.0,0.002,0.11853055655956268,0.3182840135822899,1.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[48093610, 887625468]"
+Cantaloupenburg,residential,30,True,False,84.852,"[570, 763, 1662]",356,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477032
+Javastraat,tertiary,50,True,False,107.93299999999999,"[577, 2017, 1313, 1448, 1451, 573]",357,50.0,0.002,0.061796944588422775,0.17052201824724766,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[138016164, 203267967]"
+Alexanderplein,residential,50,False,True,8.206,"[1011, 1014, 2019]",515,50.0,0.0,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1118883298
+Buitenrustweg,residential,50,True,False,203.43800000000002,"[578, 645, 582, 1659, 554, 2187, 2188, 2191, 1489, 561, 1650, 1493, 1494, 1658, 571, 1660, 1661]",359,50.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493888
+Jacob Catslaan,residential,50,False,False,140.067,"[2192, 1482, 544, 1487]",564,50.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,208996174
+Jacob Catslaan,residential,50,False,True,24.0,"[1644, 597, 1646]",373,50.0,0.002,-9999.0,0.0,0.0,45188614.0,11695230682.0,45188614_11695230682,2,nan,nan,nan,nan,nan,nan,nan,208996174
+Kerkstraat,residential,30,False,True,46.0,595,370,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477129
+Schelpkade,residential,"['30', '50']",False,False,120.56800000000001,"[1075, 611, 1325]",379,40.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[7477123, 7477131, 336008254]"
+Burgemeester Marijnenlaan,residential,30,False,True,51.849,2423,685,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1037217531
+"['Alexanderveld', 'Alexanderplein']",residential,50,False,True,236.719,"[609, 1251, 605, 805, 1253, 1255, 1257, 1259, 1261, 601, 2749, 2751]",445,50.0,0.005,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[7477198, 7477047]"
+Alexanderplein,residential,50,False,False,52.925000000000004,"[1061, 1013]",514,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[1118883298, 7477198]"
+Alexanderstraat,residential,50,True,False,106.79400000000001,"[1090, 1449, 1450, 2413, 2799, 592, 2415, 1975, 2712]",368,50.0,0.002,-9999.0,0.0,1.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,129481453
+Javastraat,tertiary,50,True,False,13.779,"[593, 1453]",369,50.0,0.0,0.1839844435453415,0.9334974457685155,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[683961602, 130208757]"
+Alexanderstraat,residential,50,True,False,10.934,1016,516,50.0,0.0,0.06468753516674042,0.6358034882334305,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,130208754
+Kerkstraat,residential,30,False,True,109.57300000000001,"[2601, 606]",376,30.0,0.004,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477129
+Jacob Catslaan,residential,50,False,True,191.253,"[1664, 621]",387,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,208996174
+Rustenburgweg,residential,50,True,False,179.377,"[576, 579, 646, 754, 1651, 1492, 565, 1495, 825]",455,50.0,0.004,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493866
+Jacob Catslaan,residential,50,False,True,62.0,"[1644, 597, 1646]",373,50.0,0.002,-9999.0,0.0,1.0,11695230682.0,45190237.0,11695230682_45190237,2,nan,nan,nan,nan,nan,nan,nan,208996174
+Carnegielaan,secondary,50,False,False,125.175,"[826, 863]",456,50.0,0.003,-9999.0,0.0,1.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876519
+Carnegielaan,secondary,50,True,False,125.232,"[1600, 2337, 1602, 1603, 1604, 1605, 837, 877, 878, 882, 599, 861, 1599]",375,50.0,0.003,-9999.0,0.0,1.0,,,nan,"['1', '2']",nan,nan,S100,nan,nan,nan,nan,"[837553902, 307924253, 211773822]"
+Carnegielaan,secondary,50,True,False,35.202,"[1601, 1606, 1607, 874, 2201]",471,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,211773823
+Frederikstraat,residential,30,False,True,80.321,"[1329, 619, 1331]",385,30.0,0.003,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,931147173
+Javastraat,tertiary,50,True,False,7.341,610,378,50.0,0.0,0.09757082909345627,1.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477236
+Javastraat,tertiary,50,True,False,32.287,"[1323, 1611, 1613, 1686, 1688]",580,50.0,0.001,0.36640626192092896,0.7392368759897187,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,130208757
+Nassauplein,residential,50,True,False,65.507,"[1762, 770, 2602, 1322, 1296, 2424]",591,50.0,0.001,0.14064067602157593,0.7628552919602676,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,137474768
+Javastraat,tertiary,50,True,False,97.58800000000001,"[1856, 612, 1684, 1077, 1855, 1848, 1849, 1850, 1851, 1852, 1853, 1854, 2431]",380,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[335613650, 7477242, 137474764]"
+Nassauplein,residential,50,True,False,19.226999999999997,"[771, 613, 1685]",381,50.0,0.0,0.06916254013776779,0.8846496487499796,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1039612343
+Javastraat,tertiary,50,True,False,17.455,2425,687,50.0,0.0,0.059703048318624496,0.841629377082367,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7477236
+Surinamestraat,residential,30,False,True,39.383,"[1699, 1845]",588,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477189
+Javastraat,tertiary,50,True,False,74.676,"[617, 1326, 1327]",383,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,137474764
+Javastraat,tertiary,50,True,False,89.889,"[624, 1857, 618, 2603]",384,50.0,0.002,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,137474764
+Jacob Catslaan,residential,50,False,True,93.273,"[1096, 633, 1666, 629]",396,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,208996174
+Tolweg,residential,50,True,False,166.83399999999997,"[832, 614, 647, 873, 1610, 779, 1654, 603]",470,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493871
+Nassauplein,residential,50,True,False,65.489,622,388,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476990
+Burgemeester Marijnenlaan,residential,50,False,False,25.554000000000002,"[1761, 1298]",590,50.0,0.001,0.12048428505659103,0.33071489814631805,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477202
+Nassauplein,residential,50,True,False,52.027,"[2432, 1297]",689,50.0,0.001,0.06916254013776779,0.10710485157999598,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476990
+Balistraat,residential,50,True,False,76.443,"[1846, 1698, 1758]",586,50.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477177
+Javastraat,tertiary,50,True,False,67.0,"[1702, 625, 1333, 1334, 1880, 1759]",390,50.0,0.002,-9999.0,0.0,1.0,45196836.0,11695230685.0,45196836_11695230685,2,nan,nan,nan,nan,nan,nan,nan,335613651
+Surinamestraat,residential,50,False,True,17.029,1694,582,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477077
+Surinamestraat,residential,30,True,False,43.116,"[1760, 627, 1701]",392,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477137
+Surinamestraat,residential,30,True,False,49.971,1696,585,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477137
+Paramaribostraat,residential,30,True,False,49.817,"[1697, 1693]",584,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476989
+Ary van der Spuyweg,residential,50,False,True,21.785999999999998,"[745, 1099, 637, 1470]",400,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493874
+Scheveningseweg,tertiary,50,False,False,239.613,"[1091, 1093, 816, 1682, 1652, 2334]",452,50.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,129481624
+Scheveningseweg,tertiary,50,False,True,12.137,"[1097, 670]",520,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,129481625
+Koninginnegracht,residential,30,True,False,10.578,"[1881, 634]",397,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476789
+Javastraat,tertiary,50,True,False,37.818999999999996,"[2519, 2518, 2523, 2520, 2521, 2522, 635]",398,50.0,0.001,0.07703539729118347,0.17010846338506308,0.0,,,nan,2,yes,nan,nan,nan,nan,nan,nan,"[1150006872, 1150007702, 1150007703]"
+Koninginnegracht,residential,50,True,False,16.155,"[1332, 1229, 1847]",543,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7477191
+Javastraat,tertiary,50,True,False,40.337,"[2564, 2504, 2505, 2506, 2507, 2508, 2509]",699,50.0,0.001,0.5150454044342041,0.12852097790727998,0.0,,,nan,1,yes,nan,nan,nan,nan,nan,nan,"[1150007704, 1150007705, 1150006862]"
+Javastraat,tertiary,50,True,False,39.0,"[1702, 625, 1333, 1334, 1880, 1759]",390,50.0,0.002,-9999.0,0.0,0.0,11695230685.0,45199187.0,11695230685_45199187,2,nan,nan,nan,nan,nan,nan,nan,335613651
+Timorstraat,residential,30,False,False,155.526,"[796, 2605, 766]",440,30.0,0.005,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493859
+Burgemeester Marijnenlaan,residential,30,True,False,65.476,640,402,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1346438030
+Burgemeester Kolfschotenlaan,residential,30,False,True,84.19200000000001,"[967, 1691, 1638, 1639]",579,30.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477035
+Burgemeester Marijnenlaan,residential,30,True,False,241.928,"[964, 965, 2422, 615]",686,30.0,0.008,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477124, 7477206]"
+"['Plein 1813', 'Alexanderstraat']",residential,50,True,False,46.724000000000004,"[2312, 2410, 652, 1004, 1979]",404,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[137518760, 683961609]"
+Varkenmarkt,residential,30,True,False,5.246,672,407,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,445712328
+Tasmanstraat,residential,50,False,True,8.248,"[2038, 1430, 679]",560,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211778320
+Laan van Meerdervoort,tertiary,50,True,False,199.739,"[2723, 676, 2120, 2540, 2541, 1437, 1438]",411,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694347599
+Laan van Meerdervoort,tertiary,50,True,False,63.747,"[2728, 2443, 765]",429,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694347417
+Laan van Meerdervoort,tertiary,50,True,False,141.518,"[1874, 1196, 677, 2117]",412,50.0,0.003,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[694347417, 33082909]"
+Buitenhof,tertiary,50,True,False,13.663,689,413,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477771
+Korte Vijverberg,residential,"['30', '50']",True,False,22.342,"[304, 697, 2737, 1414]",416,40.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[335337593, 1346438034, 55625182]"
+Kneuterdijk,tertiary,50,False,True,15.689,"[1994, 702]",605,50.0,0.0,-9999.0,0.0,,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[55625188, 55625207]"
+Lange Beestenmarkt,residential,30,False,False,42.969,2163,652,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1036660145
+"['Lange Beestenmarkt', 'Prinsegracht']","['residential', 'tertiary']","['30', '50']",True,False,82.094,"[1861, 1416, 1580, 722, 1842, 1908]",421,40.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[446147163, 203251107]"
+Laan,residential,50,False,False,66.59799999999998,"[1678, 2095, 1584, 1586, 1140, 87, 1336]",641,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477522, 211521661]"
+Buitenhof,residential,50,False,True,11.399999999999999,"[760, 1378, 1380, 685]",425,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,59492819
+"['Buitenhof', 'Hofweg']",residential,50,True,False,45.078,"[730, 1962, 225, 2693]",598,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[743633616, 653973435]"
+Raamweg,primary,50,True,False,14.649999999999999,"[762, 783, 2567]",427,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,59753348
+Koningskade,primary,50,True,False,74.34400000000001,"[784, 2565, 781, 782]",432,50.0,0.001,-9999.0,0.0,0.0,,,nan,3,nan,nan,S100,nan,nan,nan,nan,59753346
+Raamweg,primary,50,True,False,8.122,2511,700,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,388217371
+Timorstraat,residential,30,False,True,5.335,797,439,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493859
+Burgemeester Patijnlaan,secondary,50,True,False,62.844,"[818, 787, 789]",434,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,308591609
+Burgemeester Patijnlaan,secondary,50,True,False,149.821,"[2273, 962, 807, 809, 875, 1454, 1680, 819, 788, 2199, 1656, 793, 2200]",660,50.0,0.003,-9999.0,0.0,0.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,"[308591609, 100872011]"
+Burgemeester van Karnebeeklaan,residential,50,False,False,7.274,812,447,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493876
+Burgemeester Patijnlaan,secondary,50,True,False,63.497,"[801, 803, 791]",436,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,311763917
+Burgemeester Patijnlaan,secondary,50,True,False,147.36599999999999,"[800, 2608, 820, 2607]",443,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,311763917
+Burgemeester Patijnlaan,secondary,50,True,False,7.341,795,437,50.0,0.0,-9999.0,0.0,1.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,837553905
+Carnegieplein,tertiary,50,True,False,10.118,817,450,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,220108343
+Burgemeester Patijnlaan,secondary,50,True,False,155.534,"[2336, 802, 808, 1867, 811, 1647, 1455, 785, 847, 2197, 792, 798]",441,50.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,"[837553904, 307920178, 308591607]"
+Alexanderveld,residential,50,False,False,8.745,804,444,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477047
+Burgemeester Patijnlaan,secondary,50,True,False,107.982,"[1864, 806, 968]",446,50.0,0.002,-9999.0,0.0,0.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,308591609
+Burgemeester Patijnlaan,secondary,50,True,False,147.053,"[1865, 810, 1866, 814, 2713]",449,50.0,0.003,-9999.0,0.0,0.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,308591609
+Carnegielaan,secondary,50,True,False,90.72800000000001,"[835, 1608, 841, 1609, 815, 858, 831]",451,50.0,0.002,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,S100,nan,nan,nan,nan,"[100876531, 837553903]"
+Carnegieplein,tertiary,50,True,False,13.791,2274,659,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,837553906
+Carnegielaan,tertiary,50,True,False,8.538,823,453,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493950
+Carnegielaan,secondary,50,True,False,17.549,"[824, 866, 1912]",454,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,100876510
+Carnegielaan,secondary,50,True,False,15.489,"[1906, 867]",466,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,100876510
+Carnegielaan,secondary,50,False,False,59.554,"[833, 890, 839]",458,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876519
+Carnegielaan,secondary,50,False,False,79.476,"[869, 845, 879, 849, 886, 892]",462,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876519
+Carnegielaan,secondary,50,True,False,2.621,842,460,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876508
+Carnegielaan,secondary,50,True,False,40.407,"[871, 881, 894, 1911, 830]",468,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876508
+Tobias Asserlaan,residential,50,False,True,313.0919999999999,"[643, 516, 1670, 519, 521, 2190, 2232, 2234, 2236, 2238, 1472, 2240, 1474, 2242, 1476, 2244, 1478, 2246, 2248, 2250, 1483, 2252, 2254, 2256, 2258, 1491, 2260, 2262, 747, 749, 751, 753, 1649, 509]",565,50.0,0.006,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[737034292, 7493895]"
+Carnegielaan,secondary,50,False,False,71.998,"[872, 856, 828, 888]",469,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,100876519
+Groot Hertoginnelaan,secondary,50,True,False,140.896,"[852, 853, 860, 2205, 2206, 2207]",464,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,100876542
+Carnegielaan,secondary,50,True,False,30.735999999999997,"[1905, 862, 822, 855]",465,50.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,100876510
+Carnegielaan,tertiary,50,True,False,43.964,"[1667, 868, 2637]",467,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,497769288
+Carnegielaan,tertiary,50,True,False,15.066,884,472,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,749292381
+Groot Hertoginnelaan,secondary,50,True,False,129.198,"[2178, 838, 1674, 843, 876, 844, 851, 2202, 1597]",577,50.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,100876542
+Groot Hertoginnelaan,secondary,50,True,False,268.902,"[2208, 865, 2209, 2210, 836, 2203, 1677, 883, 885, 821, 854, 859, 2204, 895]",473,50.0,0.005,-9999.0,0.0,0.0,,,nan,1,nan,nan,S100,nan,nan,nan,nan,308156088
+De Constant Rebecquestraat,residential,50,False,False,17.745,"[905, 1837, 919]",486,50.0,0.0,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,"[900931283, 1346487526]"
+Koningin Emmakade,secondary,50,True,False,21.051,900,477,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,459328811
+Koningin Emmakade,secondary,50,True,False,190.319,"[932, 1834, 1523, 952, 2584]",494,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,459328811
+Zamenhofstraat,residential,50,False,False,17.206,"[914, 1459, 710]",481,50.0,0.0,-9999.0,0.0,1.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,101052252
+Noord West Buitensingel,secondary,50,True,False,198.674,"[960, 903, 908, 909, 913, 2268, 1885, 927]",479,50.0,0.004,0.3904990255832672,0.15744359551961642,1.0,,,nan,"['2', '3']",yes,nan,S100,nan,nan,nan,nan,"[211367729, 101052261, 101052246]"
+Noord West Buitensingel,secondary,50,True,False,16.65,"[1887, 911]",480,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,682639881
+Noord West Buitensingel,secondary,50,True,False,103.42999999999999,"[2155, 906, 915]",482,50.0,0.002,-9999.0,0.0,0.0,,,nan,4,nan,nan,S100,nan,nan,nan,nan,"[694374633, 211367731]"
+Zamenhofstraat,residential,30,False,False,55.03,"[43, 1942, 2263, 2746, 957]",657,30.0,0.002,-9999.0,0.0,2.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[900931282, 211382068]"
+Noord West Buitensingel,secondary,50,True,False,142.297,"[920, 929, 1886, 2559]",706,50.0,0.003,-9999.0,0.0,1.0,,,nan,nan,nan,nan,S100,nan,nan,nan,nan,101052333
+Koningin Emmaplein,residential,50,False,True,16.789,"[1464, 924, 1462]",490,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493707
+Noord West Buitensingel,secondary,50,True,False,61.251999999999995,"[928, 933, 902, 912, 918]",485,50.0,0.001,0.3904990255832672,0.4693646576814024,1.0,,,nan,nan,yes,nan,S100,nan,nan,nan,nan,"[101052256, 101052333, 101052263]"
+Koningin Emmakade,secondary,50,True,False,256.456,"[901, 1830, 2698, 1262, 910, 922, 926]",488,50.0,0.005,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,459328811
+Elandstraat,tertiary,50,False,True,19.630000000000003,"[1824, 1826, 1827]",594,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7493623
+Waldeck Pyrmontkade,secondary,50,True,False,266.209,"[934, 935, 1831, 2697, 938, 939, 1263, 925]",491,50.0,0.005,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,101068504
+Weimarstraat,residential,30,False,True,18.497,"[944, 1466, 1468]",500,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7493784
+Koningin Emmakade,secondary,50,True,False,17.689999999999998,"[2581, 950]",502,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,201007838
+Waldeck Pyrmontkade,secondary,50,True,False,88.83099999999999,"[937, 1195, 940]",496,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,694347423
+Van Speijkstraat,residential,50,False,False,24.875,"[292, 2421]",684,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[1035347667, 7493708]"
+Waldeck Pyrmontkade,secondary,50,True,False,99.488,"[945, 2582]",501,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,1300717033
+Waldeck Pyrmontkade,secondary,50,True,False,9.242,942,497,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,101068504
+Waldeck Pyrmontkade,secondary,50,True,False,41.528,"[1832, 1828]",595,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,101068504
+Waldeck Pyrmontkade,secondary,50,True,False,217.96699999999998,"[2583, 2186, 1835, 1516, 1524, 1525, 1526, 949]",569,50.0,0.004,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,101068504
+Bilderdijkstraat,tertiary,50,False,True,80.909,"[2057, 2060, 2062, 2064, 2066, 2068, 2070]",634,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312290
+"['Bilderdijkstraat', 'Torenstraat', 'Bibliotheekbrug']",tertiary,50,False,True,29.707,"[2466, 2474, 2463]",691,50.0,0.001,0.3843190371990204,0.2802692526403143,0.0,,,nan,2,yes,nan,nan,nan,nan,nan,nan,"[1084015753, 1084015763, 1084015764]"
+Veenkade,residential,50,True,False,4.84,"[2481, 2041]",693,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1163938313
+Elandstraat,tertiary,50,False,True,93.554,"[2368, 978, 2364, 2358]",667,50.0,0.002,-9999.0,0.0,0.0,,,nan,"['4', '3']",nan,nan,nan,nan,nan,nan,nan,"[1030143761, 1030143764, 1030143766]"
+Vondelstraat,tertiary,50,True,False,11.764,"[979, 2702]",509,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7493687
+Elandstraat,residential,50,True,False,16.976999999999997,"[2532, 2533, 2534, 2535, 2545, 1173]",531,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1174008418
+"['Vondelstraat', 'Elandstraat']",tertiary,50,True,False,37.654,"[2369, 2370, 2371, 2340, 2531, 2530, 1575, 2537, 2543]",668,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[1030143770, 7493687]"
+Javastraat,tertiary,50,True,False,97.639,"[1443, 1444, 1445, 2290, 2291, 1012, 1308, 1020]",513,50.0,0.002,-9999.0,0.0,1.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[683965888, 203267966]"
+Alexanderstraat,residential,50,False,False,11.0,"[2800, 1973]",604,50.0,0.001,-9999.0,0.0,3.0,1435019605.0,11695230690.0,1435019605_11695230690,4,nan,nan,nan,nan,nan,nan,nan,1030195916
+Javastraat,tertiary,50,True,False,114.353,"[1452, 1015]",517,50.0,0.002,0.005687517113983631,0.0023714151560447322,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,129481539
+Alexanderstraat,residential,50,True,False,12.136,1017,518,50.0,0.0,0.1839844435453415,0.14943718651944896,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,130208753
+"['Javastraat', 'Nassauplein']","['residential', 'tertiary']",50,True,False,290.44500000000005,"[1312, 1763, 1315, 1321, 1066, 1067, 1612, 1069, 1072, 1073, 1076, 1078, 1079, 1689, 1019, 2430, 1310]",592,50.0,0.006,0.21799057722091675,0.4264478574907308,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[137474769, 130208756, 137474765]"
+Javastraat,tertiary,50,True,False,202.80699999999996,"[1314, 999, 1064, 1065, 1320, 1068, 602, 1018, 1309]",519,50.0,0.004,0.3017656207084656,0.7470982731241566,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,130208757
+Alexanderstraat,residential,50,True,False,105.86599999999999,"[1063, 2412, 2414, 1007, 2418, 1972, 1974, 2711, 1311]",603,50.0,0.002,0.1839844435453415,0.002820029975559314,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,130278048
+Vondelstraat,tertiary,50,True,False,76.072,"[1166, 1167, 2544, 2546, 2046, 2047]",526,50.0,0.002,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,7493687
+Vondelstraat,tertiary,50,False,False,22.061,2043,623,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312288
+Vondelstraat,tertiary,50,True,False,91.29299999999999,"[2529, 2701, 2032, 1169, 1171, 980, 2361, 2045]",529,50.0,0.002,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,694312287
+Elandstraat,tertiary,50,True,False,11.117999999999999,"[2536, 1404, 1172]",530,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1174006906
+Laan van Meerdervoort,tertiary,50,True,False,198.36900000000003,"[2727, 2664, 2539, 1427, 1428, 1875, 1431, 959]",561,50.0,0.004,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[203267969, 211778322, 1174006900]"
+nan,residential,50,False,False,8.994,"[986, 2379]",669,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7476984
+Scheveningseveer,residential,50,True,False,28.416,"[2385, 2386, 1212]",536,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030148551
+Scheveningseveer,residential,50,True,False,13.045,"[2376, 2383]",673,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030148552
+Hogewal,residential,50,True,False,30.041,"[2387, 2388, 2390]",675,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1030148553
+Herderstraat,residential,30,False,True,56.554,"[728, 1273, 1270]",541,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,no,"[184330448, 184330447]"
+Nassauplein,residential,50,True,False,110.00399999999999,"[1300, 963, 1692, 1301]",542,50.0,0.002,0.16537553071975708,0.2782803764527432,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,311785015
+Torenstraat,tertiary,50,False,True,85.19800000000001,"[1344, 1346, 1348, 1350, 1965, 2109, 1342, 2815]",644,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,203242491
+Jan Hendrikstraat,tertiary,50,True,False,17.518,"[2088, 2084, 2085]",640,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,694321715
+Torenstraat,tertiary,50,False,True,77.333,"[2106, 1352, 1355, 2108, 2550, 2552, 2554, 2459, 2556, 2461, 2110]",645,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1084015753
+Torenstraat,tertiary,50,False,False,30.722,"[2080, 1359]",636,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1084015753
+Torenstraat,tertiary,50,False,False,13.87,1374,552,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1084015753
+Torenstraat,tertiary,50,False,True,152.43,"[2081, 2696, 2445, 2447, 2449, 2451, 1368, 2072, 2074, 2076]",637,50.0,0.003,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1084015753
+Pieterstraat,residential,50,False,False,6.328,"[1496, 1557]",567,50.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,211521670
+Torenstraat,tertiary,50,False,False,57.331,"[2610, 2462, 2471]",690,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1084015753
+Prinsegracht,tertiary,50,True,False,65.535,"[1909, 1415]",555,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,203251109
+Jan Hendrikstraat,tertiary,50,False,False,8.622,1590,575,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,416925657
+Jan Hendrikstraat,tertiary,50,False,True,78.317,"[2731, 718, 2096, 2099, 2101, 2103, 2618]",642,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,211771895
+Johan de Wittlaan,residential,50,False,True,20.25,"[1480, 1485, 1486, 2195, 538]",566,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,7494148
+nan,secondary_link,50,True,False,29.920000000000005,"[1513, 1514, 1515, 1517, 1518, 1519, 1520, 1521, 1522]",570,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,211377395
+"['Prinsegracht', 'Boekhorststraat']",residential,"['30', '50']",True,False,122.959,"[719, 720, 1589, 2104, 62, 1919]",576,40.0,0.003,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[7477720, 7477638]"
+Surinamestraat,residential,30,True,False,48.991,1695,583,30.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477196
+Surinamestraat,residential,30,True,False,36.873,1700,587,30.0,0.001,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,7477196
+Elandstraat,tertiary,50,True,False,23.285,"[2700, 948, 2356, 202]",666,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1030143762
+Scheveningseveer,residential,50,True,False,18.322,"[2384, 1967]",601,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1030148550
+Alexanderstraat,residential,50,False,False,28.0,"[2800, 1973]",604,50.0,0.001,-9999.0,0.0,1.0,11695230690.0,6407061859.0,11695230690_6407061859,4,nan,nan,nan,nan,nan,nan,nan,1030195916
+Parkstraat,tertiary,50,False,False,98.208,"[1991, 1899, 1997, 1999, 2002]",609,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,683964134
+Parkstraat,tertiary,50,False,False,110.88300000000001,"[1987, 1989, 2004, 2006, 2010]",613,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,683964134
+Zoutmanstraat,residential,50,False,False,94.80100000000002,"[2023, 2025, 2028, 2039, 2719]",619,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694307743
+Zoutmanstraat,residential,50,False,False,88.122,2031,620,50.0,0.002,-9999.0,0.0,1.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694307743
+Elandstraat,tertiary,50,True,False,30.619,"[2542, 2036, 2365, 2366, 2367]",622,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030143767
+Vondelstraat,tertiary,50,False,False,107.666,"[2048, 2051]",628,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312288
+Vondelstraat,tertiary,50,False,False,35.089,2053,629,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312288
+Vondelstraat,tertiary,50,False,False,30.272,2309,662,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312288
+Vondelstraat,tertiary,50,False,True,48.024,2310,663,50.0,0.001,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694312288
+Vondelstraat,residential,"['30', '50']",True,False,90.02699999999999,"[1568, 1569, 1570, 1571, 1572, 2308, 742, 2311, 743, 683, 1397]",664,40.0,0.002,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,"[52882715, 1160226659]"
+Nobelstraat,residential,30,False,False,12.882,"[1142, 1363, 2453, 2598]",708,30.0,0.0,-9999.0,0.0,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1252791195
+Jan Hendrikstraat,tertiary,50,False,False,116.429,"[2097, 2091, 2093, 2089]",643,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,694321713
+Tournooiveld,tertiary,50,False,False,40.505,"[2145, 2147, 2149, 2141]",649,50.0,0.001,-9999.0,0.0,0.0,,,nan,4,nan,nan,nan,nan,nan,nan,nan,694354382
+Lange Vijverberg,tertiary,50,True,False,184.0,"[1892, 264, 1389, 2128, 2129, 2130, 2131, 2132, 2133, 278, 2135, 2136, 2137, 2138, 2139, 2134, 1149, 286]",155,50.0,0.006,-9999.0,0.0,0.0,11695230688.0,6519030828.0,11695230688_6519030828,1,nan,nan,nan,nan,nan,nan,nan,"[1359070465, 694353013]"
+Tournooiveld,tertiary,50,False,False,16.605,"[2153, 2151]",651,50.0,0.0,-9999.0,0.0,0.0,,,nan,4,nan,nan,nan,nan,nan,nan,nan,694354382
+Onafhankelijkheidstraat,residential,30,False,False,25.604,2558,705,30.0,0.001,0.039210475981235504,0.0949030490587059,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1182383113
+Hogewal,residential,50,True,False,29.48,"[2377, 2378, 2381]",671,50.0,0.001,-9999.0,0.0,2.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030148549
+Scheveningseveer,residential,50,True,False,13.026,2382,672,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030148548
+Koningskade,primary,50,True,False,88.656,"[969, 780, 2502, 2566]",697,50.0,0.002,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,129372681
+Mauritskade,tertiary,50,True,False,28.56,"[2401, 2394, 2395, 2397]",677,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030187715
+Mauritskade,tertiary,50,True,False,26.099,"[2400, 1618, 2406]",681,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1030187715
+Nassauplein,residential,50,True,False,24.189999999999998,"[2426, 2427, 2428, 2429]",688,50.0,0.0,0.07039063423871994,0.9933483789396507,0.0,,,nan,nan,nan,nan,nan,nan,nan,nan,nan,1039612342
+Noordwal,residential,"['30', '50']",True,False,90.752,"[2464, 2498, 2499, 2468, 1159, 1160, 1772, 1773, 243, 2489]",692,40.0,0.002,-9999.0,0.0,0.0,,,nan,"['1', '2']",nan,nan,nan,nan,nan,nan,nan,"[1125919229, 211521666, 1125919228, 1125919237]"
+nan,tertiary,50,True,False,11.07,2503,696,50.0,0.0,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,1150006866
+nan,primary,50,True,False,8.55,2510,698,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,1150007707
+nan,tertiary,50,True,False,9.9,2512,701,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1150006863
+nan,primary,50,True,False,8.538,2516,702,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,S100,nan,nan,nan,nan,1150006871
+Wassenaarseweg,tertiary,50,True,False,18.379,"[2513, 2514, 2524]",704,50.0,0.0,-9999.0,0.0,0.0,,,nan,2,nan,nan,nan,nan,nan,nan,nan,1150006864
+Wassenaarseweg,tertiary,50,True,False,28.405,"[1882, 2515, 2517]",703,50.0,0.001,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[1150006865, 1150007706]"
+Van Boecopkade,residential,30,False,"[False, True]",81.916,"[2266, 2562, 2604, 82]",709,30.0,0.003,-9999.0,0.0,0.0,,,nan,1,nan,nan,nan,nan,nan,nan,nan,"[1199626081, 1257997316]"
