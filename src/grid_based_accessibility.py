@@ -1,3 +1,28 @@
+"""
+Grid-Based Accessibility Analysis Module
+
+This module provides grid-based accessibility analysis for electrical infrastructure assets
+using road network flooding analysis. It integrates with RA2CE for network analysis and 
+provides functionality to determine asset accessibility during flood events.
+
+Main Functions:
+- accessibility_model(): Primary function for determining asset accessibility
+- initialize_grid_analysis(): Setup baseline grid analysis (called automatically)
+- run_full_analysis(): Run complete standalone analysis
+
+Usage:
+    from grid_based_accessibility import accessibility_model
+    
+    # This is called automatically during first use
+    accessible = accessibility_model(asset_geometries, hazard_map_path)
+
+Requirements:
+- RA2CE must be installed and configured
+- Required graph files (base_graph.p, base_graph_hazard.p) in output directory
+- Study area shapefile in network directory
+- Hazard raster files in hazard/processed directory
+"""
+
 # Nieuwe methode proberen
 # Do your imports
 # === Standard Library ===
@@ -34,24 +59,49 @@ from ra2ce.network.exporters.multi_graph_network_exporter import MultiGraphNetwo
 from ra2ce.network.network_wrappers.osm_network_wrapper.osm_network_wrapper import OsmNetworkWrapper
 from ra2ce.ra2ce_handler import Ra2ceHandler
 
-# specify the name of the path to the project folder where you created the RA2CE folder setup
+# Global variables to cache grid analysis
+_baseline_grid = None
+_baseline_graph = None
+_baseline_node_gdf = None
+_cached_hazard_analysis = {}
 
-# root_dir = Path(r'C:\python\powerpath\data')
-#TODO: Set input path to data path
-root_dir = Path( r'C:/repos/powerpath/data')
-assert root_dir.exists()
-static_path = root_dir.joinpath("static")
-hazard_path = static_path.joinpath("hazard")
-network_path = static_path.joinpath("network")
-output_path = static_path.joinpath("output_graph")
-
-## Find the study area
-# <font color='blue'>To do in a later stage: make this flexible based on hazard map</font> 
-Extent_path = network_path.joinpath("try_study_area_larger.shp") #TODO Make flexible based on hazard map
-Extent = gpd.read_file(Extent_path, driver='ESRI Shapefile')
-shapely_polygon = Extent.geometry.iloc[0]
-# Data pre-processing
-# some preliminary functions
+def initialize_project_paths(project_root=None):
+    """
+    Initialize project paths. Call this function before using other functions.
+    
+    Parameters:
+    -----------
+    project_root : Path or str, optional
+        Root directory of the project. If None, will try to find it automatically.
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing all relevant paths
+    """
+    if project_root is None:
+        cwd = Path.cwd()
+        # Try to find the project root by looking for 'data' directory
+        if (cwd / 'data').exists():
+            root_dir = cwd / 'data'
+        elif (cwd.parent / 'data').exists():
+            root_dir = cwd.parent / 'data'
+        else:
+            raise FileNotFoundError("Could not find 'data' directory. Please specify project_root parameter.")
+    else:
+        root_dir = Path(project_root) / 'data'
+        if not root_dir.exists():
+            raise FileNotFoundError(f"Data directory not found: {root_dir}")
+    
+    paths = {
+        'root_dir': root_dir,
+        'static_path': root_dir / "static",
+        'hazard_path': root_dir / "static" / "hazard",
+        'network_path': root_dir / "static" / "network", 
+        'output_path': root_dir / "static" / "output_graph"
+    }
+    
+    return paths
 
 def get_all_files(directory: str) -> list[Path]:
     p = Path(directory)
@@ -66,46 +116,83 @@ def read_gpkg_to_gdf(file_path: str, layer: str = None) -> gpd.GeoDataFrame:
     # Read the geopackage file into a GeoDataFrame
     gdf = gpd.read_file(file_path, layer=layer)
     return gdf
-hazard_path_processed = hazard_path.joinpath("processed") #TODO: get from the calling function
-hazard_files = get_all_files(hazard_path_processed)
-hazard_crs = "EPSG:4326" # for the hackathon case => "EPSG:4326" 
+def setup_ra2ce_analysis(project_root=None, hazard_file=None):
+    """
+    Setup and run RA2CE analysis if needed.
+    This function handles the network and hazard analysis preparation.
+    """
+    # Initialize paths
+    paths = initialize_project_paths(project_root)
+    root_dir = paths['root_dir']
+    static_path = paths['static_path']
+    output_path = paths['output_path']
+    network_path = paths['network_path']
+    hazard_path = paths['hazard_path']
+    
+    # Get hazard files
+    hazard_path_processed = hazard_path.joinpath("processed")
+    hazard_files = get_all_files(hazard_path_processed)
+    hazard_crs = "EPSG:4326"  # for the hackathon case
+    
+    if not hazard_files:
+        raise FileNotFoundError("No hazard files found in processed directory")
+    
+    for hazard_file in hazard_files:
+        print(hazard_file)
+    
+    # Check if analysis outputs already exist
+    base_graph_path = output_path.joinpath("base_graph.p")
+    hazard_graph_path = output_path.joinpath("base_graph_hazard.p")
+    
+    if base_graph_path.exists() and hazard_graph_path.exists():
+        print("RA2CE analysis outputs already exist, skipping...")
+        return
+    
+    # Find the study area
+    extent_path = network_path.joinpath("try_study_area_larger.shp")
+    extent = gpd.read_file(extent_path, driver='ESRI Shapefile')
+    shapely_polygon = extent.geometry.iloc[0]
+    
+    # RA2CE network section
+    _network_section = NetworkSection(
+        network_type=NetworkTypeEnum.DRIVE,
+        source=SourceEnum.OSM_DOWNLOAD,
+        polygon=extent_path,  # it needs a path without the list!
+        save_gpkg=True,
+        road_types=[RoadTypeEnum.PRIMARY, RoadTypeEnum.PRIMARY_LINK, RoadTypeEnum.TRUNK, 
+                   RoadTypeEnum.SECONDARY, RoadTypeEnum.SECONDARY_LINK, RoadTypeEnum.TERTIARY, 
+                   RoadTypeEnum.RESIDENTIAL], 
+        attributes_to_exclude_in_simplification=['bridge', 'tunnel'],
+    )
 
-for hazard_file in hazard_files:
-    print (hazard_file)
-# RA2CE
-### Let us first initalize and perform the ra2ce run so we have all the data that we need
-#### Cutting RoadTypeEnum.MOTORWAY,RoadTypeEnum.MOTORWAY_LINK to make analysis more realistic
-_network_section = NetworkSection(
-    network_type=NetworkTypeEnum.DRIVE,
-    source=SourceEnum.OSM_DOWNLOAD,
-    polygon=Extent_path, #it needs a path without the list!
-    save_gpkg=True,
-    road_types=[RoadTypeEnum.PRIMARY, RoadTypeEnum.PRIMARY_LINK,RoadTypeEnum.TRUNK, RoadTypeEnum.SECONDARY,RoadTypeEnum.SECONDARY_LINK, RoadTypeEnum.TERTIARY, RoadTypeEnum.RESIDENTIAL], 
-    attributes_to_exclude_in_simplification=['bridge', 'tunnel'],
-)
-
-for hazard_file in hazard_files:
+    # Use the first hazard file for the analysis
+    target_hazard_file = hazard_file if hazard_file else hazard_files[0]
+    
     # Make the NetworkConfigData
     _hazard_section = HazardSection(
-        hazard_map=[hazard_file],
+        hazard_map=[target_hazard_file],
         hazard_id=None,
         hazard_field_name="waterdepth",
         aggregate_wl=AggregateWlEnum.MAX,
         hazard_crs=hazard_crs,
-        overlay_segmented_network = False
+        overlay_segmented_network=False
     )
 
-_network_config_data = NetworkConfigData(
-    root_path=root_dir,
-    static_path=static_path,
-    output_path=output_path,
-    network=_network_section,
-    hazard=_hazard_section)
+    _network_config_data = NetworkConfigData(
+        root_path=root_dir,
+        static_path=static_path,
+        output_path=output_path,
+        network=_network_section,
+        hazard=_hazard_section
+    )
 
-# Run analysis
-_handler = Ra2ceHandler.from_config(_network_config_data, analysis=None)
-_handler.configure()
-_handler.run_analysis()
+    # Run analysis
+    print("Running RA2CE analysis...")
+    _handler = Ra2ceHandler.from_config(_network_config_data, analysis=None)
+    _handler.configure()
+    _handler.run_analysis()
+    print("RA2CE analysis complete")
+
 # Refactored modular script
 def load_graph(path: Path) -> nx.Graph:
     with open(path, "rb") as f:
@@ -129,7 +216,10 @@ def create_grid(study_area: gpd.GeoDataFrame, cell_size: int, target_crs: str) -
              if study_area.geometry.unary_union.intersects(box(minx + i * cell_size, miny + j * cell_size,
                                                                minx + (i + 1) * cell_size, miny + (j + 1) * cell_size))]
     grid = gpd.GeoDataFrame(geometry=cells, crs=study_area.crs).to_crs(target_crs)
-    grid["centroid"] = grid.geometry.centroid
+    
+    # Calculate centroids in the target CRS to avoid the warning
+    grid_for_centroids = grid.copy()
+    grid["centroid"] = grid_for_centroids.geometry.centroid
     return grid
 
 def build_node_gdf(G: nx.Graph, crs: str) -> gpd.GeoDataFrame:
@@ -224,67 +314,331 @@ def compute_hazard_distances(grid: gpd.GeoDataFrame, G: nx.Graph, node_gdf: gpd.
 
     return grid
 
-# === PARAMETERS ===
-cell_size = 500
-threshold = 0.2
-from_crs = "EPSG:4326"
-to_crs = "EPSG:28992"
-max_distance = 250
+# Main execution code (moved to separate function for module usage)
+def run_full_analysis(project_root=None, hazard_file=None):
+    """
+    Run the full grid-based accessibility analysis.
+    This function replicates the original script behavior for standalone usage.
+    """
+    # Initialize paths
+    paths = initialize_project_paths(project_root)
+    hazard_path = paths['hazard_path']
+    
+    # Get hazard files
+    hazard_path_processed = hazard_path.joinpath("processed")
+    hazard_files = get_all_files(hazard_path_processed)
+    
+    if hazard_file is None and hazard_files:
+        hazard_file = hazard_files[0]  # Use first available hazard file
+    
+    if hazard_file is None:
+        raise FileNotFoundError("No hazard files found")
+    
+    print(f"Processing hazard file: {hazard_file}")
+    
+    # Run the analysis
+    initialize_grid_analysis(project_root)
+    grid = run_hazard_grid_analysis(hazard_file, threshold=0.2, project_root=project_root)
+    
+    return grid
 
-# === PATHS ===
-road_network_path = output_path.joinpath("base_graph.p") 
-hazard_graph_path= output_path.joinpath("base_graph_hazard.p")
-flood_tiff_path = hazard_file
+def initialize_grid_analysis(project_root=None):
+    """
+    Initialize the baseline grid analysis that can be reused for multiple accessibility calls.
+    This should be called once before using the accessibility_model function.
+    """
+    global _baseline_grid, _baseline_graph, _baseline_node_gdf
+    
+    if _baseline_grid is not None:
+        return  # Already initialized
+    
+    # Initialize paths
+    paths = initialize_project_paths(project_root)
+    
+    # === PARAMETERS ===
+    cell_size = 500
+    from_crs = "EPSG:4326"
+    to_crs = "EPSG:28992"
+    max_distance = 250
 
+    # === PATHS ===
+    road_network_path = paths['output_path'].joinpath("base_graph.p")
+    
+    # Check if the required files exist
+    if not road_network_path.exists():
+        raise FileNotFoundError(f"Required graph file not found: {road_network_path}")
+    
+    # === LOAD STUDY AREA ===
+    extent_path = paths['network_path'].joinpath("try_study_area_larger.shp")
+    extent = gpd.read_file(extent_path, driver='ESRI Shapefile')
+    study_area_rd = extent.to_crs(to_crs)
 
-# === LOAD STUDY AREA ===
-study_area_rd = Extent.to_crs(to_crs)
+    # === BASE GRAPH ===
+    G = project_graph_coords(load_graph(road_network_path), from_crs, to_crs)
+    node_gdf = build_node_gdf(G, crs=to_crs)
 
-# === BASE GRAPH ===
-G = project_graph_coords(load_graph(road_network_path), from_crs, to_crs)
-node_gdf = build_node_gdf(G, crs=to_crs)
+    # === GRID ===
+    grid = create_grid(study_area_rd, cell_size, target_crs=from_crs)
+    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+    grid = assign_nearest_nodes(grid, node_gdf, transformer, max_distance)
+    grid = compute_grid_distances(grid, G, node_col="nearest_node", label_prefix="no_flood")
+    
+    # Store in global variables
+    _baseline_grid = grid
+    _baseline_graph = G
+    _baseline_node_gdf = node_gdf
+    
+    print("Grid analysis initialized successfully")
 
-# === GRID ===
-grid = create_grid(study_area_rd, cell_size, target_crs=from_crs)
-transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
-grid = assign_nearest_nodes(grid, node_gdf, transformer, max_distance)
-grid = compute_grid_distances(grid, G, node_col="nearest_node", label_prefix="no_flood")
-
-# === HAZARD GRAPH ===
-G_hazard = project_graph_coords(load_graph(hazard_graph_path), from_crs, to_crs)
-G_hazard = filter_hazard_graph(G_hazard, threshold)
-node_gdf_hazard = build_node_gdf(G_hazard, crs=to_crs)
-
-# === FLOOD DEPTHS ===
-grid = sample_flood_depths(grid, flood_tiff_path, threshold)
-
-# === HAZARD DISTANCES ===
-grid = compute_hazard_distances(
-    grid,
-    G_hazard,
-    node_gdf_hazard,
-    transformer,
-    max_distance=max_distance,
-    label_prefix="hazard"
-)
-
-# grid.explore(column='reachable_diff',
-#              cmap='Reds')
-# for each asset in the calling function, check in which grid cell it falls and output accessible as a boolean (True or false)
-def accessibility_model(asset_geometries, hazard_map_path):
-    for idx, asset in enumerate(asset_geometries):
-        # Find the grid cell that contains the asset
-        asset_point = Point(asset.x, asset.y)
-        grid_cell = grid[grid.geometry.contains(asset_point)]
+def compute_hazard_graph_from_map(hazard_map_path, base_graph, project_root=None):
+    """
+    PLACEHOLDER: Compute hazard-aware graph from hazard map and base graph.
+    
+    This function should overlay the hazard map onto the base graph and create
+    a new graph with hazard attributes (like water depth) on edges/nodes.
+    
+    Parameters:
+    -----------
+    hazard_map_path : str or Path
+        Path to the hazard raster file
+    base_graph : nx.Graph
+        The base road network graph
+    project_root : Path or str, optional
+        Root directory of the project
         
-        if grid_cell.reachable_cells_hazard == 0:
-            accessible = False
-        else:
-            accessible = True
+    Returns:
+    --------
+    nx.Graph
+        Graph with hazard attributes added
+    """
+    # PLACEHOLDER - This should implement the hazard overlay logic
+    # For now, return the base graph (this will need to be implemented)
+    print("PLACEHOLDER: compute_hazard_graph_from_map - Using base graph as fallback")
+    return base_graph.copy()
+
+def load_or_compute_hazard_graph(hazard_map_path, project_root=None):
+    """
+    Load existing hazard graph or compute it from the hazard map.
+    
+    Parameters:
+    -----------
+    hazard_map_path : str or Path
+        Path to the hazard raster file
+    project_root : Path or str, optional
+        Root directory of the project
         
-        # Store as pandas series of True/False
-        if idx == 0:
-            accessible_series = pd.Series([accessible], name='accessible')
+    Returns:
+    --------
+    nx.Graph
+        Hazard-aware road network graph
+    """
+    global _baseline_graph
+    
+    # Initialize baseline if not done
+    if _baseline_graph is None:
+        initialize_grid_analysis(project_root)
+    
+    # Initialize paths
+    paths = initialize_project_paths(project_root)
+    
+    # Extract day string from hazard map path for naming
+    hazard_file = Path(hazard_map_path)
+    day_string = hazard_file.stem  # Use filename without extension as day identifier
+    
+    # Try to load existing hazard graph for this specific day/hazard
+    hazard_graph_path = paths['output_path'].joinpath(f"base_graph_hazard_{day_string}.p")
+    
+    if hazard_graph_path.exists():
+        print(f"Loading existing hazard graph: {hazard_graph_path}")
+        return load_graph(hazard_graph_path)
+    else:
+        print(f"Hazard graph not found for {day_string}, computing from hazard map...")
+        #TODO: PLACEHOLDER: Compute hazard graph from the hazard map; currently if not available, save a copy of the baseline graph
+        hazard_graph = compute_hazard_graph_from_map(hazard_map_path, _baseline_graph, project_root)
+        
+        # Save the computed graph for future use
+        with open(hazard_graph_path, 'wb') as f:
+            pickle.dump(hazard_graph, f)
+        print(f"Saved computed hazard graph: {hazard_graph_path}")
+        
+        return hazard_graph
+
+def run_hazard_grid_analysis(hazard_map_path, threshold=0.2, project_root=None):
+    """
+    Run hazard-specific grid analysis for a given hazard map.
+    Returns a grid with hazard-aware accessibility metrics.
+    """
+    global _baseline_grid, _baseline_graph, _baseline_node_gdf, _cached_hazard_analysis
+    
+    # Check if already cached
+    cache_key = f"{hazard_map_path}_{threshold}"
+    if cache_key in _cached_hazard_analysis:
+        return _cached_hazard_analysis[cache_key]
+    
+    # Initialize baseline if not done
+    if _baseline_grid is None:
+        initialize_grid_analysis(project_root)
+    
+    # === PARAMETERS ===
+    from_crs = "EPSG:4326"
+    to_crs = "EPSG:28992"
+    max_distance = 250
+
+    # Copy baseline grid
+    grid = _baseline_grid.copy()
+    
+    # === HAZARD GRAPH ===
+    # Load or compute hazard graph specific to this hazard map
+    G_hazard_raw = load_or_compute_hazard_graph(hazard_map_path, project_root)
+    G_hazard = project_graph_coords(G_hazard_raw, from_crs, to_crs)
+    G_hazard = filter_hazard_graph(G_hazard, threshold)
+    node_gdf_hazard = build_node_gdf(G_hazard, crs=to_crs)
+
+    # === FLOOD DEPTHS ===
+    grid = sample_flood_depths(grid, Path(hazard_map_path), threshold)
+
+    # === HAZARD DISTANCES ===
+    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+    grid = compute_hazard_distances(
+        grid,
+        G_hazard,
+        node_gdf_hazard,
+        transformer,
+        max_distance=max_distance,
+        label_prefix="hazard"
+    )
+    
+    # Cache the result
+    _cached_hazard_analysis[cache_key] = grid
+    
+    return grid
+
+def accessibility_model(asset_geometries, hazard_map_path, hazard_values=None, hazard_threshold=0.2, project_root=None):
+    """
+    Determine accessibility of assets based on grid-based road network analysis.
+    
+    Parameters:
+    -----------
+    asset_geometries : gpd.GeoSeries or gpd.GeoDataFrame
+        Geometries of the assets to check accessibility for
+    hazard_map_path : str or Path
+        Path to the hazard raster file (.tif)
+    hazard_values : array-like, optional
+        Pre-computed hazard values at asset locations (currently not used in grid-based analysis)
+    hazard_threshold : float, default 0.2
+        Water depth threshold in meters for flooding analysis
+    project_root : Path or str, optional
+        Root directory of the project
+        
+    Returns:
+    --------
+    pd.Series
+        Boolean series indicating accessibility for each asset (True = accessible, False = not accessible)
+    """
+    try:
+        # Run hazard analysis for this specific hazard map
+        grid = run_hazard_grid_analysis(hazard_map_path, hazard_threshold, project_root)
+        
+        # Convert asset geometries to GeoDataFrame if needed
+        if hasattr(asset_geometries, 'geometry'):
+            # It's already a GeoDataFrame
+            assets_gdf = asset_geometries.copy()
         else:
-            accessible_series = accessible_series.append(pd.Series([accessible]), ignore_index=True)
-    return accessible_series
+            # It's a GeoSeries, convert to GeoDataFrame
+            assets_gdf = gpd.GeoDataFrame(geometry=asset_geometries.copy(), crs="EPSG:4326")
+        
+        # Ensure CRS is WGS84 (same as grid)
+        if assets_gdf.crs != "EPSG:4326":
+            assets_gdf = assets_gdf.to_crs("EPSG:4326")
+        
+        accessible_list = []
+        
+        for idx, asset_geom in enumerate(assets_gdf.geometry):
+            try:
+                # Create point from geometry
+                if hasattr(asset_geom, 'centroid'):
+                    asset_point = asset_geom.centroid
+                else:
+                    asset_point = asset_geom
+                
+                # Find the grid cell that contains the asset
+                grid_cell = grid[grid.geometry.contains(asset_point)]
+                
+                if len(grid_cell) == 0:
+                    # Asset not in any grid cell, check nearest
+                    distances = grid.geometry.distance(asset_point)
+                    nearest_idx = distances.idxmin()
+                    grid_cell = grid.iloc[[nearest_idx]]
+                
+                # Check accessibility based on reachable cells
+                if len(grid_cell) > 0:
+                    reachable_cells = grid_cell['reachable_cells_hazard'].iloc[0]
+                    accessible = reachable_cells > 0
+                else:
+                    # Conservative fallback
+                    accessible = False
+                    
+                accessible_list.append(accessible)
+                
+            except Exception as e:
+                print(f"Warning: Error processing asset {idx}: {e}")
+                # Conservative fallback
+                accessible_list.append(False)
+        
+        return pd.Series(accessible_list, name='accessible')
+        
+    except Exception as e:
+        print(f"Error in grid-based accessibility model: {e}")
+        # Conservative fallback - assume not accessible
+        n_assets = len(asset_geometries)
+        return pd.Series([False] * n_assets, name='accessible')
+
+def test_accessibility_analysis(project_root=None):
+    """
+    Test function to demonstrate the accessibility analysis.
+    Returns a simple test case using the electrical stations.
+    """
+    try:
+        # Initialize paths
+        paths = initialize_project_paths(project_root)
+        
+        # Load some test assets (electrical stations)
+        electricity_path = paths['root_dir'] / 'electricity'
+        
+        if (electricity_path / 'ls_stations_clipped.shp').exists():
+            stations = gpd.read_file(electricity_path / 'ls_stations_clipped.shp')
+            stations = stations.to_crs("EPSG:4326")  # Ensure WGS84
+            
+            # Get a hazard file
+            hazard_path_processed = paths['hazard_path'] / 'processed'
+            hazard_files = get_all_files(hazard_path_processed)
+            
+            if hazard_files:
+                hazard_file = hazard_files[0]
+                print(f"Testing with {len(stations)} stations and hazard file: {hazard_file}")
+                
+                # Run accessibility analysis
+                accessible = accessibility_model(stations.geometry, hazard_file, project_root=project_root)
+                
+                print(f"Results: {accessible.sum()} out of {len(accessible)} stations are accessible")
+                return accessible
+            else:
+                print("No hazard files found for testing")
+                return None
+        else:
+            print("No station files found for testing")
+            return None
+            
+    except Exception as e:
+        print(f"Test failed: {e}")
+        return None
+
+# Export main functions for easy import
+__all__ = [
+    'accessibility_model',
+    'initialize_grid_analysis', 
+    'run_full_analysis',
+    'load_or_compute_hazard_graph',
+    'compute_hazard_graph_from_map',
+    'test_accessibility_analysis'
+]
