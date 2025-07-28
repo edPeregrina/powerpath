@@ -702,7 +702,68 @@ def set_verbose(verbose: bool = True):
     global _verbose
     _verbose = verbose
 
+def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float) -> gpd.GeoDataFrame:
+    with open(graph_pickle_path, "rb") as f:
+        G = pickle.load(f)
+        G = nx.DiGraph(G)
 
+    G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
+    G = filter_hazard_graph(G, hazard_threshold)
+
+    # Identify strongly connected components
+    components = list(nx.strongly_connected_components(G))
+    fid_to_island = {}
+
+    # Assign island_id to each fid
+    for i, comp in enumerate(components):
+        subgraph = G.subgraph(comp)
+        for u, v, data in subgraph.edges(data=True):
+            fid_to_island[v] = i
+
+    # Create transformer for projecting geometries
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
+    
+    # Build edge records with geometry and length
+    records = []
+
+    for u, v, data in G.edges(data=True):
+        # Project the actual edge geometry
+        original_geom = data['geometry']
+        if hasattr(original_geom, 'coords'):
+            # Project all coordinates in the geometry
+            projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
+            projected_geom = LineString(projected_coords)
+        else:
+            # Fallback: create LineString from node positions if no edge geometry
+            projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
+                                       (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
+        
+        length_m = data.get("length", None)
+        if length_m is None:
+            print(f"Length not found for edge ({u}, {v}), calculating from projected geometry.")
+            length_m = projected_geom.length  
+
+        island_id = fid_to_island.get(v, -1)
+
+        record = data.copy()
+        record["geometry"] = projected_geom  # Use properly projected geometry
+        record["length_m"] = length_m
+        record["island_id"] = island_id
+        records.append(record)
+
+    # Create GeoDataFrame with correct CRS
+    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:28992")
+
+    # Compute island sizes using groupby
+    island_sizes = gdf.groupby("island_id")["length_m"].sum().reset_index()
+    island_sizes["island_size_km"] = island_sizes["length_m"] / 1000.0
+    island_sizes = island_sizes[["island_id", "island_size_km"]]
+
+    # Merge island sizes back into GeoDataFrame
+    gdf = gdf.merge(island_sizes, on="island_id", how="left")
+    gdf["island_size_km"] = gdf["island_size_km"].fillna(0.0)
+
+    return gdf
 
 # Export main functions for easy import
 __all__ = [
