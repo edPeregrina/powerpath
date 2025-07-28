@@ -1,13 +1,15 @@
 ,road_types,avg_speed
-0,"['tertiary', 'residential']",49.3
-1,"['residential', 'secondary_link']",32.4
-2,trunk,70.0
-3,primary,58.1
-4,"['trunk', 'secondary']",70.0
-5,"['tertiary', 'primary_link']",49.3
+0,"['residential', 'tertiary']",32.4
+1,secondary,50.2
+2,"['primary_link', 'tertiary']",53.8
+3,trunk,70.0
+4,motorway,98.2
+5,tertiary_link,50.0
 6,tertiary,49.3
-7,primary_link,54.1
-8,tertiary_link,50.0
-9,residential,32.4
-10,secondary,50.1
+7,residential,32.4
+8,primary_link,53.8
+9,"['secondary_link', 'residential']",50.0
+10,primary,57.8
 11,secondary_link,50.0
+12,motorway_link,94.7
+13,"['primary', 'motorway']",57.8
