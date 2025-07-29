@@ -8,7 +8,6 @@ provides functionality to determine asset accessibility during flood events.
 Main Functions:
 - accessibility_model(): Primary function for determining asset accessibility
 - initialize_grid_analysis(): Setup baseline grid analysis (called automatically)
-- run_full_analysis(): Run complete standalone analysis
 
 Usage:
     from grid_based_accessibility import accessibility_model
@@ -18,7 +17,7 @@ Usage:
 
 Requirements:
 - RA2CE must be installed and configured
-- Required graph files (base_graph.p, base_graph_hazard.p) in output directory
+- Required graph files (base_graph.p, base_graph_hazard_editted.p) in output directory
 - Study area shapefile in network directory
 - Hazard raster files in hazard/processed directory
 """
@@ -84,6 +83,7 @@ def initialize_project_paths(project_root=None):
         Dictionary containing all relevant paths
     """
     if project_root is None:
+        print("No project root specified, trying to find it automatically...")
         cwd = Path.cwd()
         # Try to find the project root by looking for 'data' directory
         if (cwd / 'data').exists():
@@ -93,16 +93,20 @@ def initialize_project_paths(project_root=None):
         else:
             raise FileNotFoundError("Could not find 'data' directory. Please specify project_root parameter.")
     else:
-        root_dir = Path(project_root) / 'data'
+        root_dir = Path(project_root)
+        data_dir = root_dir / 'data'
+        static_dir = data_dir / "static"
+        print(f"Using project root: {root_dir}")
         if not root_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {root_dir}")
     
     paths = {
         'root_dir': root_dir,
-        'static_path': root_dir / "static",
-        'hazard_path': root_dir / "static" / "hazard",
-        'network_path': root_dir / "static" / "network", 
-        'output_path': root_dir / "static" / "output_graph"
+        'static_path': static_dir,
+        'hazard_path': static_dir / "hazard",
+        'network_path': static_dir / "network", 
+        'output_path': static_dir / "output_graph",
+        'output_directory': data_dir / "output"
     }
     
     return paths
@@ -147,7 +151,7 @@ def setup_ra2ce_analysis(project_root=None, hazard_file=None):
     
     # Check if analysis outputs already exist
     base_graph_path = output_path.joinpath("base_graph.p")
-    hazard_graph_path = output_path.joinpath("base_graph_hazard.p")
+    hazard_graph_path = output_path.joinpath("base_graph_hazard_editted.p")
     
     if base_graph_path.exists() and hazard_graph_path.exists():
         if _verbose:
@@ -216,19 +220,15 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
         d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
     return G
 
-# def create_grid(study_area: gpd.GeoDataFrame, cell_size: int, target_crs: str) -> gpd.GeoDataFrame:
-#     minx, miny, maxx, maxy = study_area.total_bounds
-#     cols, rows = int((maxx - minx) / cell_size), int((maxy - miny) / cell_size)
-#     cells = [box(minx + i * cell_size, miny + j * cell_size, minx + (i + 1) * cell_size, miny + (j + 1) * cell_size)
-#              for i in range(cols) for j in range(rows)
-#              if study_area.geometry.unary_union.intersects(box(minx + i * cell_size, miny + j * cell_size,
-#                                                                minx + (i + 1) * cell_size, miny + (j + 1) * cell_size))]
-#     grid = gpd.GeoDataFrame(geometry=cells, crs=study_area.crs).to_crs(target_crs)
-    
-#     # Calculate centroids in the target CRS to avoid the warning
-#     grid_for_centroids = grid.copy()
-#     grid["centroid"] = grid_for_centroids.geometry.centroid
-#     return grid
+def filter_motorway_edges(G: nx.Graph) -> nx.Graph:
+    G_filtered = G.copy()
+    edges_to_remove = [
+        (u, v) for u, v, d in G_filtered.edges(data=True)
+        if "highway" in d and isinstance(d["highway"], str) and "motorway" in d["highway"].lower()
+    ]
+    G_filtered.remove_edges_from(edges_to_remove)
+    G_filtered.remove_nodes_from(list(nx.isolates(G_filtered)))
+    return G_filtered
 
 def create_grid(study_area: gpd.GeoDataFrame, cell_size: int, target_crs: str) -> gpd.GeoDataFrame:
     minx, miny, maxx, maxy = study_area.total_bounds
@@ -296,8 +296,24 @@ def compute_grid_distances(grid: gpd.GeoDataFrame, G: nx.Graph, node_col: str, l
     grid[f"reachable_cells_{label_prefix}"] = reachable_counts
     return grid
 
-def filter_hazard_graph(G: nx.Graph, threshold: float) -> nx.Graph:
-    G.remove_edges_from([(u, v) for u, v, d in G.edges(data=True) if d.get("EV1_ma", 0) > threshold])
+def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str) -> nx.Graph:
+    def is_motorway(highway):
+        if isinstance(highway, str):
+            return "motorway" in highway.lower()
+        elif isinstance(highway, list):
+            return any("motorway" in str(h).lower() for h in highway)
+        return False
+
+    def is_protected(d):
+        # Keep edge if it has a bridge or tunnel value
+        return pd.notna(d.get("bridge")) or pd.notna(d.get("tunnel"))
+
+    edges_to_remove = [
+        (u, v) for u, v, d in G.edges(data=True)
+        if d.get(hazard_column, 0) > threshold and not is_motorway(d.get("highway")) and not is_protected(d)
+    ]
+
+    G.remove_edges_from(edges_to_remove)
     G.remove_nodes_from(list(nx.isolates(G)))
     return G
 
@@ -348,34 +364,6 @@ def compute_hazard_distances(grid: gpd.GeoDataFrame, G: nx.Graph, node_gdf: gpd.
 
     return grid
 
-# Main execution code (moved to separate function for module usage)
-def run_full_analysis(project_root=None, hazard_file=None):
-    """
-    Run the full grid-based accessibility analysis.
-    This function replicates the original script behavior for standalone usage.
-    """
-    # Initialize paths
-    paths = initialize_project_paths(project_root)
-    hazard_path = paths['hazard_path']
-    
-    # Get hazard files
-    hazard_path_processed = hazard_path.joinpath("processed")
-    hazard_files = get_all_files(hazard_path_processed)
-    
-    if hazard_file is None and hazard_files:
-        hazard_file = hazard_files[0]  # Use first available hazard file
-    
-    if hazard_file is None:
-        raise FileNotFoundError("No hazard files found")
-    
-    if _verbose:
-        print(f"Processing hazard file: {hazard_file}")
-    
-    # Run the analysis
-    initialize_grid_analysis(project_root)
-    grid = run_hazard_grid_analysis(hazard_file, threshold=0.2, project_root=project_root)
-    
-    return grid
 
 def initialize_grid_analysis(project_root=None):
     """
@@ -410,7 +398,10 @@ def initialize_grid_analysis(project_root=None):
 
     # === BASE GRAPH ===
     G = project_graph_coords(load_graph(road_network_path), from_crs, to_crs)
-    node_gdf = build_node_gdf(G, crs=to_crs)
+    # --- FILTER OUT MOTORWAY EDGES ---
+    G_filtered = filter_motorway_edges(G)
+    node_gdf = build_node_gdf(G_filtered, crs=to_crs) #before node_gdf_filtered
+    # node_gdf = build_node_gdf(G, crs=to_crs)
 
     # === GRID ===
     grid = create_grid(study_area_rd, cell_size, target_crs=to_crs)  # Create grid in projected CRS
@@ -426,7 +417,7 @@ def initialize_grid_analysis(project_root=None):
     if _verbose:
         print("Grid analysis initialized successfully")
 
-def compute_hazard_graph_from_map(hazard_map_path, base_graph, project_root=None):
+def compute_hazard_graph_from_map(hazard_map_path, base_graph, project_root=None, day_string='01'):
     """
     PLACEHOLDER: Compute hazard-aware graph from hazard map and base graph.
     
@@ -482,7 +473,7 @@ def load_or_compute_hazard_graph(hazard_map_path, project_root=None):
     day_string = hazard_file.stem  # Use filename without extension as day identifier
     
     # Try to load existing hazard graph for this specific day/hazard
-    hazard_graph_path = paths['output_path'].joinpath(f"base_graph_hazard_{day_string}.p")
+    hazard_graph_path = paths['output_path'].joinpath(f"base_graph_hazard_editted.p")
     
     if hazard_graph_path.exists():
         if _verbose:
@@ -491,7 +482,7 @@ def load_or_compute_hazard_graph(hazard_map_path, project_root=None):
     else:
         print(f"Hazard graph not found for {day_string}, computing from hazard map...")
         #TODO: PLACEHOLDER: Compute hazard graph from the hazard map; currently if not available, save a copy of the baseline graph
-        hazard_graph = compute_hazard_graph_from_map(hazard_map_path, _baseline_graph, project_root)
+        hazard_graph = compute_hazard_graph_from_map(hazard_map_path, _baseline_graph, project_root, day_string=day_string)
         
         # Save the computed graph for future use
         with open(hazard_graph_path, 'wb') as f:
@@ -500,20 +491,26 @@ def load_or_compute_hazard_graph(hazard_map_path, project_root=None):
         
         return hazard_graph
 
-def run_hazard_grid_analysis(hazard_map_path, threshold=0.2, project_root=None):
+def run_hazard_grid_analysis(hazard_map_path, threshold=0.2, project_root=None, output_path=None, day_string='01'):
     """
     Run hazard-specific grid analysis for a given hazard map.
     Returns a grid with hazard-aware accessibility metrics.
     """
     global _baseline_grid, _baseline_graph, _baseline_node_gdf, _cached_hazard_analysis
-    
+    road_network_path = output_path.joinpath("base_graph.p") 
+    hazard_graph_path = output_path.joinpath("base_graph_hazard_editted.p")
+    print(f"Running hazard grid analysis for {hazard_map_path} with threshold {threshold} m")
     # Check if already cached
     cache_key = f"{hazard_map_path}_{threshold}"
     if cache_key in _cached_hazard_analysis:
+        if _verbose:
+            print(f"Using cached hazard analysis for {cache_key}")
         return _cached_hazard_analysis[cache_key]
     
     # Initialize baseline if not done
     if _baseline_grid is None:
+        if _verbose:
+            print("Initializing baseline grid analysis...")
         initialize_grid_analysis(project_root)
     
     # === PARAMETERS ===
@@ -526,9 +523,10 @@ def run_hazard_grid_analysis(hazard_map_path, threshold=0.2, project_root=None):
     
     # === HAZARD GRAPH ===
     # Load or compute hazard graph specific to this hazard map
-    G_hazard_raw = load_or_compute_hazard_graph(hazard_map_path, project_root)
-    G_hazard = project_graph_coords(G_hazard_raw, from_crs, to_crs)
-    G_hazard = filter_hazard_graph(G_hazard, threshold)
+    column_name = 'EV'+ str(int(day_string)+1) + '_ma'
+    # G_hazard_raw = load_or_compute_hazard_graph(hazard_map_path, project_root)
+    G_hazard = project_graph_coords(load_graph(hazard_graph_path), from_crs, to_crs)
+    G_hazard = filter_hazard_graph(G_hazard, threshold, hazard_column=column_name)
     node_gdf_hazard = build_node_gdf(G_hazard, crs=to_crs)
 
 
@@ -551,7 +549,7 @@ def run_hazard_grid_analysis(hazard_map_path, threshold=0.2, project_root=None):
     
     return grid
 
-def accessibility_model(asset_geometries, hazard_map_path, hazard_values=None, hazard_threshold=0.2, project_root=None, verbose=None):
+def accessibility_model(asset_geometries, hazard_map_path, hazard_values=None, hazard_threshold=0.2, project_root=None, day_string='01', verbose=None):
     """
     Determine accessibility of assets based on grid-based road network analysis.
     
@@ -580,8 +578,14 @@ def accessibility_model(asset_geometries, hazard_map_path, hazard_values=None, h
         set_verbose(verbose)
     
     try:
+        # Initialize paths to ensure project_root is properly set
+        paths = initialize_project_paths(project_root)
+        actual_project_root = paths['root_dir']
+        output_path = paths['output_path']
+        
         # Run hazard analysis for this specific hazard map
-        grid = run_hazard_grid_analysis(hazard_map_path, hazard_threshold, project_root)
+        print(f"Running hazard grid analysis for {hazard_map_path} with threshold {hazard_threshold} m")
+        grid = run_hazard_grid_analysis(hazard_map_path, hazard_threshold, actual_project_root, output_path=output_path, day_string=day_string)
         if _verbose:
             print(f"Grid has {len(grid)} cells")
             print(f"Baseline reachable cells: {grid['reachable_cells_no_flood'].mean():.2f} (avg)")
@@ -702,13 +706,13 @@ def set_verbose(verbose: bool = True):
     global _verbose
     _verbose = verbose
 
-def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float) -> gpd.GeoDataFrame:
+def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str) -> gpd.GeoDataFrame:
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
         G = nx.DiGraph(G)
 
     G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
-    G = filter_hazard_graph(G, hazard_threshold)
+    G = filter_hazard_graph(G, hazard_threshold, hazard_column)
 
     # Identify strongly connected components
     components = list(nx.strongly_connected_components(G))
@@ -769,7 +773,6 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
 __all__ = [
     'accessibility_model',
     'initialize_grid_analysis', 
-    'run_full_analysis',
     'load_or_compute_hazard_graph',
     'compute_hazard_graph_from_map',
     'test_accessibility_analysis',
