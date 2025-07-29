@@ -649,50 +649,6 @@ def accessibility_model(asset_geometries, hazard_map_path, hazard_values=None, h
         n_assets = len(asset_geometries)
         return pd.Series([False] * n_assets, name='accessible')
 
-def test_accessibility_analysis(project_root=None):
-    """
-    Test function to demonstrate the accessibility analysis.
-    Returns a simple test case using the electrical stations.
-    """
-    try:
-        # Initialize paths
-        paths = initialize_project_paths(project_root)
-        
-        # Load some test assets (electrical stations)
-        electricity_path = paths['root_dir'] / 'electricity'
-        
-        if (electricity_path / 'ls_stations_clipped.shp').exists():
-            stations = gpd.read_file(electricity_path / 'ls_stations_clipped.shp')
-            stations = stations.to_crs("EPSG:4326")  # Ensure WGS84
-            
-            # Get a hazard file
-            hazard_path_processed = paths['hazard_path'] / 'processed'
-            hazard_files = get_all_files(hazard_path_processed)
-            
-            if hazard_files:
-                hazard_file = hazard_files[0]
-                if _verbose:
-                    print(f"Testing with {len(stations)} stations and hazard file: {hazard_file}")
-                
-                # Run accessibility analysis
-                accessible = accessibility_model(stations.geometry, hazard_file, project_root=project_root)
-                
-                if _verbose:
-                    print(f"Results: {accessible.sum()} out of {len(accessible)} stations are accessible")
-                return accessible
-            else:
-                if _verbose:
-                    print("No hazard files found for testing")
-                return None
-        else:
-            if _verbose:
-                print("No station files found for testing")
-            return None
-            
-    except Exception as e:
-        if _verbose:
-            print(f"Test failed: {e}")
-        return None
 
 def set_verbose(verbose: bool = True):
     """
@@ -775,6 +731,5 @@ __all__ = [
     'initialize_grid_analysis', 
     'load_or_compute_hazard_graph',
     'compute_hazard_graph_from_map',
-    'test_accessibility_analysis',
     'set_verbose'
 ]
