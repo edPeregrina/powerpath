@@ -1,5 +1,7 @@
-# Ignore everything in the output folder
+# Ignore everything in the output, interim folder and in book/cache
 /data/output/*
+/data/interim/*
+/data/book/cache/*
 
 # Except the to_repo folder
 !/data/output/to_repo/
