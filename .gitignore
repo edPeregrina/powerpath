@@ -1,0 +1,6 @@
+# Ignore everything in the output folder
+/data/output/*
+
+# Except the to_repo folder
+!/data/output/to_repo/
+!/data/output/to_repo/**
