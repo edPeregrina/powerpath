@@ -2,6 +2,7 @@
 /data/output/*
 /data/interim/*
 /data/book/cache/*
+/src/__pycache__/*
 
 # Except the to_repo folder
 !/data/output/to_repo/
