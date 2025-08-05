@@ -731,5 +731,6 @@ __all__ = [
     'initialize_grid_analysis', 
     'load_or_compute_hazard_graph',
     'compute_hazard_graph_from_map',
-    'set_verbose'
+    'set_verbose',
+    'compute_island_geodataframe_from_graph'
 ]
