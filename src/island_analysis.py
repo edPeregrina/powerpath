@@ -15,6 +15,14 @@ from pyproj import Transformer
 from src.utils import project_graph_coords, filter_hazard_graph
 from src.caching import load_island_cache, save_island_cache_silent, save_island_cache, create_overlap_cache_key
 
+# Import hazard extraction method from config
+import sys
+sys.path.append(str(Path(__file__).parent.parent))
+from config import get_config
+
+# Get the hazard extraction method from config
+_config = get_config()
+
 def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str) -> gpd.GeoDataFrame:
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
@@ -108,7 +116,8 @@ def precompute_island_assignments(hazard_maps, flood_thresholds, gdf_assets,
                 temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
                     temp_gdf_for_islands, 
                     hazard_threshold=threshold, 
-                    hazard_column=haz_col_str
+                    hazard_column=haz_col_str,
+                    config=_config
                 )
                 island_ids = temp_gdf_for_islands['island_id'].values
                 
@@ -417,7 +426,7 @@ def update_repair_crew_islands_with_overlap_cached(
         )
 
 
-def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=None):
+def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=_config):
     """
     Get islands wrapping polygons for a specific day and assign island IDs to assets.
     

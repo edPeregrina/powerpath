@@ -206,7 +206,9 @@ def simulate_asset_damage_recovery_access_optimized(
                         temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
                             temp_gdf_for_islands, 
                             hazard_threshold=flood_threshold, 
-                            hazard_column=haz_col_str
+                            hazard_column=haz_col_str,
+                            config=_config,
+                
                         )
                         island_ids = temp_gdf_for_islands['island_id'].values
                         
@@ -339,7 +341,8 @@ def simulate_asset_damage_recovery_access_optimized(
                 temp_gdf, dissolved_roads = match_island_ids_assets(
                     temp_gdf,  
                     hazard_threshold=flood_threshold, 
-                    hazard_column=haz_col_str
+                    hazard_column=haz_col_str,
+                    config=_config
                 )
                 island_ids = temp_gdf['island_id'].values
                 
