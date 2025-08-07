@@ -61,6 +61,9 @@ from ra2ce.network.exporters.multi_graph_network_exporter import MultiGraphNetwo
 from ra2ce.network.network_wrappers.osm_network_wrapper.osm_network_wrapper import OsmNetworkWrapper
 from ra2ce.ra2ce_handler import Ra2ceHandler
 
+# === Local Imports ===
+from src.utils import project_graph_coords, filter_hazard_graph
+
 # Global variables to cache grid analysis
 _baseline_grid = None
 _baseline_graph = None
@@ -210,15 +213,16 @@ def load_graph(path: Path) -> nx.Graph:
     with open(path, "rb") as f:
         return pickle.load(f)
 
-def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
-    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
-    for n, d in G.nodes(data=True):
-        d["x_m"], d["y_m"] = transformer.transform(d["x"], d["y"])
-    for u, v, d in G.edges(data=True):
-        x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
-        x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
-        d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-    return G
+# MOVED TO UTILS
+# def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
+#     transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
+#     for n, d in G.nodes(data=True):
+#         d["x_m"], d["y_m"] = transformer.transform(d["x"], d["y"])
+#     for u, v, d in G.edges(data=True):
+#         x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
+#         x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
+#         d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+#     return G
 
 def filter_motorway_edges(G: nx.Graph) -> nx.Graph:
     G_filtered = G.copy()
@@ -296,26 +300,27 @@ def compute_grid_distances(grid: gpd.GeoDataFrame, G: nx.Graph, node_col: str, l
     grid[f"reachable_cells_{label_prefix}"] = reachable_counts
     return grid
 
-def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str) -> nx.Graph:
-    def is_motorway(highway):
-        if isinstance(highway, str):
-            return "motorway" in highway.lower()
-        elif isinstance(highway, list):
-            return any("motorway" in str(h).lower() for h in highway)
-        return False
+#MOVED TO UTILS
+# def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str) -> nx.Graph:
+#     def is_motorway(highway):
+#         if isinstance(highway, str):
+#             return "motorway" in highway.lower()
+#         elif isinstance(highway, list):
+#             return any("motorway" in str(h).lower() for h in highway)
+#         return False
 
-    def is_protected(d):
-        # Keep edge if it has a bridge or tunnel value
-        return pd.notna(d.get("bridge")) or pd.notna(d.get("tunnel"))
+#     def is_protected(d):
+#         # Keep edge if it has a bridge or tunnel value
+#         return pd.notna(d.get("bridge")) or pd.notna(d.get("tunnel"))
 
-    edges_to_remove = [
-        (u, v) for u, v, d in G.edges(data=True)
-        if d.get(hazard_column, 0) > threshold and not is_motorway(d.get("highway")) and not is_protected(d)
-    ]
+#     edges_to_remove = [
+#         (u, v) for u, v, d in G.edges(data=True)
+#         if d.get(hazard_column, 0) > threshold and not is_motorway(d.get("highway")) and not is_protected(d)
+#     ]
 
-    G.remove_edges_from(edges_to_remove)
-    G.remove_nodes_from(list(nx.isolates(G)))
-    return G
+#     G.remove_edges_from(edges_to_remove)
+#     G.remove_nodes_from(list(nx.isolates(G)))
+#     return G
 
 def sample_flood_depths(grid: gpd.GeoDataFrame, raster_path: Path, threshold: float) -> gpd.GeoDataFrame:
     with rasterio.open(raster_path) as src:
@@ -662,68 +667,7 @@ def set_verbose(verbose: bool = True):
     global _verbose
     _verbose = verbose
 
-def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str) -> gpd.GeoDataFrame:
-    with open(graph_pickle_path, "rb") as f:
-        G = pickle.load(f)
-        G = nx.DiGraph(G)
 
-    G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
-    G = filter_hazard_graph(G, hazard_threshold, hazard_column)
-
-    # Identify strongly connected components
-    components = list(nx.strongly_connected_components(G))
-    fid_to_island = {}
-
-    # Assign island_id to each fid
-    for i, comp in enumerate(components):
-        subgraph = G.subgraph(comp)
-        for u, v, data in subgraph.edges(data=True):
-            fid_to_island[v] = i
-
-    # Create transformer for projecting geometries
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
-    
-    # Build edge records with geometry and length
-    records = []
-
-    for u, v, data in G.edges(data=True):
-        # Project the actual edge geometry
-        original_geom = data['geometry']
-        if hasattr(original_geom, 'coords'):
-            # Project all coordinates in the geometry
-            projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
-            projected_geom = LineString(projected_coords)
-        else:
-            # Fallback: create LineString from node positions if no edge geometry
-            projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
-                                       (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
-        
-        length_m = data.get("length", None)
-        if length_m is None:
-            print(f"Length not found for edge ({u}, {v}), calculating from projected geometry.")
-            length_m = projected_geom.length  
-
-        island_id = fid_to_island.get(v, -1)
-
-        record = data.copy()
-        record["geometry"] = projected_geom  # Use properly projected geometry
-        record["length_m"] = length_m
-        record["island_id"] = island_id
-        records.append(record)
-
-    # Create GeoDataFrame with correct CRS
-    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:28992")
-
-    # Compute island sizes using groupby
-    island_sizes = gdf.groupby("island_id")["length_m"].sum().reset_index()
-    island_sizes["island_size_km"] = island_sizes["length_m"] / 1000.0
-    island_sizes = island_sizes[["island_id", "island_size_km"]]
-
-    # Merge island sizes back into GeoDataFrame
-    gdf = gdf.merge(island_sizes, on="island_id", how="left")
-    gdf["island_size_km"] = gdf["island_size_km"].fillna(0.0)
-
-    return gdf
 
 # Export main functions for easy import
 __all__ = [
