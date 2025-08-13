@@ -24,7 +24,6 @@ _config = get_config()
 HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
 
 
-
 def simulate_asset_damage_recovery_access_optimized(
     gdf_assets, 
     hazard_maps, 
@@ -33,7 +32,9 @@ def simulate_asset_damage_recovery_access_optimized(
     flood_threshold=0.2, 
     recovery_parameters=None,
     root_dir=None,
-    verbose=False
+    verbose=False,
+    timestep_output=True, 
+    execution_id=None
 ):
     """
     Run the asset damage recovery simulation with accessibility and repair crew assignment.
@@ -64,6 +65,8 @@ def simulate_asset_damage_recovery_access_optimized(
             - 'repair_threshold': Threshold for repairable damage ratio
         root_dir (str or Path, optional): Root directory for data storage and caching
         verbose (bool): If True, print detailed simulation information
+        timestep_output (bool): If True, output detailed asset states at each timestep to Parquet file
+        execution_id (str, optional): Unique identifier for this simulation run. Used for output file naming.
 
     Returns:
         dataframe: DataFrame containing simulation results by timestep
@@ -87,6 +90,10 @@ def simulate_asset_damage_recovery_access_optimized(
     else:
         hazard_dir = None
         hazard_dir_name = "unknown"
+
+    # Setup output directory
+    output_dir = root_dir / 'data' / 'output' / f"output_{hazard_dir_name}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load caches with hazard directory context
     print("Loading optimization caches...")
@@ -140,6 +147,25 @@ def simulate_asset_damage_recovery_access_optimized(
     
     # Results tracking
     results = []
+    
+    # Initialize timestep output if requested
+    timestep_parquet_buffer = []
+    timestep_output_file = None
+    buffer_size = 100  # Write to disk every 100 timesteps
+    
+    if timestep_output:
+        # Generate output filename based on execution_id
+        if execution_id:
+            timestep_output_file = output_dir / f'timestep_output_{execution_id}.parquet'
+        else:
+            timestep_output_file = output_dir / 'timestep_output.parquet'
+        
+        # Remove existing file if it exists (for clean start)
+        if timestep_output_file.exists():
+            timestep_output_file.unlink()
+        
+        if verbose:
+            print(f"Timestep output will be written to: {timestep_output_file}")
     
     # Initialize grid analysis once
     print("Initializing grid-based accessibility analysis...")
@@ -384,6 +410,7 @@ def simulate_asset_damage_recovery_access_optimized(
         )
         
         # For each timestep, decrement repair_time if accessible and not flooded 
+        flooded_mask = current_hazard_values > flood_threshold
         can_repair_mask = accessible & ~flooded_mask & repair_crews_assigned
         repair_time[can_repair_mask] = np.maximum(repair_time[can_repair_mask] - 1.0, 0.0)
         
@@ -420,6 +447,32 @@ def simulate_asset_damage_recovery_access_optimized(
             if verbose:
                 newly_operational_indices = np.where(newly_operational)[0]
                 print(f"Assets {newly_operational_indices.tolist()} became operational at timestep {timestep}")
+        
+        # Write timestep data to parquet buffer if requested
+        if timestep_output:
+            timestep_data = {
+                'timestep': timestep,
+                'day': day_counter,
+                'asset_id': range(num_assets),
+                'damage_ratio': damage_ratio.copy(),
+                'repair_time': repair_time.copy(),
+                'operational': operational.astype(int),
+                'accessible': accessible.astype(int),
+                'flooded': flooded_mask.astype(int),
+                'crew_assigned': repair_crews_assigned.astype(int),
+                'hazard_value': current_hazard_values.copy()
+            }
+            
+            timestep_df = pd.DataFrame(timestep_data)
+            timestep_parquet_buffer.append(timestep_df)
+            
+            # Write buffer to file when it reaches size limit or at end of day
+            if len(timestep_parquet_buffer) >= buffer_size or timestep % 24 == 23:
+                write_timestep_buffer_to_parquet(timestep_parquet_buffer, timestep_output_file)
+                timestep_parquet_buffer.clear()
+                
+                if verbose and timestep % 24 == 23:
+                    print(f"Wrote timestep data to {timestep_output_file} (day {day_counter} complete)")
         
         # Record results at every timestep 
         # Only calculate averages for assets that actually have damage/repair time to avoid computational spikes
@@ -459,6 +512,11 @@ def simulate_asset_damage_recovery_access_optimized(
                 print(f"Day {day_counter} summary: {operational.sum()}/{num_assets} operational, "
                       f"{accessible.sum()} accessible, {(current_hazard_values > flood_threshold).sum()} flooded")
     
+    # Write any remaining data in buffer
+    if timestep_output and timestep_parquet_buffer:
+        write_timestep_buffer_to_parquet(timestep_parquet_buffer, timestep_output_file)
+        print(f"Final timestep data written to {timestep_output_file}")
+    
     # Save caches for next run with hazard directory context
     print("Saving optimization caches...")
     save_accessibility_cache(accessibility_cache, interim_dir, hazard_dir)
@@ -493,11 +551,49 @@ def simulate_asset_damage_recovery_access_optimized(
     
     return results_df, {
         'operational': operational,
+        'hazard_value': current_hazard_values,
         'damage_ratio': damage_ratio,
         'repair_time': repair_time,
         'accessible': accessible,
         'repair_crews_assigned': repair_crews_assigned
     }
+
+
+def write_timestep_buffer_to_parquet(buffer, output_file):
+    """
+    Write buffered timestep data to parquet file, appending if file exists.
+    
+    Args:
+        buffer (list): List of DataFrames to write
+        output_file (Path): Path to output parquet file
+    """
+    if not buffer:
+        return
+    
+    # Combine buffer data
+    combined_df = pd.concat(buffer, ignore_index=True)
+    
+    # Append to existing file or create new one
+    if output_file.exists():
+        try:
+            existing_df = pd.read_parquet(output_file)
+            combined_df = pd.concat([existing_df, combined_df], ignore_index=True)
+        except Exception as e:
+            print(f"Warning: Could not read existing parquet file {output_file}: {e}")
+            print("Creating new file instead")
+    
+    # Write to parquet with compression
+    try:
+        combined_df.to_parquet(output_file, index=False, engine='pyarrow', compression='snappy')
+    except ImportError:
+        # Fallback to default engine if pyarrow not available
+        combined_df.to_parquet(output_file, index=False, compression='gzip')
+    except Exception as e:
+        print(f"Error writing to parquet file {output_file}: {e}")
+        # Fallback to CSV if parquet fails
+        csv_file = output_file.with_suffix('.csv')
+        combined_df.to_csv(csv_file, index=False)
+        print(f"Saved as CSV instead: {csv_file}")
 
 
 def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 
