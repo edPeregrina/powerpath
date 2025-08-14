@@ -49,7 +49,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         
         # Simulation configuration
         'simulation_config': {
-            'number_repair_crews': 10,
+            'number_repair_crews': 20,
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
             'verbose': True

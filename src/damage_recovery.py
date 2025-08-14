@@ -51,3 +51,37 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
+
+def default_fragility_function(hazard_values, asset_type):
+    """
+    Calculate binary operational status from hazard values using fragility curve.
+    Returns 1 for operational, 0 for failed, based on probabilistic sampling.
+    
+    Following NKWK, a median failure depth (d_m) by voltage is considered - 0.3m for ls, 0.6m for msls
+    The equation used follows: P_f(d) = 1/(1 + exp(-k*(d - d_m)))
+    
+    k is determined each run as a value between 5 and 7.5 for a hardened and softened curve (Boreel)
+    """
+    failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
+
+    k = np.random.uniform(5, 7.5)
+
+    hazard_mask = hazard_values > 0
+    ls_mask = asset_type == 'ls'
+    msls_mask = asset_type == 'msls'
+
+    d_m = np.where(ls_mask, 0.3, np.where(msls_mask, 0.6, 0))  # Default median depth for other types
+    
+    # Calculate failure probability only for positive hazard values
+    failure_probability[hazard_mask] = 1 / (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
+    
+    # Generate random values for each asset
+    random_values = np.random.random(size=hazard_values.shape)
+    
+    # Binary decision: 0 = failed, 1 = operational
+    # Asset fails if random value < failure probability
+    operational_status = (random_values >= failure_probability).astype(int)
+
+    print('Count of potentially failed assets: ', np.sum(operational_status == 0))
+    
+    return operational_status

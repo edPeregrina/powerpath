@@ -10,7 +10,7 @@ from datetime import datetime
 from src.caching import load_accessibility_cache, load_overlap_cache, load_hazard_extraction_cache, save_accessibility_cache, save_overlap_cache, save_hazard_extraction_cache
 from src.island_analysis import precompute_island_assignments, match_island_ids_assets, update_repair_crew_islands_with_overlap_cached
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
-from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver
+from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
 from src.caching import create_accessibility_cache_key
 import src.grid_based_accessibility_hex as grid_hex
 
@@ -22,6 +22,71 @@ from config import get_config
 # Get the hazard extraction method from config
 _config = get_config()
 HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
+
+def generate_island_timestep_report(timestep, day_counter, available_repair_crews, repair_crews_assigned, 
+                                   damage_ratio, repair_time, island_ids, damage_threshold, verbose=False):
+    """
+    Generate island-by-island report for current timestep
+    
+    Returns dict with island statistics
+    """
+    island_report = {
+        'timestep': timestep,
+        'day': day_counter,
+        'islands': {}
+    }
+    
+    # Get unique islands
+    unique_islands = np.unique(island_ids)
+    
+    for island_id in unique_islands:
+
+        # Create mask for this island
+        island_mask = (island_ids == island_id)
+        
+        # Count assets on this island
+        total_assets_on_island = island_mask.sum()
+        
+        # Count damaged assets on this island
+        damaged_on_island = island_mask & (damage_ratio > damage_threshold)
+        damaged_count = damaged_on_island.sum()
+        
+        # Count crews assigned on this island
+        crews_assigned_on_island = island_mask & repair_crews_assigned
+        crews_assigned_count = crews_assigned_on_island.sum()
+        
+        # Available crews for this island
+        available_crews = available_repair_crews.get(island_id, 0)
+        
+        # Calculate repair backlog for this island
+        repair_backlog = repair_time[island_mask].sum()
+        
+        # Calculate average damage ratio for damaged assets on this island
+        if damaged_count > 0:
+            avg_damage_ratio = damage_ratio[damaged_on_island].mean()
+            avg_repair_time = repair_time[damaged_on_island].mean()
+        else:
+            avg_damage_ratio = 0.0
+            avg_repair_time = 0.0
+        
+        island_report['islands'][island_id] = {
+            'total_assets': int(total_assets_on_island),
+            'damaged_assets': int(damaged_count),
+            'crews_assigned': int(crews_assigned_count),
+            'available_crews': int(available_crews),
+            'repair_backlog_hours': float(repair_backlog),
+            'avg_damage_ratio': float(avg_damage_ratio),
+            'avg_repair_time': float(avg_repair_time)
+        }
+    
+    # Print summary if verbose and at daily intervals
+    print(f"\n=== ISLAND REPORT - Day {day_counter} (Timestep {timestep}) ===")
+    for island_id, stats in island_report['islands'].items():
+        print(f"Island {island_id}: {stats['damaged_assets']}/{stats['total_assets']} damaged, "
+                f"{stats['crews_assigned']} crews working, {stats['available_crews']} available, "
+                f"{stats['repair_backlog_hours']:.1f}h backlog")
+    
+    return island_report
 
 
 def simulate_asset_damage_recovery_access_optimized(
@@ -134,6 +199,7 @@ def simulate_asset_damage_recovery_access_optimized(
     num_assets = len(gdf_assets)
     
     # State arrays - following original function initialization
+    asset_type = gdf_assets['type'].values
     damage_ratio = np.zeros(num_assets, dtype=np.float64)
     repair_time = np.zeros(num_assets, dtype=np.float64)
     accessible = np.ones(num_assets, dtype=bool)  # Start as accessible
@@ -287,11 +353,25 @@ def simulate_asset_damage_recovery_access_optimized(
                     print(f"No dissolved roads available for {cache_key}, using global crew assignment")
             
             # Mask of assets flooded above threshold  
-            flooded_mask = current_hazard_values > flood_threshold
+            flooded_mask = current_hazard_values > flood_threshold 
 
-            # Flooded assets are not operational
-            operational[flooded_mask] = False
-
+            # Only apply fragility to assets that are NOT currently under repair
+            not_under_repair_mask = ~repair_crews_assigned
+            assets_to_evaluate = flooded_mask & not_under_repair_mask & operational
+            
+            if np.any(assets_to_evaluate):
+                fragility_operational = np.ones_like(operational, dtype=bool)  # Start with all operational
+                
+                # Only evaluate assets not under repair
+                hazard_subset = current_hazard_values[assets_to_evaluate]
+                asset_type_subset = asset_type[assets_to_evaluate]
+                
+                fragility_result = default_fragility_function(hazard_subset, asset_type_subset)
+                fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
+                
+                # Update operational status, but preserve assets under repair
+                operational = np.minimum(operational, fragility_operational)
+            
             # Update damage ratio for assets flooded above threshold this timestep
             if np.any(flooded_mask):
                 dr_new = default_damage_ratio_function(current_hazard_values[flooded_mask], damage_ratio_coefficients)
@@ -308,19 +388,17 @@ def simulate_asset_damage_recovery_access_optimized(
                 damage_ratio[flooded_mask] = np.maximum(damage_ratio[flooded_mask], dr_new)
 
                 # Update repair times for assets with latest damage ratios
-                if np.any(flooded_mask):
-                    # Recalculate repair times for all flooded assets based on their current damage
-                    repair_time[flooded_mask] = default_repair_time_function(
-                        damage_ratio[flooded_mask], repair_time_coefficients
-                    )
-                    
-                    if verbose:
-                        print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
-                        print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
-                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
-            
-            # For assets under repair, solve for current damage ratio - remaining repair time, excluding assets under repair threshold
-            recalc_repair_mask = (repair_time > repair_threshold) 
+                repair_time[flooded_mask] = default_repair_time_function(
+                    damage_ratio[flooded_mask], repair_time_coefficients
+                )
+                
+                if verbose:
+                    print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
+                    print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
+                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+
+            # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
+            recalc_repair_mask = (repair_time > repair_threshold)
             if np.any(recalc_repair_mask):
                 repair_times_under_repair = repair_time[recalc_repair_mask]
                 damage_ratios_from_repair = vectorized_damage_ratio_solver(
@@ -356,7 +434,7 @@ def simulate_asset_damage_recovery_access_optimized(
                 except Exception as e:
                     print(f"Warning: Accessibility model failed: {e}")
                     print("Keeping current accessibility status")
-        
+
         # Island-based crew assignment logic - simplified check since islands are already computed above
         if island_method_active:
             # Check if we still need to initialize island assignments (backup case)
@@ -409,44 +487,47 @@ def simulate_asset_damage_recovery_access_optimized(
             verbose=verbose
         )
         
-        # For each timestep, decrement repair_time if accessible and not flooded 
-        flooded_mask = current_hazard_values > flood_threshold
+        # For each timestep, decrement repair_time if accessible, not flooded, and with repair crews assigned
         can_repair_mask = accessible & ~flooded_mask & repair_crews_assigned
         repair_time[can_repair_mask] = np.maximum(repair_time[can_repair_mask] - 1.0, 0.0)
         
-        # Check for completed repairs 
-        newly_operational = (repair_time == 0.0) & (~operational)
+        # Check for completed repairs
+        completed_repairs = (repair_time == 0.0) & repair_crews_assigned
         
-        if np.any(newly_operational):
-            num_newly_operational = newly_operational.sum()
+        if np.any(completed_repairs):
+            # Only force operational=True for assets that are non-operational but completed repair
+            non_operational_completed = completed_repairs & (~operational)
             
-            # Update asset states
-            operational[newly_operational] = True
-            damage_ratio[newly_operational] = 0.0
-            repair_time[newly_operational] = 0.0
+            if np.any(non_operational_completed):
+                operational[non_operational_completed] = True
             
-            # Release repair crews - handle both integer and dictionary formats 
+            # For ALL completed repairs, reset damage and release crews
+            damage_ratio[completed_repairs] = 0.0
+            repair_time[completed_repairs] = 0.0
+            
+            # Release repair crews
+            num_completed_repairs = completed_repairs.sum()
             if available_repair_crews is not None:
                 if isinstance(available_repair_crews, dict):
-                    # For island-based constraints, add crews back to their respective islands
-                    for asset_idx in np.where(newly_operational)[0]:
+                    # Island-based crew management
+                    for asset_idx in np.where(completed_repairs)[0]:
                         asset_island_id = island_ids[asset_idx]
                         if asset_island_id in available_repair_crews:
                             available_repair_crews[asset_island_id] += 1
                         else:
-                            # If island not found, add to first available island
+                            # Fallback to first available island
                             if available_repair_crews:
                                 first_island = list(available_repair_crews.keys())[0]
                                 available_repair_crews[first_island] += 1
                 else:
-                    # For simple integer constraints
-                    available_repair_crews += num_newly_operational
+                    # Simple integer crew management
+                    available_repair_crews += num_completed_repairs
             
-            repair_crews_assigned[newly_operational] = False  # Release repair crews for newly operational assets
-            
+            repair_crews_assigned[completed_repairs] = False
+                
             if verbose:
-                newly_operational_indices = np.where(newly_operational)[0]
-                print(f"Assets {newly_operational_indices.tolist()} became operational at timestep {timestep}")
+                completed_repairs_indices = np.where(completed_repairs)[0]
+                print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
         
         # Write timestep data to parquet buffer if requested
         if timestep_output:
@@ -557,6 +638,8 @@ def simulate_asset_damage_recovery_access_optimized(
         'accessible': accessible,
         'repair_crews_assigned': repair_crews_assigned
     }
+
+
 
 
 def write_timestep_buffer_to_parquet(buffer, output_file):
