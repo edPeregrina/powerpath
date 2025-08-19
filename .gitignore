@@ -1,8 +1,9 @@
-# Ignore everything in the output, interim folder and in book/cache
+# Ignore everything in the output, interim folder and in book/cache, ignore raw data folder
 /data/output/*
 /data/interim/*
 /data/book/cache/*
 /src/__pycache__/*
+/raw_data/*
 
 # Except the to_repo folder
 !/data/output/to_repo/
