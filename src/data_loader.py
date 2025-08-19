@@ -4,25 +4,43 @@ Assets are geodataframes of electricity stations and hazard maps are lists of fi
 """
 import geopandas as gpd
 import pandas as pd
+import os
 
 # Data Loading Functions
-def load_electricity_assets(electricity_dir):
+def load_electricity_assets(electricity_dir, asset_types):
     """Load electricity assets from shapefile
     
     Args:
         electricity_dir (Path): Path to the directory containing electricity station shapefiles
+        asset_types (list): List of asset types to load (e.g., ['ls', 'ms', 'msls'])
 
     Returns:
         gpd.GeoDataFrame: Combined GeoDataFrame of electricity assets with type column
-   
+
     """
-    
+    # List station shapefiles in the electricity directory
     station_files = [
-        'ls_stations_clipped.shp',
-        # 'ms_stations_clipped.shp', 
-        'msls_stations_clipped.shp'
+        f for f in os.listdir(electricity_dir) if f.endswith('.shp') and 'station' in f
     ]
+
+    # Fix: Use exact matching with underscore to avoid 'ls' matching 'msls'
+    # Sort asset_types by length (longest first) to prioritize longer matches
+    asset_types_sorted = sorted(asset_types, key=len, reverse=True)
     
+    matched_files = []
+    for station_file in station_files:
+        filename_prefix = station_file.split('_')[0]
+        if filename_prefix in asset_types_sorted:
+            matched_files.append(station_file)
+    
+    station_files = matched_files
+
+    print(f"Found {len(station_files)} electricity station files matching types {asset_types}")
+    
+    # Add debug information to see what files were found
+    print(f"All .shp files in directory: {[f for f in os.listdir(electricity_dir) if f.endswith('.shp')]}")
+    print(f"Files with 'station': {[f for f in os.listdir(electricity_dir) if f.endswith('.shp') and 'station' in f]}")
+    print(f"Final matched files: {station_files}")
     combined_assets = []
     
     for station_file in station_files:
