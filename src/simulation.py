@@ -170,13 +170,11 @@ def simulate_asset_damage_recovery_access_optimized(
     # Pre-compute island assignments if using island-based method
     island_cache = {}
     if 'island' in repair_crew_assignment_method:
-        print("Pre-computing island assignments...")
-        hazard_thresholds = [0.1, 0.2, 0.3]  # Expected thresholds
-        hazard_columns = [f'EV{i}_ma' for i in range(10)]  # Expected columns
+        hazard_thresholds = [0.2]  # Expected thresholds
         
         # Add hazard directory name to island cache filename
         island_cache = precompute_island_assignments(
-            hazard_maps, hazard_thresholds, gdf_assets, interim_dir, hazard_dir_name, accessibility_model=grid_hex.accessibility_model
+            hazard_maps, hazard_thresholds, gdf_assets, interim_dir, hazard_dir_name
         )
         
     # Set up default recovery parameters if not provided
@@ -209,7 +207,7 @@ def simulate_asset_damage_recovery_access_optimized(
     island_ids = np.zeros(num_assets, dtype=int)  # For island if needed
     previous_islands = None
     
-    temp_gdf = gdf_assets  # Reference to original, not a copy
+    temp_gdf = gdf_assets.copy()  # Reference to original, not a copy
     
     # Results tracking
     results = []
@@ -232,10 +230,11 @@ def simulate_asset_damage_recovery_access_optimized(
         
         if verbose:
             print(f"Timestep output will be written to: {timestep_output_file}")
-    
-    # Initialize grid analysis once
-    print("Initializing grid-based accessibility analysis...")
-    grid_hex.initialize_grid_analysis(root_dir)
+
+    if _config['simulation_config']['accessibility_model'] is not None:
+        # Initialize accessibility model analysis once if using any model
+        print("Initializing grid-based accessibility analysis...")
+        grid_hex.initialize_grid_analysis(root_dir)
     
     # Simulation loop
     available_repair_crews = number_repair_crews
@@ -417,14 +416,15 @@ def simulate_asset_damage_recovery_access_optimized(
             else:
                 print(f"Computing accessibility for day {day_counter} (hazard dir: {hazard_dir_name})...")
                 try:
-                    accessibility_result = grid_hex.accessibility_model(
-                        gdf_assets.geometry, 
-                        hazard_map, 
-                        current_hazard_values,
-                        verbose=verbose,
-                        day_string=day_counter_str,
-                        project_root=root_dir
-                    )
+                    # accessibility_result = grid_hex.accessibility_model(
+                    #     gdf_assets.geometry, 
+                    #     hazard_map, 
+                    #     current_hazard_values,
+                    #     verbose=verbose,
+                    #     day_string=day_counter_str,
+                    #     project_root=root_dir
+                    # )
+                    accessibility_result = accessible # Defaulting to accessible, to use only islands logic
                     accessible = np.array(accessibility_result, dtype=bool)
                     accessibility_cache[accessibility_cache_key] = accessible
                     
