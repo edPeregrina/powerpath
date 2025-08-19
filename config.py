@@ -45,14 +45,17 @@ def get_config(root_dir=None, hazard_dir_override=None):
     # Base configuration
     config = {
         'root_dir': root_dir,
-        'electricity_dir': root_dir / 'data' / 'electricity',
+        'data_dir': root_dir / 'raw_data' / 'ZH_Delfland_2',
+        'electricity_dir': root_dir / 'raw_data' / 'ZH_Delfland_2' / 'electricity',
+        # 'electricity_dir': root_dir / 'data' / 'electricity',
         
         # Simulation configuration
         'simulation_config': {
             'number_repair_crews': 20,
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
-            'verbose': True
+            'verbose': True,
+            'accessibility_model': None  # Default to None, can be set to grid_hex.accessibility_model
         },
         
         # Recovery model parameters
@@ -79,7 +82,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
     else:
         # Default hazard directory paths (in order of preference)
         hazard_dir_options = [
-            Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\timeseries_data\reprojected'),
+            root_dir / 'raw_data' / 'ZH_Delfland' / 'hazard_maps_ZH_Delfland',
+            # Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\timeseries_data\reprojected'),
             root_dir / 'data' / 'static' / 'hazard' / 'processed',
             root_dir / 'data' / 'hazard',
             root_dir / 'hazard_data'
