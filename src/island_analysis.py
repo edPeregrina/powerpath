@@ -245,27 +245,16 @@ def get_island_assignment_cached(hazard_map, threshold, hazard_column, gdf_asset
         gdf_assets_copy['island_id'] = 0
         return gdf_assets_copy, None
 
-def precompute_island_assignments(hazard_maps, flood_thresholds, gdf_assets, 
-                                 interim_dir, hazard_dir):
+def initialize_island_cache(interim_dir, hazard_dir):
     """
     Initialize island assignment cache, sets up the cache structure for on-demand computation.
     """
-    print(f"Initializing island assignment cache for {len(hazard_maps)} hazard maps and {len(flood_thresholds)} thresholds...")
-    print("Island assignments will be computed on-demand as needed")
     
     cache_dir = interim_dir / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Load existing cache (don't overwrite existing computations)
     island_cache = load_island_cache(cache_dir, hazard_dir)
-    
-    # Count existing entries
-    existing_count = len(island_cache)
-    total_possible = len(hazard_maps) * len(flood_thresholds)
-    
-    print(f"Island assignment cache initialized:")
-    print(f"  Existing cached entries: {existing_count}/{total_possible}")
-    print(f"  Missing entries will be computed on-demand during simulation")
     
     return island_cache
 
@@ -361,7 +350,7 @@ def update_repair_crew_islands_with_overlap_cached(
     unique_islands = np.unique(island_ids)
     unique_islands = unique_islands[~pd.isna(unique_islands)]
     
-    print(f"Processing {len(unique_islands)} islands with crew distribution...")
+    print(f"Updating repair crew distribution for {len(unique_islands)} islands.")
     
     if isinstance(available_repair_crews, int):
         # Initial distribution logic when crews are given as an integer
@@ -507,7 +496,8 @@ def update_repair_crew_islands_with_overlap_cached(
                             crews_distributed_this_island += count
                         
                         total_redistributed_crews += crews_distributed_this_island
-                        print(f"Redistributed {crew_count} crews from previous island {prev_island_id} based on cached overlaps")
+                        print(f"Redistributed {crew_count} crews from previous island {prev_island_id} based on cached overlaps to:")
+                        print([(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0])
         
         if total_redistributed_crews != input_total_crews:
             print(f"Crew redistribution mismatch. Input: {input_total_crews}, Redistributed: {total_redistributed_crews}")

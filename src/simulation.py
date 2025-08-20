@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime
 
 from src.caching import load_accessibility_cache, load_overlap_cache, load_hazard_extraction_cache, save_accessibility_cache, save_overlap_cache, save_hazard_extraction_cache
-from src.island_analysis import precompute_island_assignments, match_island_ids_assets, update_repair_crew_islands_with_overlap_cached
+from src.island_analysis import initialize_island_cache, match_island_ids_assets, update_repair_crew_islands_with_overlap_cached
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
 from src.caching import create_accessibility_cache_key
@@ -161,21 +161,19 @@ def simulate_asset_damage_recovery_access_optimized(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Load caches with hazard directory context
-    print("Loading optimization caches...")
+    print("\nLoading optimization caches...")
     accessibility_cache = load_accessibility_cache(interim_dir, hazard_dir)
     overlap_cache = load_overlap_cache(interim_dir, hazard_dir)
     hazard_extraction_cache = load_hazard_extraction_cache(interim_dir, hazard_dir)
     previous_day_counter = None  # Track previous day for overlap caching (considers overlap between previous and current day islands)
     
-    # Pre-compute island assignments if using island-based method
+    # Initialize island cache if using island-based method
     island_cache = {}
     if 'island' in repair_crew_assignment_method:
-        hazard_thresholds = [0.2]  # Expected thresholds
+        # hazard_thresholds = [0.2]  # Expected thresholds
         
         # Add hazard directory name to island cache filename
-        island_cache = precompute_island_assignments(
-            hazard_maps, hazard_thresholds, gdf_assets, interim_dir, hazard_dir_name
-        )
+        island_cache = initialize_island_cache(interim_dir, hazard_dir_name)
         
     # Set up default recovery parameters if not provided
     if recovery_parameters is None:
@@ -189,7 +187,7 @@ def simulate_asset_damage_recovery_access_optimized(
     
     repair_time_coefficients = recovery_parameters['repair_time_coefficients']
     damage_ratio_coefficients = recovery_parameters.get('damage_ratio_coefficients', (0.0468, 0.0077))
-    time_step_hours = recovery_parameters['time_step_hours']
+    # time_step_hours = recovery_parameters['time_step_hours'] #TODO remove time_step_hours from config
     damage_threshold = recovery_parameters['damage_threshold']
     repair_threshold = recovery_parameters['repair_threshold']
 
@@ -242,7 +240,7 @@ def simulate_asset_damage_recovery_access_optimized(
     # Pre-compute information that only changes daily 
     island_method_active = 'island' in repair_crew_assignment_method
     if verbose and island_method_active:
-        print(f"Island-based method '{repair_crew_assignment_method}' will be used")
+        print(f"Island-based method '{repair_crew_assignment_method}' will be used for crew assignment")
     
     timesteps = np.arange(0, len(hazard_maps) * 24)  # 24 hours per day
 
@@ -599,7 +597,7 @@ def simulate_asset_damage_recovery_access_optimized(
         print(f"Final timestep data written to {timestep_output_file}")
     
     # Save caches for next run with hazard directory context
-    print("Saving optimization caches...")
+    print("\nSaving optimization caches...")
     save_accessibility_cache(accessibility_cache, interim_dir, hazard_dir)
     
     if hazard_extraction_cache:

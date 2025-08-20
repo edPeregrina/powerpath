@@ -273,7 +273,7 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
                 len(cached_result.get('haz_val_values', [])) == len(gdf_assets) and
                 cached_result.get('hazard_map') == str(hazard_map_path)):
                 
-                print(f"Using cached hazard extraction for day {day_counter} from {Path(hazard_map_path).name}")
+                print(f"\nUsing cached hazard extraction for day {day_counter} from {Path(hazard_map_path).name}")
                 
                 # Apply cached values to a copy of the GeoDataFrame
                 gdf_result = gdf_assets.copy()
