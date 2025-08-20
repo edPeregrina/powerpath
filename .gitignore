@@ -8,3 +8,5 @@
 # Except the to_repo folder
 !/data/output/to_repo/
 !/data/output/to_repo/**
+data/population/cbs_vk100_2024_v1.gpkg
+/__pycache__
