@@ -20,8 +20,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config import get_config
 
 # Get the hazard extraction method from config
-_config = get_config()
-HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
+# _config = get_config()
+# HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
 
 def generate_island_timestep_report(timestep, day_counter, available_repair_crews, repair_crews_assigned, 
                                    damage_ratio, repair_time, island_ids, damage_threshold, verbose=False):
@@ -99,7 +99,8 @@ def simulate_asset_damage_recovery_access_optimized(
     root_dir=None,
     verbose=False,
     timestep_output=True, 
-    execution_id=None
+    execution_id=None,
+    config=None
 ):
     """
     Run the asset damage recovery simulation with accessibility and repair crew assignment.
@@ -132,12 +133,18 @@ def simulate_asset_damage_recovery_access_optimized(
         verbose (bool): If True, print detailed simulation information
         timestep_output (bool): If True, output detailed asset states at each timestep to Parquet file
         execution_id (str, optional): Unique identifier for this simulation run. Used for output file naming.
+        config (dict, optional): Configuration settings for the simulation
 
+        
     Returns:
         dataframe: DataFrame containing simulation results by timestep
         dict: Simulation results including asset states, repair crew assignments, and accessibility
     """
-    
+    if config is None:
+        _config = get_config()
+    else:
+        _config = config
+
     # Initialize paths and caching
     if root_dir is None:
         root_dir = Path.cwd().parent
@@ -264,7 +271,7 @@ def simulate_asset_damage_recovery_access_optimized(
                 hazard_map, 
                 temp_gdf, 
                 day_counter, 
-                extraction_method=HAZARD_EXTRACTION_METHOD,
+                extraction_method=_config['analysis_config']['hazard_extraction_method'],
                 hazard_cache=hazard_extraction_cache,
                 hazard_dir=hazard_dir
             )
@@ -405,14 +412,13 @@ def simulate_asset_damage_recovery_access_optimized(
                 damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
                 
             # Daily accessibility update 
-            accessibility_cache_key = create_accessibility_cache_key(day_counter, flood_threshold, hazard_dir, grid_hex.accessibility_model)
-            
+            accessibility_cache_key = create_accessibility_cache_key(day_counter, flood_threshold, hazard_dir, accessibility_model=_config['simulation_config']['accessibility_model'])
+
             if accessibility_cache_key in accessibility_cache:
                 accessible = accessibility_cache[accessibility_cache_key]
                 if verbose:
                     print(f"Using cached accessibility for day {day_counter} (hazard dir: {hazard_dir_name})")
             else:
-                print(f"Computing accessibility for day {day_counter} (hazard dir: {hazard_dir_name})...")
                 try:
                     # accessibility_result = grid_hex.accessibility_model(
                     #     gdf_assets.geometry, 

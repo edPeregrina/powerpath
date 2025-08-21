@@ -23,7 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config import get_config
 
 # Get the hazard extraction method from config
-_config = get_config()
+# _config = get_config()
 
 
 
@@ -157,93 +157,99 @@ _config = get_config()
     
 #     return island_cache
 
-def get_island_assignment_cached(hazard_map, threshold, hazard_column, gdf_assets, 
-                                 interim_dir, hazard_dir, config=_config):
-    """
-    Get island assignment for a specific hazard map and threshold, with caching.
-    Computes on-demand and caches results for future use.
-    """
-    cache_dir = interim_dir / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+# def get_island_assignment_cached(hazard_map, threshold, hazard_column, gdf_assets, 
+#                                  interim_dir, hazard_dir, config=None):
+#     """
+#     Get island assignment for a specific hazard map and threshold, with caching.
+#     Computes on-demand and caches results for future use.
+#     """
+#     if config is None:
+#         _config = get_config()
+#     else:
+#         _config = config
+
+#     cache_dir = interim_dir / "cache"
+#     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load existing cache
-    island_cache = load_island_cache(cache_dir, hazard_dir)
+#     # Load existing cache
+#     island_cache = load_island_cache(cache_dir, hazard_dir)
     
-    # Create cache key
-    cache_key = f"{threshold}_{hazard_column}"
+#     # Create cache key
+#     cache_key = f"{threshold}_{hazard_column}"
     
-    # Check if already computed
-    if cache_key in island_cache:
-        print(f"Using cached island assignment for {Path(hazard_map).name}, threshold {threshold}")
-        cached_data = island_cache[cache_key]
+#     # Check if already computed
+#     if cache_key in island_cache:
+#         print(f"Using cached island assignment for {Path(hazard_map).name}, threshold {threshold}")
+#         cached_data = island_cache[cache_key]
         
-        # Extract cached results
-        if 'asset_indices' in cached_data:
-            # New format with boundary exclusion
-            asset_indices = cached_data['asset_indices']
-            island_ids = cached_data['island_ids']
-            dissolved_roads = cached_data['dissolved_roads']
+#         # Extract cached results
+#         if 'asset_indices' in cached_data:
+#             # New format with boundary exclusion
+#             asset_indices = cached_data['asset_indices']
+#             island_ids = cached_data['island_ids']
+#             dissolved_roads = cached_data['dissolved_roads']
             
-            # Filter gdf_assets to match cached indices
-            clean_gdf_assets = gdf_assets.loc[gdf_assets.index.isin(asset_indices)].copy()
-            clean_gdf_assets['island_id'] = island_ids
+#             # Filter gdf_assets to match cached indices
+#             clean_gdf_assets = gdf_assets.loc[gdf_assets.index.isin(asset_indices)].copy()
+#             clean_gdf_assets['island_id'] = island_ids
             
-            return clean_gdf_assets, dissolved_roads
-        else:
-            # Legacy format - full assets
-            island_ids = cached_data['island_ids']
-            dissolved_roads = cached_data['dissolved_roads']
+#             return clean_gdf_assets, dissolved_roads
+#         else:
+#             # Legacy format - full assets
+#             island_ids = cached_data['island_ids']
+#             dissolved_roads = cached_data['dissolved_roads']
             
-            # Assign island IDs to full asset set
-            gdf_assets_copy = gdf_assets.copy()
-            gdf_assets_copy['island_id'] = island_ids
+#             # Assign island IDs to full asset set
+#             gdf_assets_copy = gdf_assets.copy()
+#             gdf_assets_copy['island_id'] = island_ids
             
-            return gdf_assets_copy, dissolved_roads
+#             return gdf_assets_copy, dissolved_roads
     
-    # Not cached - compute now
-    print(f"Computing island assignment for {Path(hazard_map).name}, threshold {threshold}")
+#     # Not cached - compute now
+#     print(f"Computing island assignment for {Path(hazard_map).name}, threshold {threshold}")
     
-    try:
-        # Use match_island_ids_assets which handles boundary exclusion
-        temp_gdf_for_islands = gdf_assets.copy()
-        clean_gdf_assets, clean_dissolved_roads = match_island_ids_assets(
-            temp_gdf_for_islands, 
-            hazard_threshold=threshold, 
-            hazard_column=hazard_column,
-            config=config
-        )
+#     try:
+#         # Use match_island_ids_assets which handles boundary exclusion
+#         temp_gdf_for_islands = gdf_assets.copy()
+#         clean_gdf_assets, clean_dissolved_roads = match_island_ids_assets(
+#             temp_gdf_for_islands, 
+#             hazard_threshold=threshold, 
+#             hazard_column=hazard_column,
+#             config=_config
+#         )
         
-        # Store ONLY the clean results (boundary assets already excluded)
-        island_ids = clean_gdf_assets['island_id'].values
+#         # Store ONLY the clean results (boundary assets already excluded)
+#         island_ids = clean_gdf_assets['island_id'].values
         
-        island_data = {
-            'hazard_map': str(hazard_map),
-            'threshold': threshold,
-            'island_ids': island_ids,
-            'asset_indices': clean_gdf_assets.index.tolist(),  # Store which assets are included
-            'dissolved_roads': clean_dissolved_roads,
-            'timestamp': datetime.now().isoformat(),
-            'status': 'computed_on_demand',
-            'method': 'match_island_ids_assets_v2'
-        }
+#         island_data = {
+#             'hazard_map': str(hazard_map),
+#             'threshold': threshold,
+#             'island_ids': island_ids,
+#             'asset_indices': clean_gdf_assets.index.tolist(),  # Store which assets are included
+#             'dissolved_roads': clean_dissolved_roads,
+#             'timestamp': datetime.now().isoformat(),
+#             'status': 'computed_on_demand',
+#             'method': 'match_island_ids_assets_v2'
+#         }
         
-        # Add to cache and save
-        island_cache[cache_key] = island_data
-        save_island_cache_silent(island_cache, cache_dir, hazard_dir)
+#         # Add to cache and save
+#         island_cache[cache_key] = island_data
+#         save_island_cache_silent(island_cache, cache_dir, hazard_dir)
         
-        print(f"Cached island assignment for {cache_key}")
+#         print(f"Cached island assignment for {cache_key}")
         
-        return clean_gdf_assets, clean_dissolved_roads
+#         return clean_gdf_assets, clean_dissolved_roads
         
-    except Exception as e:
-        print(f"Error computing island assignment: {e}")
-        import traceback
-        traceback.print_exc()
+#     except Exception as e:
+#         print(f"Error computing island assignment: {e}")
+#         import traceback
+#         traceback.print_exc()
         
-        # Fallback
-        gdf_assets_copy = gdf_assets.copy()
-        gdf_assets_copy['island_id'] = 0
-        return gdf_assets_copy, None
+#         # Fallback
+#         gdf_assets_copy = gdf_assets.copy()
+#         gdf_assets_copy['island_id'] = 0
+#         return gdf_assets_copy, None
+
 
 def initialize_island_cache(interim_dir, hazard_dir):
     """
@@ -628,19 +634,24 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
     print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
     return gdf
 
-def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=_config):
+def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=None):
     """
     Get islands and assign IDs to assets with stable boundary island identification using geographic features.
     Boundary assets are excluded immediately based on spatial location.
     """
+    if config is None:
+        _config = get_config()
+    else:
+        _config = config    
+
     start_time = time.time()
-    boundary_assets_cache_path = config['interim_dir'] / 'boundary_assets.pkl'
-    boundary_islands_cache_path = config['interim_dir'] / 'boundary_islands.pkl'
+    boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
+    boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
     
     
     try:
         # Fetch graph for accessibility with islands
-        hazard_graph_path = config['data_dir'] / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        hazard_graph_path = _config['data_dir'] / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
         print(f"Loading graph from: {hazard_graph_path}")
         print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
         

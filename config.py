@@ -175,14 +175,28 @@ def print_config_summary(config):
 
 
 # Environment-specific configurations
+
 def get_development_config():
     """Get configuration optimized for development/testing."""
     config = get_config()
     config['analysis_config']['max_simulation_days'] = 3  # Limit for faster testing
     config['analysis_config']['performance_monitoring'] = True
     config['simulation_config']['verbose'] = True
-    return config
 
+    # Smallest data samples directories
+    config['data_dir'] = config['root_dir'] / 'data' / 'test_samples'
+    config['electricity_dir'] = config['data_dir'] / 'electricity'
+
+    config['simulation_config']['number_repair_crews'] = 5  # Fewer crews for faster testing
+
+    config['hazard_dir'] = config['data_dir'] / 'test_hazard_timesteps'
+
+    # Update interim and output directories to match the new hazard_dir
+    hazard_dir_name = config['hazard_dir'].name
+    config['interim_dir'] = config['root_dir'] / 'data' / 'interim' / f'interim_{hazard_dir_name}'
+    config['output_dir'] = config['root_dir'] / 'data' / 'output' / f'output_{hazard_dir_name}'
+
+    return config
 
 def get_production_config():
     """Get configuration optimized for production runs."""
