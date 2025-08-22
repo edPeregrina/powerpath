@@ -1,4 +1,5 @@
 # Ignore everything in the output, interim folder and in book/cache, ignore raw data folder
+/data/land_use/*
 /data/output/*
 /data/interim/*
 /data/book/cache/*
