@@ -45,9 +45,10 @@ def get_config(root_dir=None, hazard_dir_override=None):
     # Base configuration
     config = {
         'root_dir': root_dir,
-        'data_dir': root_dir / 'raw_data' / 'ZH_Delfland_2',
-        'electricity_dir': root_dir / 'raw_data' / 'ZH_Delfland_2' / 'electricity',
-        # 'electricity_dir': root_dir / 'data' / 'electricity',
+        'data_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run'),
+        'electricity_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\electricity'),
+
+        # 'electricity_dir': root_dir / 'data' / 'electricity', 
         
         # Simulation configuration
         'simulation_config': {
