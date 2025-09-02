@@ -18,6 +18,7 @@ import src.grid_based_accessibility_hex as grid_hex
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from config import get_config
+from shutil import copyfile
 
 # Get the hazard extraction method from config
 # _config = get_config()
@@ -206,6 +207,7 @@ def simulate_asset_damage_recovery_access_optimized(
     damage_ratio = np.zeros(num_assets, dtype=np.float64)
     repair_time = np.zeros(num_assets, dtype=np.float64)
     accessible = np.ones(num_assets, dtype=bool)  # Start as accessible
+    unreachable = np.zeros(num_assets, dtype=bool)  # Start as reachable
     operational = np.ones(num_assets, dtype=bool)  # All start operational
     repair_crews_assigned = np.zeros(num_assets, dtype=bool)
     current_hazard_values = np.zeros(num_assets, dtype=np.float64)
@@ -528,11 +530,26 @@ def simulate_asset_damage_recovery_access_optimized(
                     available_repair_crews += num_completed_repairs
             
             repair_crews_assigned[completed_repairs] = False
-                
+
             if verbose:
                 completed_repairs_indices = np.where(completed_repairs)[0]
                 print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
-        
+
+        if island_method_active:
+            # Islands with zero available crews and no crews assigned
+            all_island_ids = np.unique(island_ids)
+            idle_crew_islands = [island_id for island_id, crew_count in available_repair_crews.items() if crew_count > 0]
+            assigned_crew_islands = set(island_ids[repair_crews_assigned])
+            islands_with_crews = set(idle_crew_islands) | assigned_crew_islands
+            islands_without_crews = set(all_island_ids) - islands_with_crews
+            in_islands_without_crews = np.isin(island_ids, list(islands_without_crews))
+            unreachable = (
+                (damage_ratio > damage_threshold) &
+                (~flooded_mask) &
+                in_islands_without_crews
+            )
+            # unreachable_count = unreachable_mask.sum()
+
         # Write timestep data to parquet buffer if requested
         if timestep_output:
             timestep_data = {
@@ -543,6 +560,7 @@ def simulate_asset_damage_recovery_access_optimized(
                 'repair_time': repair_time.copy(),
                 'operational': operational.astype(int),
                 'accessible': accessible.astype(int),
+                'unreachable': unreachable.astype(int),
                 'flooded': flooded_mask.astype(int),
                 'crew_assigned': repair_crews_assigned.astype(int),
                 'hazard_value': current_hazard_values.copy()
@@ -583,6 +601,7 @@ def simulate_asset_damage_recovery_access_optimized(
             'timestep': timestep,
             'operational_count': operational.sum(),
             'accessible_count': accessible.sum(),
+            'unreachable_count': unreachable.sum(),
             'flooded_count': (current_hazard_values > flood_threshold).sum(),
             'damaged_count': damaged_assets_mask.sum(),
             'crews_assigned_count': repair_crews_assigned.sum(),
@@ -595,8 +614,8 @@ def simulate_asset_damage_recovery_access_optimized(
         if timestep % 24 == 23:  # End of day
             if verbose:
                 print(f"Day {day_counter} summary: {operational.sum()}/{num_assets} operational, "
-                      f"{accessible.sum()} accessible, {(current_hazard_values > flood_threshold).sum()} flooded")
-    
+                      f"{accessible.sum()} accessible, {unreachable.sum()} unreachable damaged assets, {(current_hazard_values > flood_threshold).sum()} flooded")
+
     # Write any remaining data in buffer
     if timestep_output and timestep_parquet_buffer:
         write_timestep_buffer_to_parquet(timestep_parquet_buffer, timestep_output_file)
@@ -634,6 +653,15 @@ def simulate_asset_damage_recovery_access_optimized(
     # Create results DataFrame
     results_df = pd.DataFrame(results)
     
+    # Copy of config.py file as text to log_config_executionid.txt
+    try:
+        config_output_file = output_dir / f'log_config_{execution_id}.txt' if execution_id else output_dir / 'log_config.txt'
+        config_source_file = root_dir / 'config.py'
+        copyfile(config_source_file, config_output_file)
+        print(f"Saved simulation configuration to {config_output_file}")
+    except Exception as e:
+        print(f"Warning: Could not save configuration file: {e}")
+
     return results_df, {
         'operational': operational,
         'hazard_value': current_hazard_values,

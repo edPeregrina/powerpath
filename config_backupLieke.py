@@ -45,11 +45,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
     # Base configuration
     config = {
         'root_dir': root_dir,
-        'data_dir': root_dir / 'raw_data/ZH_Delfland',
-        # 'data_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run'),
-
-        'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
-        # 'electricity_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\electricity'),
+        'data_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run'),
+        'electricity_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\electricity'),
 
         # 'electricity_dir': root_dir / 'data' / 'electricity', 
         
@@ -87,7 +84,6 @@ def get_config(root_dir=None, hazard_dir_override=None):
         # Default hazard directory paths (in order of preference)
         hazard_dir_options = [
             root_dir / 'raw_data' / 'ZH_Delfland' / 'hazard_maps_ZH_Delfland',
-            Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\hazard_maps_ZH_Delfland'),
             # Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\timeseries_data\reprojected'),
             root_dir / 'data' / 'static' / 'hazard' / 'processed',
             root_dir / 'data' / 'hazard',

@@ -286,8 +286,9 @@ def print_simulation_summary(results_df, gdf_assets, config=None):
             operational_rate = end_of_day['operational_count'] / total_assets * 100
             flooded_count = end_of_day['flooded_count']
             damaged_count = end_of_day['damaged_count']
-            print(f"Day {day}: {operational_rate:.1f}% operational, {flooded_count} flooded, {damaged_count} damaged")
-    
+            unreachable_count = end_of_day['unreachable_count']
+            print(f"Day {day}: {operational_rate:.1f}% operational, {int(flooded_count)} flooded, {int(unreachable_count)} unreachable, {int(damaged_count)} damaged.")
+
     # Repair backlog analysis
     print("\n" + "="*70)
     print("REPAIR BACKLOG ANALYSIS")
