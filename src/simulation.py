@@ -24,72 +24,6 @@ from shutil import copyfile
 # _config = get_config()
 # HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
 
-def generate_island_timestep_report(timestep, day_counter, available_repair_crews, repair_crews_assigned, 
-                                   damage_ratio, repair_time, island_ids, damage_threshold, verbose=False):
-    """
-    Generate island-by-island report for current timestep
-    
-    Returns dict with island statistics
-    """
-    island_report = {
-        'timestep': timestep,
-        'day': day_counter,
-        'islands': {}
-    }
-    
-    # Get unique islands
-    unique_islands = np.unique(island_ids)
-    
-    for island_id in unique_islands:
-
-        # Create mask for this island
-        island_mask = (island_ids == island_id)
-        
-        # Count assets on this island
-        total_assets_on_island = island_mask.sum()
-        
-        # Count damaged assets on this island
-        damaged_on_island = island_mask & (damage_ratio > damage_threshold)
-        damaged_count = damaged_on_island.sum()
-        
-        # Count crews assigned on this island
-        crews_assigned_on_island = island_mask & repair_crews_assigned
-        crews_assigned_count = crews_assigned_on_island.sum()
-        
-        # Available crews for this island
-        available_crews = available_repair_crews.get(island_id, 0)
-        
-        # Calculate repair backlog for this island
-        repair_backlog = repair_time[island_mask].sum()
-        
-        # Calculate average damage ratio for damaged assets on this island
-        if damaged_count > 0:
-            avg_damage_ratio = damage_ratio[damaged_on_island].mean()
-            avg_repair_time = repair_time[damaged_on_island].mean()
-        else:
-            avg_damage_ratio = 0.0
-            avg_repair_time = 0.0
-        
-        island_report['islands'][island_id] = {
-            'total_assets': int(total_assets_on_island),
-            'damaged_assets': int(damaged_count),
-            'crews_assigned': int(crews_assigned_count),
-            'available_crews': int(available_crews),
-            'repair_backlog_hours': float(repair_backlog),
-            'avg_damage_ratio': float(avg_damage_ratio),
-            'avg_repair_time': float(avg_repair_time)
-        }
-    
-    # Print summary if verbose and at daily intervals
-    print(f"\n=== ISLAND REPORT - Day {day_counter} (Timestep {timestep}) ===")
-    for island_id, stats in island_report['islands'].items():
-        print(f"Island {island_id}: {stats['damaged_assets']}/{stats['total_assets']} damaged, "
-                f"{stats['crews_assigned']} crews working, {stats['available_crews']} available, "
-                f"{stats['repair_backlog_hours']:.1f}h backlog")
-    
-    return island_report
-
-
 def simulate_asset_damage_recovery_access_optimized(
     gdf_assets, 
     hazard_maps, 
@@ -101,7 +35,8 @@ def simulate_asset_damage_recovery_access_optimized(
     verbose=False,
     timestep_output=True, 
     execution_id=None,
-    config=None
+    config=None,
+    major_timestep=24
 ):
     """
     Run the asset damage recovery simulation with accessibility and repair crew assignment.
@@ -173,7 +108,7 @@ def simulate_asset_damage_recovery_access_optimized(
     accessibility_cache = load_accessibility_cache(interim_dir, hazard_dir)
     overlap_cache = load_overlap_cache(interim_dir, hazard_dir)
     hazard_extraction_cache = load_hazard_extraction_cache(interim_dir, hazard_dir)
-    previous_day_counter = None  # Track previous day for overlap caching (considers overlap between previous and current day islands)
+    previous_map_counter = None  # Track previous map for overlap caching (considers overlap between previous and current islands)
     
     # Initialize island cache if using island-based method
     island_cache = {}
@@ -251,33 +186,38 @@ def simulate_asset_damage_recovery_access_optimized(
     if verbose and island_method_active:
         print(f"Island-based method '{repair_crew_assignment_method}' will be used for crew assignment")
     
-    timesteps = np.arange(0, len(hazard_maps) * 24)  # 24 hours per day
+    timesteps = np.arange(0, len(hazard_maps) * major_timestep)  # if 4 maps per day, major timestep is 6; if 1 map per day, major timestep is 24. Total hours is number of maps times hours covered per map
 
     for timestep in timesteps:
-        day_counter = timestep // 24
-        day_counter_str = str(day_counter).zfill(2)
+        day_counter = timestep // 24 # Day counter depends on the timestep, not on the hazard map
+        # day_counter_str = str(day_counter).zfill(2)
                 
-        # Every 24 hour-timesteps, process the hazard map for that day
-        if timestep % 24 == 0:           
-            if day_counter >= len(hazard_maps):
-                break  # No more hazard maps available
-                
-            hazard_map = hazard_maps[day_counter]
-            haz_col_str = f'EV{day_counter}_ma'
-                        
+        # Every x (24 by default) hour-timesteps, process the hazard map for that period
+        if timestep % major_timestep == 0:
+            map_counter = int(timestep / major_timestep)
+            if map_counter >= len(hazard_maps):
+                print(f"No more hazard maps available at timestep {timestep}, ending simulation.")
+                break
+
+            hazard_map = hazard_maps[map_counter]
+            haz_col_str = f'EV{map_counter}_ma'
+
             if verbose:
-                print(f"\n=== Processing timestep {timestep} (day {day_counter}) ===")
-            
+                print(f"\n=== Processing timestep {timestep} (day {day_counter}, map {map_counter}) ===")
+
             # Update hazard values
             temp_gdf = find_hazard_value_at_points_optimized(
-                hazard_map, 
-                temp_gdf, 
-                day_counter, 
+                hazard_map,
+                temp_gdf,
+                map_counter,
                 extraction_method=_config['analysis_config']['hazard_extraction_method'],
                 hazard_cache=hazard_extraction_cache,
                 hazard_dir=hazard_dir
             )
-            haz_val_str = f'hazard_value_{day_counter_str}'
+            haz_val_str = f'hazard_value_{map_counter}'
+            print(f'Columns in temp_gdf: {temp_gdf.columns.tolist()}')
+
+            # TODO: get rid of one of the two columns
             if haz_val_str in temp_gdf.columns:
                 current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
             else:
@@ -338,16 +278,16 @@ def simulate_asset_damage_recovery_access_optimized(
                         island_ids, 
                         dissolved_roads, 
                         previous_islands if 'previous_islands' in locals() else None,
-                        current_day=day_counter,
-                        previous_day=previous_day_counter,
+                        current_map=map_counter,
+                        previous_map=previous_map_counter,
                         hazard_threshold=flood_threshold,
                         overlap_cache=overlap_cache,
                         hazard_dir=hazard_dir
                     )
 
-                    # Update previous day counter
-                    previous_day_counter = day_counter
-                    
+                    # Update previous map counter
+                    previous_map_counter = map_counter
+
                     # Store current islands for next iteration
                     previous_islands = dissolved_roads.copy()
                     
@@ -398,10 +338,13 @@ def simulate_asset_damage_recovery_access_optimized(
                     damage_ratio[flooded_mask], repair_time_coefficients
                 )
                 
-                if verbose:
-                    print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
-                    print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
-                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+                if verbose: 
+                    try:
+                        print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
+                        print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
+                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+                    except Exception as e:
+                        print(f"  Error occurred while logging damage information: {e}, {timestep}")
 
             # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
             recalc_repair_mask = (repair_time > repair_threshold)
@@ -414,12 +357,12 @@ def simulate_asset_damage_recovery_access_optimized(
                 damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
                 
             # Daily accessibility update 
-            accessibility_cache_key = create_accessibility_cache_key(day_counter, flood_threshold, hazard_dir, accessibility_model=_config['simulation_config']['accessibility_model'])
+            accessibility_cache_key = create_accessibility_cache_key(map_counter, flood_threshold, hazard_dir, accessibility_model=_config['simulation_config']['accessibility_model'])
 
             if accessibility_cache_key in accessibility_cache:
                 accessible = accessibility_cache[accessibility_cache_key]
                 if verbose:
-                    print(f"Using cached accessibility for day {day_counter} (hazard dir: {hazard_dir_name})")
+                    print(f"Using cached accessibility for map {map_counter} (hazard dir: {hazard_dir_name})")
             else:
                 try:
                     # accessibility_result = grid_hex.accessibility_model(
@@ -435,7 +378,7 @@ def simulate_asset_damage_recovery_access_optimized(
                     accessibility_cache[accessibility_cache_key] = accessible
                     
                     if verbose:
-                        print(f"Accessibility updated for timestep {timestep} (day {day_counter})")
+                        print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
                         print(f"Accessible assets: {accessible.sum()} out of {num_assets}")
                 except Exception as e:
                     print(f"Warning: Accessibility model failed: {e}")
@@ -463,8 +406,8 @@ def simulate_asset_damage_recovery_access_optimized(
                         island_ids, 
                         dissolved_roads, 
                         previous_islands if 'previous_islands' in locals() else None,
-                        current_day=day_counter,
-                        previous_day=previous_day_counter,
+                        current_map=map_counter,
+                        previous_map=previous_map_counter,
                         hazard_threshold=flood_threshold,
                         overlap_cache=overlap_cache,
                         hazard_dir=hazard_dir,
@@ -554,6 +497,7 @@ def simulate_asset_damage_recovery_access_optimized(
         if timestep_output:
             timestep_data = {
                 'timestep': timestep,
+                'map': map_counter,
                 'day': day_counter,
                 'asset_id': range(num_assets),
                 'damage_ratio': damage_ratio.copy(),
@@ -598,6 +542,7 @@ def simulate_asset_damage_recovery_access_optimized(
         
         results.append({
             'day': day_counter,
+            'map': map_counter,
             'timestep': timestep,
             'operational_count': operational.sum(),
             'accessible_count': accessible.sum(),
@@ -717,14 +662,14 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
     Update repair crew assignments based on accessibility, operational status, and repair time.
 
     Args:
-        timestep (str or int): Current timestep/day in the simulation (matches day_counter_str from original).
+        timestep (str or int): Current timestep in the simulation.
         available_repair_crews (int or dict): Number of available repair crews or a dictionary with island IDs as keys.
         repair_crews_assigned (np.ndarray): Boolean array indicating which assets already have repair crews assigned.
         accessible (np.ndarray): Boolean array indicating which assets are accessible.
-        flooded_mask (np.ndarray): Boolean array indicating which assets are flooded (matches original parameter name).
+        flooded_mask (np.ndarray): Boolean array indicating which assets are flooded.
         repair_time (np.ndarray): Array of remaining repair times for each asset.
         island_ids (np.ndarray, optional): Array of island IDs for each asset, if available.
-        method (str, optional): Method for assigning repair crews (matches repair_crew_assignment_method from original):
+        method (str, optional): Method for assigning repair crews:
             - 'random': Random assignment
             - 'lowest repair time': Assign to assets with lowest remaining repair time
             - 'highest repair time': Assign to assets with highest remaining repair time
@@ -873,7 +818,7 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
     return available_repair_crews, repair_crews_assigned
 
 
-def analyze_simulation_performance(gdf_assets, hazard_maps, config, max_days=3):
+def analyze_simulation_performance(gdf_assets, hazard_maps, config, max_maps=3):
     """
     Performance analysis of the simulation.
     """
@@ -890,8 +835,8 @@ def analyze_simulation_performance(gdf_assets, hazard_maps, config, max_days=3):
     # Memory baseline
     process = psutil.Process()
     baseline_memory = process.memory_info().rss / 1024 / 1024  # MB
-    
-    print(f"Starting performance analysis (max {max_days} days)")
+
+    print(f"Starting performance analysis (max {max_maps} maps)")
     print(f"Baseline memory: {baseline_memory:.1f} MB")
     
     # Monkey patch key functions to track their performance
@@ -920,12 +865,12 @@ def analyze_simulation_performance(gdf_assets, hazard_maps, config, max_days=3):
     globals()['grid_hex.accessibility_model'] = timed_function('grid_accessibility', original_grid_accessibility)
     
     try:
-        # Run simulation with limited days
+        # Run simulation with limited maps
         start_time = time.time()
         
         results_df, final_state = simulate_asset_damage_recovery_access_optimized(
             gdf_assets=gdf_assets,
-            hazard_maps=hazard_maps[:max_days],
+            hazard_maps=hazard_maps[:max_maps],
             number_repair_crews=config['simulation_config']['number_repair_crews'],
             repair_crew_assignment_method=config['simulation_config']['repair_crew_assignment_method'],
             flood_threshold=config['simulation_config']['flood_threshold'],

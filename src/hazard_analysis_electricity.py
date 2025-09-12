@@ -222,7 +222,7 @@ def get_valid_mean(x_value, **kwargs):
 
 
 
-def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_counter, extraction_method='max', 
+def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, map_counter, extraction_method='max', 
                                           hazard_cache=None, hazard_dir=None):
     """
     Extract hazard values at asset locations from a raster file with different extraction methods and caching support.
@@ -251,10 +251,10 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
     from src.caching import create_hazard_extraction_cache_key
     
     # Create column names
-    day_counter_str = str(day_counter).zfill(2)
-    haz_col_str = f'EV{day_counter}_ma'
-    haz_val_str = f'hazard_value_{day_counter_str}'
-    
+    map_counter_str = str(map_counter).zfill(2)
+    haz_col_str = f'EV{map_counter}_ma'
+    haz_val_str = f'hazard_value_{map_counter_str}'
+
     # Check cache first
     if hazard_cache is not None:
         # Create a simple hash of the GeoDataFrame geometry for cache validation
@@ -262,7 +262,7 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
         gdf_hash = hashlib.md5(geom_str.encode()).hexdigest()[:8]
         
         cache_key = create_hazard_extraction_cache_key(
-            hazard_map_path, day_counter, extraction_method, gdf_hash, hazard_dir
+            hazard_map_path, map_counter, extraction_method, gdf_hash, hazard_dir
         )
         
         if cache_key in hazard_cache:
@@ -272,9 +272,9 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
             if (len(cached_result.get('haz_col_values', [])) == len(gdf_assets) and
                 len(cached_result.get('haz_val_values', [])) == len(gdf_assets) and
                 cached_result.get('hazard_map') == str(hazard_map_path)):
-                
-                print(f"\nUsing cached hazard extraction for day {day_counter} from {Path(hazard_map_path).name}")
-                
+
+                print(f"\nUsing cached hazard extraction for map {map_counter} from {Path(hazard_map_path).name}")
+
                 # Apply cached values to a copy of the GeoDataFrame
                 gdf_result = gdf_assets.copy()
                 gdf_result[haz_col_str] = cached_result['haz_col_values']
@@ -361,7 +361,7 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
             gdf_hash = hashlib.md5(geom_str.encode()).hexdigest()[:8]
             
             cache_key = create_hazard_extraction_cache_key(
-                hazard_map_path, day_counter, extraction_method, gdf_hash, hazard_dir
+                hazard_map_path, map_counter, extraction_method, gdf_hash, hazard_dir
             )
             
             hazard_cache[cache_key] = {
@@ -369,22 +369,19 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, day_count
                 'haz_val_values': hazard_values.copy(),
                 'timestamp': datetime.now().isoformat(),
                 'hazard_map': str(hazard_map_path),
-                'day_counter': day_counter,
+                'map_counter': map_counter,
                 'extraction_method': extraction_method,
                 'num_assets': len(gdf_assets),
                 'gdf_hash': gdf_hash
             }
-            
-            print(f"Cached hazard extraction results for day {day_counter} from {Path(hazard_map_path).name}")
-    
+            print(f"Cached hazard extraction results for map {map_counter} from {Path(hazard_map_path).name}")
         return gdf_result
         
     except ImportError as ie:
         print(f"Warning: Required library not available: {ie}")
         print("Please install rasterstats: pip install rasterstats")
         # Fallback to original method if rasterstats not available
-        return _fallback_rasterio_method(hazard_map_path, gdf_assets, day_counter, extraction_method, hazard_cache, hazard_dir)
-        
+        return _fallback_rasterio_method(hazard_map_path, gdf_assets, map_counter, extraction_method, hazard_cache, hazard_dir)
     except Exception as e:
         print(f"Error extracting hazard values from {hazard_map_path}: {e}")
         # Return original GeoDataFrame with zero hazard values

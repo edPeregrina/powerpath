@@ -90,7 +90,15 @@ def load_hazard_maps(hazard_dir, max_days=None):
         raise FileNotFoundError(f"No .tif hazard files found in {hazard_dir}")
     
     # Sort files to ensure consistent ordering
-    hazard_files.sort()
+    # If more than 10 files, must be sorted based on integer value in filename, not alphabetically
+    def extract_int_from_stem(path_obj):
+        digits = ''.join(filter(str.isdigit, path_obj.stem))
+        return int(digits) if digits else 0
+
+    if len(hazard_files) > 9:
+        hazard_files = sorted(hazard_files, key=extract_int_from_stem)
+    else:
+        hazard_files = sorted(hazard_files, key=lambda x: x.name)
     
     if max_days:
         hazard_files = hazard_files[:max_days]

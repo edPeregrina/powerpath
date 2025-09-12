@@ -167,15 +167,15 @@ def load_accessibility_cache(cache_dir, hazard_dir=None):
         print(f"No accessibility cache found at {cache_file}")
         return {}
 
-def create_hazard_extraction_cache_key(hazard_map_path, day_counter, extraction_method, gdf_hash, hazard_dir):
-    """Create a unique cache key for hazard extraction based on hazard map, day, and asset geometry."""
+def create_hazard_extraction_cache_key(hazard_map_path, map_counter, extraction_method, gdf_hash, hazard_dir):
+    """Create a unique cache key for hazard extraction based on hazard map and asset geometry."""
     # Get hazard file identifier
-    hazard_file = Path(hazard_map_path).stem  # e.g., "hazard_day_01"
+    hazard_file = Path(hazard_map_path).stem  # e.g., "hazard_01"
     
     # Include hazard directory name for differentiation
     hazard_dir_name = Path(hazard_dir).name if hazard_dir else "default"
-    
-    return f"hazard_extraction_{extraction_method}_{hazard_dir_name}_{hazard_file}_day{day_counter:02d}_{gdf_hash}"
+
+    return f"hazard_extraction_{extraction_method}_{hazard_dir_name}_{hazard_file}_map{map_counter:02d}_{gdf_hash}"
 
 def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
     """Save hazard extraction cache to disk with hazard directory context."""
@@ -284,10 +284,10 @@ def load_island_cache(cache_dir, hazard_dir=None):
         print(f"No island cache found at {cache_file}")
         return {}
 
-def create_overlap_cache_key(prev_day, current_day, hazard_threshold, hazard_dir=None):
+def create_overlap_cache_key(prev_map, current_map, hazard_threshold, hazard_dir=None):
     """Create cache key for overlap percentages between timesteps."""
     hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
-    return f"overlap_{hazard_dir_name}_{prev_day}_{current_day}_{hazard_threshold}"
+    return f"overlap_{hazard_dir_name}_{prev_map}_{current_map}_{hazard_threshold}"
 
 def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
     """Save overlap cache as pickle."""

@@ -346,7 +346,7 @@ def _optimized_overlap_calculation(current_islands, previous_islands, buffer_dis
 def update_repair_crew_islands_with_overlap_cached(
     available_repair_crews, island_ids, dissolved_roads, 
     previous_dissolved_roads=None, buffer_distance=1,
-    current_day=None, previous_day=None, hazard_threshold=None, 
+    current_map=None, previous_map=None, hazard_threshold=None, 
     overlap_cache=None, hazard_dir=None, verbose=False
 ):
     """
@@ -401,10 +401,10 @@ def update_repair_crew_islands_with_overlap_cached(
         overlap_cache_key = None
         cached_overlaps = None
         
-        if (overlap_cache is not None and current_day is not None and 
-            previous_day is not None and hazard_threshold is not None):
+        if (overlap_cache is not None and current_map is not None and 
+            previous_map is not None and hazard_threshold is not None):
             
-            overlap_cache_key = create_overlap_cache_key(previous_day, current_day, hazard_threshold, hazard_dir)
+            overlap_cache_key = create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir)
             cached_overlaps = overlap_cache.get(overlap_cache_key)
             
             if cached_overlaps is not None:
@@ -532,7 +532,7 @@ def update_repair_crew_islands_with_overlap_cached(
         print("Unexpected crew distribution format, treating as initial distribution")
         return update_repair_crew_islands_with_overlap_cached(
             len(unique_islands) * 2, island_ids, dissolved_roads,
-            current_day=current_day, previous_day=previous_day,
+            current_map=current_map, previous_map=previous_map,
             hazard_threshold=hazard_threshold, overlap_cache=overlap_cache,
             hazard_dir=hazard_dir
         )
@@ -651,7 +651,8 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
     
     try:
         # Fetch graph for accessibility with islands
-        hazard_graph_path = _config['data_dir'] / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        # hazard_graph_path = _config['root_dir'] / 'raw_data' / 'ZH_Delfland_interpolated_timesteps_tif' / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
         print(f"Loading graph from: {hazard_graph_path}")
         print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
         
