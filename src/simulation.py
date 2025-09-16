@@ -24,6 +24,201 @@ from shutil import copyfile
 # _config = get_config()
 # HAZARD_EXTRACTION_METHOD = _config['analysis_config']['hazard_extraction_method']
 
+class SimulationState:
+    def __init__(self, gdf_assets, num_assets):
+        self.previous_map_counter = None
+        self.damage_ratio = np.zeros(num_assets, dtype=np.float64)
+        self.repair_time = np.zeros(num_assets, dtype=np.float64)
+        self.accessible = np.ones(num_assets, dtype=bool)
+        self.unreachable = np.zeros(num_assets, dtype=bool)
+        self.operational = np.ones(num_assets, dtype=bool)
+        self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
+        self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
+        self.island_ids = np.zeros(num_assets, dtype=int)
+        self.temp_gdf = gdf_assets.copy()
+
+def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_dir_name,
+                              _config, accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache,
+                              hazard_dir, available_repair_crews, previous_islands, previous_map_counter,
+                              asset_type, num_assets, verbose):
+
+    #TODO: add repair threshold and any other parameters that come from config and take them out of parameters
+    repair_threshold = _config['recovery_parameters'].get('repair_threshold', 2.0)
+    flood_threshold = _config['simulation_config'].get('flood_threshold', 0.2)
+    repair_crew_assignment_method = _config['simulation_config'].get('repair_crew_assignment_method', 'islands')
+    damage_ratio_coefficients = _config['recovery_parameters'].get('damage_ratio_coefficients', (0.0468, 0.0077))
+    repair_time_coefficients = _config['recovery_parameters'].get('repair_time_coefficients', [702.72, 3.14, 1.9891])
+    cache_updated = {}
+
+    map_counter = int(timestep / major_timestep)
+    if map_counter >= len(hazard_maps):
+        print(f"No more hazard maps available at timestep {timestep}, ending simulation.")
+        return available_repair_crews, previous_islands, previous_map_counter, cache_updated
+
+    hazard_map = hazard_maps[map_counter]
+    haz_col_str = f'EV{map_counter}_ma'
+
+    if verbose:
+        print(f"\n=== Processing timestep {timestep} (map {map_counter}) ===")
+
+    # Update hazard values
+    state.temp_gdf = find_hazard_value_at_points_optimized(
+        hazard_map,
+        state.temp_gdf,
+        map_counter,
+        extraction_method=_config['analysis_config']['hazard_extraction_method'],
+        hazard_cache=hazard_extraction_cache,
+        hazard_dir=hazard_dir, 
+        _config=_config
+    )
+    haz_val_str = f'hazard_value_{map_counter}'
+
+    if haz_val_str in state.temp_gdf.columns:
+        state.current_hazard_values = state.temp_gdf[haz_val_str].fillna(0.0).values
+    else:
+        state.current_hazard_values = state.temp_gdf[haz_col_str].fillna(0.0).values
+
+    # Island-based crew management
+    if 'island' in repair_crew_assignment_method:
+        cache_key = f"{flood_threshold}_{haz_col_str}"
+        if cache_key in island_cache:
+            island_data = island_cache[cache_key]
+            state.island_ids = island_data['island_ids']
+            dissolved_roads = island_data['dissolved_roads']
+            if verbose:
+                print(f"Using cached islands for {cache_key}")
+        else:
+            print(f"Cache miss for {cache_key}, computing islands on the fly...")
+            try:
+                temp_gdf_for_islands = state.temp_gdf.copy()
+                temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
+                    temp_gdf_for_islands,
+                    hazard_threshold=flood_threshold,
+                    hazard_column=haz_col_str,
+                    config=_config,
+                )
+                state.island_ids = temp_gdf_for_islands['island_id'].values
+                island_data = {
+                    'hazard_map': str(hazard_map),
+                    'threshold': flood_threshold,
+                    'island_ids': state.island_ids,
+                    'dissolved_roads': dissolved_roads,
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'computed_on_demand',
+                    'method': 'match_island_ids_assets'
+                }
+                island_cache[cache_key] = island_data
+                cache_updated['island_cache'] = island_cache
+                print(f"Successfully computed and cached islands for {cache_key}")
+
+            except Exception as e:
+                print(f"Error computing islands for {cache_key}: {e}")
+                print("Falling back to simple island assignment")
+                state.island_ids = np.ones(num_assets, dtype=int)
+                dissolved_roads = None
+
+        if dissolved_roads is not None:
+            available_repair_crews = update_repair_crew_islands_with_overlap_cached(
+                available_repair_crews,
+                state.island_ids,
+                dissolved_roads,
+                previous_islands,
+                current_map=map_counter,
+                previous_map=previous_map_counter,
+                hazard_threshold=flood_threshold,
+                overlap_cache=overlap_cache,
+                hazard_dir=hazard_dir,
+                _config=_config,
+            )
+            previous_map_counter = map_counter
+            previous_islands = dissolved_roads.copy()
+            state.temp_gdf['island_id'] = state.island_ids
+        else:
+            print(f"No dissolved roads available for {cache_key}, using global crew assignment")
+
+    # Mask of assets flooded above threshold
+    flooded_mask = state.current_hazard_values > flood_threshold
+
+    # Only apply fragility to assets that are NOT currently under repair
+    not_under_repair_mask = ~state.repair_crews_assigned
+    assets_to_evaluate = flooded_mask & not_under_repair_mask & state.operational
+
+    # Update operational status based on fragility for assets above threshold
+    if np.any(assets_to_evaluate):
+        fragility_operational = np.ones_like(state.operational, dtype=bool)
+        hazard_subset = state.current_hazard_values[assets_to_evaluate]
+        asset_type_subset = asset_type[assets_to_evaluate]
+        fragility_result = default_fragility_function(hazard_subset, asset_type_subset)
+        fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
+        state.operational = np.minimum(state.operational, fragility_operational)
+
+    # Update damage ratio and repair time for assets flooded above threshold this timestep
+    if np.any(flooded_mask):
+        dr_new = default_damage_ratio_function(state.current_hazard_values[flooded_mask], damage_ratio_coefficients)
+        newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
+        flooded_indices = np.where(flooded_mask)[0]
+        new_damage_check = dr_new > state.damage_ratio[flooded_mask]
+        newly_damaged_mask[flooded_indices] = new_damage_check
+        state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
+        state.repair_time[flooded_mask] = default_repair_time_function(
+            state.damage_ratio[flooded_mask], repair_time_coefficients
+        )
+        if verbose:
+            try:
+                print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
+                print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
+                print(f"  Repair times: {state.repair_time[newly_damaged_mask].min():.1f} to {state.repair_time[newly_damaged_mask].max():.1f} hours")
+            except Exception as e:
+                print(f"  Error occurred while logging damage information: {e}, {timestep}")
+
+    # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
+    recalc_repair_mask = (state.repair_time > repair_threshold)
+    if np.any(recalc_repair_mask):
+        repair_times_under_repair = state.repair_time[recalc_repair_mask]
+        damage_ratios_from_repair = vectorized_damage_ratio_solver(
+            repair_times_under_repair, repair_time_coefficients
+        )
+        state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
+
+    accessibility_model = _config['simulation_config']['accessibility_model']
+    if accessibility_model is not None:
+        # Daily accessibility update
+        accessibility_cache_key = create_accessibility_cache_key(
+            map_counter, flood_threshold, hazard_dir,
+            accessibility_model=accessibility_model
+        )
+        if accessibility_cache_key in accessibility_cache:
+            state.accessible = accessibility_cache[accessibility_cache_key]
+            if verbose:
+                print(f"Using cached accessibility for map {map_counter} (hazard dir: {haz_dir_name})")
+        else:
+            try:
+                assets_copy = state.temp_gdf.copy()
+                accessibility_result = grid_hex.accessibility_model(
+                    assets_copy.geometry, 
+                    hazard_map, 
+                    state.current_hazard_values,
+                    verbose=verbose,
+                    day_string=str(state.day_counter).zfill(2),
+                    project_root=_config['paths']['root_dir'],
+                )
+                # accessibility_result = state.accessible  # Defaulting to accessible, to use only islands logic
+                state.accessible = np.array(accessibility_result, dtype=bool)
+                accessibility_cache[accessibility_cache_key] = state.accessible
+                cache_updated['accessibility_cache'] = accessibility_cache
+
+                if verbose:
+                    print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
+                    print(f"Accessible assets: {state.accessible.sum()} out of {num_assets}")
+            except Exception as e:
+                print(f"Warning: Accessibility model failed: {e}")
+                print("Keeping current accessibility status")
+    else:
+        pass
+
+    return available_repair_crews, previous_islands, previous_map_counter, cache_updated
+
+
 def simulate_asset_damage_recovery_access_optimized(
     gdf_assets, 
     hazard_maps, 
@@ -36,7 +231,8 @@ def simulate_asset_damage_recovery_access_optimized(
     timestep_output=True, 
     execution_id=None,
     config=None,
-    major_timestep=24
+    major_timestep=24,
+    iterations=1
 ):
     """
     Run the asset damage recovery simulation with accessibility and repair crew assignment.
@@ -87,7 +283,8 @@ def simulate_asset_damage_recovery_access_optimized(
     else:
         root_dir = Path(root_dir)
     
-    interim_dir = root_dir / 'data' / 'interim'
+    # interim_dir = root_dir / 'data' / 'interim'
+    interim_dir = _config['interim_dir']
     interim_dir.mkdir(parents=True, exist_ok=True)
     
     # Determine hazard directory from first hazard map for cache naming
@@ -102,22 +299,7 @@ def simulate_asset_damage_recovery_access_optimized(
     # Setup output directory
     output_dir = root_dir / 'data' / 'output' / f"output_{hazard_dir_name}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load caches with hazard directory context
-    print("\nLoading optimization caches...")
-    accessibility_cache = load_accessibility_cache(interim_dir, hazard_dir)
-    overlap_cache = load_overlap_cache(interim_dir, hazard_dir)
-    hazard_extraction_cache = load_hazard_extraction_cache(interim_dir, hazard_dir)
-    previous_map_counter = None  # Track previous map for overlap caching (considers overlap between previous and current islands)
-    
-    # Initialize island cache if using island-based method
-    island_cache = {}
-    if 'island' in repair_crew_assignment_method:
-        # hazard_thresholds = [0.2]  # Expected thresholds
-        
-        # Add hazard directory name to island cache filename
-        island_cache = initialize_island_cache(interim_dir, hazard_dir_name)
-        
+
     # Set up default recovery parameters if not provided
     if recovery_parameters is None:
         recovery_parameters = {
@@ -126,477 +308,503 @@ def simulate_asset_damage_recovery_access_optimized(
             'time_step_hours': 1,
             'damage_threshold': 0.001,
             'repair_threshold': 2.0  # Default threshold for repairable damage ratio
-        }
-    
-    repair_time_coefficients = recovery_parameters['repair_time_coefficients']
-    damage_ratio_coefficients = recovery_parameters.get('damage_ratio_coefficients', (0.0468, 0.0077))
-    # time_step_hours = recovery_parameters['time_step_hours'] #TODO remove time_step_hours from config
-    damage_threshold = recovery_parameters['damage_threshold']
-    repair_threshold = recovery_parameters['repair_threshold']
-
-    # Initialize simulation arrays
-    num_assets = len(gdf_assets)
-    
-    # State arrays - following original function initialization
-    asset_type = gdf_assets['type'].values
-    damage_ratio = np.zeros(num_assets, dtype=np.float64)
-    repair_time = np.zeros(num_assets, dtype=np.float64)
-    accessible = np.ones(num_assets, dtype=bool)  # Start as accessible
-    unreachable = np.zeros(num_assets, dtype=bool)  # Start as reachable
-    operational = np.ones(num_assets, dtype=bool)  # All start operational
-    repair_crews_assigned = np.zeros(num_assets, dtype=bool)
-    current_hazard_values = np.zeros(num_assets, dtype=np.float64)
-    island_ids = np.zeros(num_assets, dtype=int)  # For island if needed
-    previous_islands = None
-    
-    temp_gdf = gdf_assets.copy()  # Reference to original, not a copy
-    
-    # Results tracking
-    results = []
-    
-    # Initialize timestep output if requested
-    timestep_parquet_buffer = []
-    timestep_output_file = None
-    buffer_size = 100  # Write to disk every 100 timesteps
-    
-    if timestep_output:
-        # Generate output filename based on execution_id
-        if execution_id:
-            timestep_output_file = output_dir / f'timestep_output_{execution_id}.parquet'
-        else:
-            timestep_output_file = output_dir / 'timestep_output.parquet'
-        
-        # Remove existing file if it exists (for clean start)
-        if timestep_output_file.exists():
-            timestep_output_file.unlink()
-        
-        if verbose:
-            print(f"Timestep output will be written to: {timestep_output_file}")
+        }    
 
     if _config['simulation_config']['accessibility_model'] is not None:
         # Initialize accessibility model analysis once if using any model
         print("Initializing grid-based accessibility analysis...")
         grid_hex.initialize_grid_analysis(root_dir)
-    
-    # Simulation loop
-    available_repair_crews = number_repair_crews
-    
-    # Pre-compute information that only changes daily 
-    island_method_active = 'island' in repair_crew_assignment_method
-    if verbose and island_method_active:
-        print(f"Island-based method '{repair_crew_assignment_method}' will be used for crew assignment")
-    
-    timesteps = np.arange(0, len(hazard_maps) * major_timestep)  # if 4 maps per day, major timestep is 6; if 1 map per day, major timestep is 24. Total hours is number of maps times hours covered per map
 
-    for timestep in timesteps:
-        day_counter = timestep // 24 # Day counter depends on the timestep, not on the hazard map
-        # day_counter_str = str(day_counter).zfill(2)
-                
-        # Every x (24 by default) hour-timesteps, process the hazard map for that period
-        if timestep % major_timestep == 0:
+    # Load caches with hazard directory context
+    print("\nLoading simulation caches...")
+    accessibility_cache = load_accessibility_cache(interim_dir, hazard_dir)
+    hazard_extraction_cache = load_hazard_extraction_cache(interim_dir, hazard_dir)
+    overlap_cache = load_overlap_cache(interim_dir, hazard_dir)
+    # island_cache = {}
+    if 'island' in repair_crew_assignment_method:
+        # Add hazard directory name to island cache filename
+        island_cache = initialize_island_cache(interim_dir, hazard_dir_name)
+    else:
+        island_cache = {}    
+        
+    # repair_time_coefficients = recovery_parameters['repair_time_coefficients']
+    # damage_ratio_coefficients = recovery_parameters.get('damage_ratio_coefficients', (0.0468, 0.0077))
+    damage_threshold = recovery_parameters['damage_threshold']
+    repair_threshold = recovery_parameters['repair_threshold']
+
+    num_assets = len(gdf_assets)
+    asset_type = gdf_assets['type'].values
+
+    # Initialize results storage
+    all_results = []
+
+    # Run simulation for specified number of iterations
+    for i in range(iterations):
+        print(f"\n--- Starting simulation iteration {i+1} of {iterations} ---")
+
+        # Results tracking for this iteration
+        results = []
+        timestep_results = []    
+
+        # Initialize blank state variables
+        state = SimulationState(gdf_assets, num_assets)
+        previous_islands = None
+        previous_map_counter = None
+        available_repair_crews = number_repair_crews
+        
+        island_method_active = 'island' in repair_crew_assignment_method
+        if verbose and island_method_active:
+            print(f"Island-based method '{repair_crew_assignment_method}' will be used for crew assignment")
+        
+        timesteps = np.arange(0, len(hazard_maps) * major_timestep)  # if 4 maps per day, major timestep is 6; if 1 map per day, major timestep is 24. Total hours is number of maps times hours covered per map
+
+        for timestep in timesteps:
+            day_counter = timestep // 24 # Day counter depends on the timestep
             map_counter = int(timestep / major_timestep)
-            if map_counter >= len(hazard_maps):
-                print(f"No more hazard maps available at timestep {timestep}, ending simulation.")
-                break
+                    
+            # Every x (24 by default) hour-timesteps, process the hazard map for that period
+            if timestep % major_timestep == 0:
 
-            hazard_map = hazard_maps[map_counter]
-            haz_col_str = f'EV{map_counter}_ma'
+                available_repair_crews, previous_islands, previous_map_counter, cache_updated = _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, hazard_dir_name,
+                                _config, accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache,
+                                hazard_dir, available_repair_crews, previous_islands, previous_map_counter,
+                                asset_type, num_assets, verbose)
+                flooded_mask = state.current_hazard_values > flood_threshold
 
-            if verbose:
-                print(f"\n=== Processing timestep {timestep} (day {day_counter}, map {map_counter}) ===")
+                # map_counter = int(timestep / major_timestep)
+                # if map_counter >= len(hazard_maps):
+                #     print(f"No more hazard maps available at timestep {timestep}, ending simulation.")
+                #     break
 
-            # Update hazard values
-            temp_gdf = find_hazard_value_at_points_optimized(
-                hazard_map,
-                temp_gdf,
-                map_counter,
-                extraction_method=_config['analysis_config']['hazard_extraction_method'],
-                hazard_cache=hazard_extraction_cache,
-                hazard_dir=hazard_dir
+                # hazard_map = hazard_maps[map_counter]
+                # haz_col_str = f'EV{map_counter}_ma'
+
+                # if verbose:
+                #     print(f"\n=== Processing timestep {timestep} (day {day_counter}, map {map_counter}) ===")
+
+                # # Update hazard values
+                # temp_gdf = find_hazard_value_at_points_optimized(
+                #     hazard_map,
+                #     temp_gdf,
+                #     map_counter,
+                #     extraction_method=_config['analysis_config']['hazard_extraction_method'],
+                #     hazard_cache=hazard_extraction_cache,
+                #     hazard_dir=hazard_dir
+                # )
+                # haz_val_str = f'hazard_value_{map_counter}'
+
+                # # TODO: get rid of one of the two columns
+                # if haz_val_str in temp_gdf.columns:
+                #     current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
+                # else:
+                #     current_hazard_values = temp_gdf[haz_col_str].fillna(0.0).values
+                
+                # # Island-based crew management
+                # if 'island' in repair_crew_assignment_method:
+                #     cache_key = f"{flood_threshold}_{haz_col_str}"
+                    
+                #     if cache_key in island_cache:
+                #         # Use cached data
+                #         island_data = island_cache[cache_key]
+                #         island_ids = island_data['island_ids']
+                #         dissolved_roads = island_data['dissolved_roads']
+                        
+                #         if verbose:
+                #             print(f"Using cached islands for {cache_key}")
+                #     else:
+                #         # Cache miss - compute islands on the fly using proper function
+                #         print(f"Cache miss for {cache_key}, computing islands on the fly...")
+                        
+                #         try:
+                #             temp_gdf_for_islands = gdf_assets.copy()
+                #             temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
+                #                 temp_gdf_for_islands, 
+                #                 hazard_threshold=flood_threshold, 
+                #                 hazard_column=haz_col_str,
+                #                 config=_config,
+                    
+                #             )
+                #             island_ids = temp_gdf_for_islands['island_id'].values
+                            
+                #             # Cache the computed result for future use
+                #             island_data = {
+                #                 'hazard_map': str(hazard_map),
+                #                 'threshold': flood_threshold,
+                #                 'island_ids': island_ids,
+                #                 'dissolved_roads': dissolved_roads,
+                #                 'timestamp': datetime.now().isoformat(),
+                #                 'status': 'computed_on_demand',
+                #                 'method': 'match_island_ids_assets'
+                #             }
+                #             island_cache[cache_key] = island_data
+                            
+                #             print(f"Successfully computed and cached islands for {cache_key}")
+                            
+                #         except Exception as e:
+                #             print(f"Error computing islands for {cache_key}: {e}")
+                #             print("Falling back to simple island assignment")
+                #             # Fallback to simple assignment
+                #             island_ids = np.ones(len(gdf_assets), dtype=int)
+                #             dissolved_roads = None
+                    
+                #     # Continue with crew distribution logic
+                #     if dissolved_roads is not None:
+                #         available_repair_crews = update_repair_crew_islands_with_overlap_cached(
+                #             available_repair_crews, 
+                #             island_ids, 
+                #             dissolved_roads, 
+                #             previous_islands if 'previous_islands' in locals() else None,
+                #             current_map=map_counter,
+                #             previous_map=previous_map_counter,
+                #             hazard_threshold=flood_threshold,
+                #             overlap_cache=overlap_cache,
+                #             hazard_dir=hazard_dir
+                #         )
+
+                #         # Update previous map counter
+                #         previous_map_counter = map_counter
+
+                #         # Store current islands for next iteration
+                #         previous_islands = dissolved_roads.copy()
+                        
+                #         # Assign island_ids to temp_gdf for later use
+                #         if 'temp_gdf' not in locals():
+                #             temp_gdf = gdf_assets.copy()
+                #         temp_gdf['island_id'] = island_ids
+                #     else:
+                #         print(f"No dissolved roads available for {cache_key}, using global crew assignment")
+                
+                # # Mask of assets flooded above threshold  
+                # flooded_mask = current_hazard_values > flood_threshold 
+
+                # # Only apply fragility to assets that are NOT currently under repair
+                # not_under_repair_mask = ~repair_crews_assigned
+                # assets_to_evaluate = flooded_mask & not_under_repair_mask & operational
+                
+                # if np.any(assets_to_evaluate):
+                #     fragility_operational = np.ones_like(operational, dtype=bool)  # Start with all operational
+                    
+                #     # Only evaluate assets not under repair
+                #     hazard_subset = current_hazard_values[assets_to_evaluate]
+                #     asset_type_subset = asset_type[assets_to_evaluate]
+                    
+                #     fragility_result = default_fragility_function(hazard_subset, asset_type_subset)
+                #     fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
+                    
+                #     # Update operational status, but preserve assets under repair
+                #     operational = np.minimum(operational, fragility_operational)
+                
+                # # Update damage ratio for assets flooded above threshold this timestep
+                # if np.any(flooded_mask):
+                #     dr_new = default_damage_ratio_function(current_hazard_values[flooded_mask], damage_ratio_coefficients)
+                    
+                #     # Track which assets are getting new damage this timestep
+                #     newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
+                #     flooded_indices = np.where(flooded_mask)[0]
+                    
+                #     # Check which flooded assets have increased damage
+                #     new_damage_check = dr_new > damage_ratio[flooded_mask]
+                #     newly_damaged_mask[flooded_indices] = new_damage_check
+                    
+                #     # Update damage ratios (keep maximum damage)
+                #     damage_ratio[flooded_mask] = np.maximum(damage_ratio[flooded_mask], dr_new)
+
+                #     # Update repair times for assets with latest damage ratios
+                #     repair_time[flooded_mask] = default_repair_time_function(
+                #         damage_ratio[flooded_mask], repair_time_coefficients
+                #     )
+                    
+                #     if verbose: 
+                #         try:
+                #             print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
+                #             print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
+                #             print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+                #         except Exception as e:
+                #             print(f"  Error occurred while logging damage information: {e}, {timestep}")
+
+                # # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
+                # recalc_repair_mask = (repair_time > repair_threshold)
+                # if np.any(recalc_repair_mask):
+                #     repair_times_under_repair = repair_time[recalc_repair_mask]
+                #     damage_ratios_from_repair = vectorized_damage_ratio_solver(
+                #         repair_times_under_repair, repair_time_coefficients
+                #     )
+                    
+                #     damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
+                    
+                # # Daily accessibility update 
+                # accessibility_cache_key = create_accessibility_cache_key(map_counter, flood_threshold, hazard_dir, accessibility_model=_config['simulation_config']['accessibility_model'])
+
+                # if accessibility_cache_key in accessibility_cache:
+                #     accessible = accessibility_cache[accessibility_cache_key]
+                #     if verbose:
+                #         print(f"Using cached accessibility for map {map_counter} (hazard dir: {hazard_dir_name})")
+                # else:
+                #     try:
+                #         # accessibility_result = grid_hex.accessibility_model(
+                #         #     gdf_assets.geometry, 
+                #         #     hazard_map, 
+                #         #     current_hazard_values,
+                #         #     verbose=verbose,
+                #         #     day_string=day_counter_str,
+                #         #     project_root=root_dir
+                #         # )
+                #         accessibility_result = accessible # Defaulting to accessible, to use only islands logic
+                #         accessible = np.array(accessibility_result, dtype=bool)
+                #         accessibility_cache[accessibility_cache_key] = accessible
+                        
+                #         if verbose:
+                #             print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
+                #             print(f"Accessible assets: {accessible.sum()} out of {num_assets}")
+                #     except Exception as e:
+                #         print(f"Warning: Accessibility model failed: {e}")
+                #         print("Keeping current accessibility status")
+
+            # Island-based crew assignment logic - simplified check since islands are already computed above
+            # if island_method_active:
+            #     # Check if we still need to initialize island assignments (backup case)
+            #     if isinstance(available_repair_crews, int):
+            #         if verbose:
+            #             print(f"Backup: Initializing island assignments for {available_repair_crews} crews")
+                    
+            #         temp_gdf, dissolved_roads = match_island_ids_assets(
+            #             temp_gdf,  
+            #             hazard_threshold=flood_threshold, 
+            #             hazard_column=haz_col_str,
+            #             config=_config
+            #         )
+            #         island_ids = temp_gdf['island_id'].values
+                    
+            #         if dissolved_roads is not None and len(dissolved_roads) > 0:
+            #             # Use overlap-based crew redistribution to convert int to dict
+            #             available_repair_crews = update_repair_crew_islands_with_overlap_cached(
+            #                 available_repair_crews,
+            #                 state.island_ids, 
+            #                 dissolved_roads, 
+            #                 previous_islands if 'previous_islands' in locals() else None,
+            #                 current_map=map_counter,
+            #                 previous_map=previous_map_counter,
+            #                 hazard_threshold=flood_threshold,
+            #                 overlap_cache=overlap_cache,
+            #                 hazard_dir=hazard_dir,
+            #                 verbose=verbose
+            #             )
+                        
+            #             # Store current islands for next iteration
+            #             previous_islands = dissolved_roads.copy()
+                        
+            #             if verbose:
+            #                 print(f"Distributed crews across {len(dissolved_roads)} islands: {available_repair_crews}")
+            #         else:
+            #             if verbose:
+            #                 print("No dissolved roads found, using global crew assignment")
+
+            # Repair crew assignment
+            available_repair_crews, state.repair_crews_assigned = update_repair_crew_assignment_optimized(
+                timestep, 
+                available_repair_crews, 
+                state.repair_crews_assigned, 
+                state.accessible, 
+                state.current_hazard_values > flood_threshold,  # flooded_mask
+                state.repair_time, 
+                state.island_ids, 
+                method=repair_crew_assignment_method, 
+                verbose=verbose
             )
-            haz_val_str = f'hazard_value_{map_counter}'
-            print(f'Columns in temp_gdf: {temp_gdf.columns.tolist()}')
-
-            # TODO: get rid of one of the two columns
-            if haz_val_str in temp_gdf.columns:
-                current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
-            else:
-                current_hazard_values = temp_gdf[haz_col_str].fillna(0.0).values
             
-            # Island-based crew management
-            if 'island' in repair_crew_assignment_method:
-                cache_key = f"{flood_threshold}_{haz_col_str}"
-                
-                if cache_key in island_cache:
-                    # Use cached data
-                    island_data = island_cache[cache_key]
-                    island_ids = island_data['island_ids']
-                    dissolved_roads = island_data['dissolved_roads']
-                    
-                    if verbose:
-                        print(f"Using cached islands for {cache_key}")
-                else:
-                    # Cache miss - compute islands on the fly using proper function
-                    print(f"Cache miss for {cache_key}, computing islands on the fly...")
-                    
-                    try:
-                        temp_gdf_for_islands = gdf_assets.copy()
-                        temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
-                            temp_gdf_for_islands, 
-                            hazard_threshold=flood_threshold, 
-                            hazard_column=haz_col_str,
-                            config=_config,
-                
-                        )
-                        island_ids = temp_gdf_for_islands['island_id'].values
-                        
-                        # Cache the computed result for future use
-                        island_data = {
-                            'hazard_map': str(hazard_map),
-                            'threshold': flood_threshold,
-                            'island_ids': island_ids,
-                            'dissolved_roads': dissolved_roads,
-                            'timestamp': datetime.now().isoformat(),
-                            'status': 'computed_on_demand',
-                            'method': 'match_island_ids_assets'
-                        }
-                        island_cache[cache_key] = island_data
-                        
-                        print(f"Successfully computed and cached islands for {cache_key}")
-                        
-                    except Exception as e:
-                        print(f"Error computing islands for {cache_key}: {e}")
-                        print("Falling back to simple island assignment")
-                        # Fallback to simple assignment
-                        island_ids = np.ones(len(gdf_assets), dtype=int)
-                        dissolved_roads = None
-                
-                # Continue with crew distribution logic
-                if dissolved_roads is not None:
-                    available_repair_crews = update_repair_crew_islands_with_overlap_cached(
-                        available_repair_crews, 
-                        island_ids, 
-                        dissolved_roads, 
-                        previous_islands if 'previous_islands' in locals() else None,
-                        current_map=map_counter,
-                        previous_map=previous_map_counter,
-                        hazard_threshold=flood_threshold,
-                        overlap_cache=overlap_cache,
-                        hazard_dir=hazard_dir
-                    )
-
-                    # Update previous map counter
-                    previous_map_counter = map_counter
-
-                    # Store current islands for next iteration
-                    previous_islands = dissolved_roads.copy()
-                    
-                    # Assign island_ids to temp_gdf for later use
-                    if 'temp_gdf' not in locals():
-                        temp_gdf = gdf_assets.copy()
-                    temp_gdf['island_id'] = island_ids
-                else:
-                    print(f"No dissolved roads available for {cache_key}, using global crew assignment")
+            # For each timestep, decrement repair_time if accessible, not flooded, and with repair crews assigned
+            can_repair_mask = state.accessible & ~flooded_mask & state.repair_crews_assigned
+            state.repair_time[can_repair_mask] = np.maximum(state.repair_time[can_repair_mask] - 1.0, 0.0)
             
-            # Mask of assets flooded above threshold  
-            flooded_mask = current_hazard_values > flood_threshold 
+            # Check for completed repairs
+            completed_repairs = (state.repair_time == 0.0) & state.repair_crews_assigned
 
-            # Only apply fragility to assets that are NOT currently under repair
-            not_under_repair_mask = ~repair_crews_assigned
-            assets_to_evaluate = flooded_mask & not_under_repair_mask & operational
-            
-            if np.any(assets_to_evaluate):
-                fragility_operational = np.ones_like(operational, dtype=bool)  # Start with all operational
+            if np.any(completed_repairs):
+                # Only force operational=True for assets that are non-operational but completed repair
+                non_operational_completed = completed_repairs & (~state.operational)
                 
-                # Only evaluate assets not under repair
-                hazard_subset = current_hazard_values[assets_to_evaluate]
-                asset_type_subset = asset_type[assets_to_evaluate]
-                
-                fragility_result = default_fragility_function(hazard_subset, asset_type_subset)
-                fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
-                
-                # Update operational status, but preserve assets under repair
-                operational = np.minimum(operational, fragility_operational)
-            
-            # Update damage ratio for assets flooded above threshold this timestep
-            if np.any(flooded_mask):
-                dr_new = default_damage_ratio_function(current_hazard_values[flooded_mask], damage_ratio_coefficients)
-                
-                # Track which assets are getting new damage this timestep
-                newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
-                flooded_indices = np.where(flooded_mask)[0]
-                
-                # Check which flooded assets have increased damage
-                new_damage_check = dr_new > damage_ratio[flooded_mask]
-                newly_damaged_mask[flooded_indices] = new_damage_check
-                
-                # Update damage ratios (keep maximum damage)
-                damage_ratio[flooded_mask] = np.maximum(damage_ratio[flooded_mask], dr_new)
+                if np.any(non_operational_completed):
+                    state.operational[non_operational_completed] = True
 
-                # Update repair times for assets with latest damage ratios
-                repair_time[flooded_mask] = default_repair_time_function(
-                    damage_ratio[flooded_mask], repair_time_coefficients
-                )
-                
-                if verbose: 
-                    try:
-                        print(f"  New damage at timestep {timestep}: {newly_damaged_mask.sum()} assets")
-                        print(f"  Damage ratios: {damage_ratio[newly_damaged_mask].min():.3f} to {damage_ratio[newly_damaged_mask].max():.3f}")
-                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
-                    except Exception as e:
-                        print(f"  Error occurred while logging damage information: {e}, {timestep}")
+                # For ALL completed repairs, reset damage and release crews
+                state.damage_ratio[completed_repairs] = 0.0
+                state.repair_time[completed_repairs] = 0.0
 
-            # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
-            recalc_repair_mask = (repair_time > repair_threshold)
-            if np.any(recalc_repair_mask):
-                repair_times_under_repair = repair_time[recalc_repair_mask]
-                damage_ratios_from_repair = vectorized_damage_ratio_solver(
-                    repair_times_under_repair, repair_time_coefficients
-                )
-                
-                damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
-                
-            # Daily accessibility update 
-            accessibility_cache_key = create_accessibility_cache_key(map_counter, flood_threshold, hazard_dir, accessibility_model=_config['simulation_config']['accessibility_model'])
+                # Release repair crews
+                num_completed_repairs = completed_repairs.sum()
+                if available_repair_crews is not None:
+                    if isinstance(available_repair_crews, dict):
+                        # Island-based crew management
+                        for asset_idx in np.where(completed_repairs)[0]:
+                            asset_island_id = state.island_ids[asset_idx]
+                            if asset_island_id in available_repair_crews:
+                                available_repair_crews[asset_island_id] += 1
+                            else:
+                                # Fallback to first available island
+                                if available_repair_crews:
+                                    first_island = list(available_repair_crews.keys())[0]
+                                    available_repair_crews[first_island] += 1
+                    else:
+                        # Simple integer crew management
+                        available_repair_crews += num_completed_repairs
 
-            if accessibility_cache_key in accessibility_cache:
-                accessible = accessibility_cache[accessibility_cache_key]
+                state.repair_crews_assigned[completed_repairs] = False
+
                 if verbose:
-                    print(f"Using cached accessibility for map {map_counter} (hazard dir: {hazard_dir_name})")
-            else:
-                try:
-                    # accessibility_result = grid_hex.accessibility_model(
-                    #     gdf_assets.geometry, 
-                    #     hazard_map, 
-                    #     current_hazard_values,
-                    #     verbose=verbose,
-                    #     day_string=day_counter_str,
-                    #     project_root=root_dir
-                    # )
-                    accessibility_result = accessible # Defaulting to accessible, to use only islands logic
-                    accessible = np.array(accessibility_result, dtype=bool)
-                    accessibility_cache[accessibility_cache_key] = accessible
-                    
-                    if verbose:
-                        print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
-                        print(f"Accessible assets: {accessible.sum()} out of {num_assets}")
-                except Exception as e:
-                    print(f"Warning: Accessibility model failed: {e}")
-                    print("Keeping current accessibility status")
+                    completed_repairs_indices = np.where(completed_repairs)[0]
+                    print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
 
-        # Island-based crew assignment logic - simplified check since islands are already computed above
-        if island_method_active:
-            # Check if we still need to initialize island assignments (backup case)
-            if isinstance(available_repair_crews, int):
-                if verbose:
-                    print(f"Backup: Initializing island assignments for {available_repair_crews} crews")
-                
-                temp_gdf, dissolved_roads = match_island_ids_assets(
-                    temp_gdf,  
-                    hazard_threshold=flood_threshold, 
-                    hazard_column=haz_col_str,
-                    config=_config
+            if island_method_active:
+                # Islands with zero available crews and no crews assigned
+                all_island_ids = np.unique(state.island_ids)
+                idle_crew_islands = [island_id for island_id, crew_count in available_repair_crews.items() if crew_count > 0]
+                assigned_crew_islands = set(state.island_ids[state.repair_crews_assigned])
+                islands_with_crews = set(idle_crew_islands) | assigned_crew_islands
+                islands_without_crews = set(all_island_ids) - islands_with_crews
+                in_islands_without_crews = np.isin(state.island_ids, list(islands_without_crews))
+                unreachable = (
+                    (state.damage_ratio > damage_threshold) &
+                    (~flooded_mask) &
+                    in_islands_without_crews
                 )
-                island_ids = temp_gdf['island_id'].values
+                # unreachable_count = unreachable_mask.sum()
+
+            # Write timestep data to parquet buffer if requested
+
+            if timestep_output:
+                # # Generate output filename based on execution_id
+                # if execution_id:
+                #     timestep_output_file = output_dir / f'timestep_output_{execution_id}.parquet'
+                # else:
+                #     timestep_output_file = output_dir / f'timestep_output.parquet'
                 
-                if dissolved_roads is not None and len(dissolved_roads) > 0:
-                    # Use overlap-based crew redistribution to convert int to dict
-                    available_repair_crews = update_repair_crew_islands_with_overlap_cached(
-                        available_repair_crews,
-                        island_ids, 
-                        dissolved_roads, 
-                        previous_islands if 'previous_islands' in locals() else None,
-                        current_map=map_counter,
-                        previous_map=previous_map_counter,
-                        hazard_threshold=flood_threshold,
-                        overlap_cache=overlap_cache,
-                        hazard_dir=hazard_dir,
-                        verbose=verbose
-                    )
-                    
-                    # Store current islands for next iteration
-                    previous_islands = dissolved_roads.copy()
-                    
-                    if verbose:
-                        print(f"Distributed crews across {len(dissolved_roads)} islands: {available_repair_crews}")
-                else:
-                    if verbose:
-                        print("No dissolved roads found, using global crew assignment")
+                # # Remove existing file if it exists (for clean start)
+                # if timestep_output_file.exists():
+                #     print(f"Warning! Timestep output file already exists: {timestep_output_file}")
+                
+                # if verbose:
+                #     print(f"Timestep output will be written to: {timestep_output_file}")
 
-        # Repair crew assignment
-        available_repair_crews, repair_crews_assigned = update_repair_crew_assignment_optimized(
-            timestep, 
-            available_repair_crews, 
-            repair_crews_assigned, 
-            accessible, 
-            current_hazard_values > flood_threshold,  # flooded_mask
-            repair_time, 
-            island_ids, 
-            method=repair_crew_assignment_method, 
-            verbose=verbose
-        )
-        
-        # For each timestep, decrement repair_time if accessible, not flooded, and with repair crews assigned
-        can_repair_mask = accessible & ~flooded_mask & repair_crews_assigned
-        repair_time[can_repair_mask] = np.maximum(repair_time[can_repair_mask] - 1.0, 0.0)
-        
-        # Check for completed repairs
-        completed_repairs = (repair_time == 0.0) & repair_crews_assigned
-        
-        if np.any(completed_repairs):
-            # Only force operational=True for assets that are non-operational but completed repair
-            non_operational_completed = completed_repairs & (~operational)
+                timestep_data = {
+                    'timestep': timestep,
+                    'map': map_counter,
+                    'day': day_counter,
+                    'asset_id': range(num_assets),
+                    'damage_ratio': state.damage_ratio.copy(),
+                    'repair_time': state.repair_time.copy(),
+                    'operational': state.operational.astype(int),
+                    'accessible': state.accessible.astype(int),
+                    'unreachable': state.unreachable.astype(int),
+                    'flooded': flooded_mask.astype(int),
+                    'crew_assigned': state.repair_crews_assigned.astype(int),
+                    'hazard_value': state.current_hazard_values.copy(),
+                    'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int)
+                }
+                
+                timestep_results.append(timestep_data)
+                # timestep_df = pd.DataFrame(timestep_data)
             
-            if np.any(non_operational_completed):
-                operational[non_operational_completed] = True
-            
-            # For ALL completed repairs, reset damage and release crews
-            damage_ratio[completed_repairs] = 0.0
-            repair_time[completed_repairs] = 0.0
-            
-            # Release repair crews
-            num_completed_repairs = completed_repairs.sum()
-            if available_repair_crews is not None:
-                if isinstance(available_repair_crews, dict):
-                    # Island-based crew management
-                    for asset_idx in np.where(completed_repairs)[0]:
-                        asset_island_id = island_ids[asset_idx]
-                        if asset_island_id in available_repair_crews:
-                            available_repair_crews[asset_island_id] += 1
-                        else:
-                            # Fallback to first available island
-                            if available_repair_crews:
-                                first_island = list(available_repair_crews.keys())[0]
-                                available_repair_crews[first_island] += 1
-                else:
-                    # Simple integer crew management
-                    available_repair_crews += num_completed_repairs
-            
-            repair_crews_assigned[completed_repairs] = False
+            # Record results at every timestep 
+            # Only calculate averages for assets that actually have damage/repair time to avoid computational spikes
+            damaged_assets_mask = state.damage_ratio > damage_threshold
+            repair_needed_mask = state.repair_time > repair_threshold
 
-            if verbose:
-                completed_repairs_indices = np.where(completed_repairs)[0]
-                print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
+            # Calculate output metrics
+            if np.any(damaged_assets_mask):
+                avg_damage_ratio = state.damage_ratio[damaged_assets_mask].mean()
+            else:
+                avg_damage_ratio = 0.0
+                
+            if np.any(repair_needed_mask):
+                avg_repair_time = state.repair_time[repair_needed_mask].mean()
+            else:
+                avg_repair_time = 0.0
 
-        if island_method_active:
-            # Islands with zero available crews and no crews assigned
-            all_island_ids = np.unique(island_ids)
-            idle_crew_islands = [island_id for island_id, crew_count in available_repair_crews.items() if crew_count > 0]
-            assigned_crew_islands = set(island_ids[repair_crews_assigned])
-            islands_with_crews = set(idle_crew_islands) | assigned_crew_islands
-            islands_without_crews = set(all_island_ids) - islands_with_crews
-            in_islands_without_crews = np.isin(island_ids, list(islands_without_crews))
-            unreachable = (
-                (damage_ratio > damage_threshold) &
-                (~flooded_mask) &
-                in_islands_without_crews
-            )
-            # unreachable_count = unreachable_mask.sum()
-
-        # Write timestep data to parquet buffer if requested
-        if timestep_output:
-            timestep_data = {
-                'timestep': timestep,
-                'map': map_counter,
+            total_repair_backlog = state.repair_time.sum()  # Sum of all repair hours remaining
+            total_damage_ratio = state.damage_ratio.sum()   # Sum of all damage ratios
+            
+            results.append({
+                # 'iteration': i + 1,
                 'day': day_counter,
-                'asset_id': range(num_assets),
-                'damage_ratio': damage_ratio.copy(),
-                'repair_time': repair_time.copy(),
-                'operational': operational.astype(int),
-                'accessible': accessible.astype(int),
-                'unreachable': unreachable.astype(int),
-                'flooded': flooded_mask.astype(int),
-                'crew_assigned': repair_crews_assigned.astype(int),
-                'hazard_value': current_hazard_values.copy()
-            }
-            
-            timestep_df = pd.DataFrame(timestep_data)
-            timestep_parquet_buffer.append(timestep_df)
-            
-            # Write buffer to file when it reaches size limit or at end of day
-            if len(timestep_parquet_buffer) >= buffer_size or timestep % 24 == 23:
-                write_timestep_buffer_to_parquet(timestep_parquet_buffer, timestep_output_file)
-                timestep_parquet_buffer.clear()
+                'map': map_counter,
+                'timestep': timestep,
+                'operational_count': state.operational.sum(),
+                'accessible_count': state.accessible.sum(),
+                'unreachable_count': state.unreachable.sum(),
+                'flooded_count': (state.current_hazard_values > flood_threshold).sum(),
+                'damaged_count': damaged_assets_mask.sum(),
+                'crews_assigned_count': state.repair_crews_assigned.sum(),
+                'avg_damage_ratio': avg_damage_ratio,
+                'avg_repair_time': avg_repair_time,
+                'total_repair_backlog': total_repair_backlog,  
+                'total_damage_ratio': total_damage_ratio       
+            })
+
+            if timestep % 24 == 23:  # End of day
+                if verbose:
+                    print(f"Day {day_counter} summary: {state.operational.sum()}/{num_assets} operational, "
+                        f"{state.accessible.sum()} accessible, {state.unreachable.sum()} unreachable damaged assets, {(state.current_hazard_values > flood_threshold).sum()} flooded")
+
+        all_results.append((i+1, results, timestep_results))
+
+        # Update caches if they were modified during the simulation
+        if 'accessibility_cache' in cache_updated.keys():
+            accessibility_cache = cache_updated['accessibility_cache']
+            print("\nSaving optimization caches...")
+            save_accessibility_cache(accessibility_cache, interim_dir, hazard_dir)            
+        if 'island_cache' in cache_updated.keys():
+            island_cache = cache_updated['island_cache']
+            try:
+                cache_dir = interim_dir / "cache"
+                cache_dir.mkdir(parents=True, exist_ok=True)
                 
-                if verbose and timestep % 24 == 23:
-                    print(f"Wrote timestep data to {timestep_output_file} (day {day_counter} complete)")
-        
-        # Record results at every timestep 
-        # Only calculate averages for assets that actually have damage/repair time to avoid computational spikes
-        damaged_assets_mask = damage_ratio > damage_threshold
-        repair_needed_mask = repair_time > repair_threshold
-        
-        # Calculate output metrics
-        if np.any(damaged_assets_mask):
-            avg_damage_ratio = damage_ratio[damaged_assets_mask].mean()
-        else:
-            avg_damage_ratio = 0.0
-            
-        if np.any(repair_needed_mask):
-            avg_repair_time = repair_time[repair_needed_mask].mean()
-        else:
-            avg_repair_time = 0.0
-        
-        total_repair_backlog = repair_time.sum()  # Sum of all repair hours remaining
-        total_damage_ratio = damage_ratio.sum()   # Sum of all damage ratios
-        
-        results.append({
-            'day': day_counter,
-            'map': map_counter,
-            'timestep': timestep,
-            'operational_count': operational.sum(),
-            'accessible_count': accessible.sum(),
-            'unreachable_count': unreachable.sum(),
-            'flooded_count': (current_hazard_values > flood_threshold).sum(),
-            'damaged_count': damaged_assets_mask.sum(),
-            'crews_assigned_count': repair_crews_assigned.sum(),
-            'avg_damage_ratio': avg_damage_ratio,
-            'avg_repair_time': avg_repair_time,
-            'total_repair_backlog': total_repair_backlog,  
-            'total_damage_ratio': total_damage_ratio       
-        })
+                # Create island cache filename with hazard directory context
+                hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
+                
+                island_cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
+                
+                with open(island_cache_file, 'wb') as f:
+                    pickle.dump(cache_updated['island_cache'], f)
 
-        if timestep % 24 == 23:  # End of day
-            if verbose:
-                print(f"Day {day_counter} summary: {operational.sum()}/{num_assets} operational, "
-                      f"{accessible.sum()} accessible, {unreachable.sum()} unreachable damaged assets, {(current_hazard_values > flood_threshold).sum()} flooded")
+                print(f"Saved updated island cache with {len(cache_updated['island_cache'])} entries to {island_cache_file}")
 
-    # Write any remaining data in buffer
-    if timestep_output and timestep_parquet_buffer:
-        write_timestep_buffer_to_parquet(timestep_parquet_buffer, timestep_output_file)
-        print(f"Final timestep data written to {timestep_output_file}")
+            except Exception as e:
+                print(f"Warning: Could not save island cache: {e}")
+
     
     # Save caches for next run with hazard directory context
-    print("\nSaving optimization caches...")
-    save_accessibility_cache(accessibility_cache, interim_dir, hazard_dir)
+    # if 'accessibility_cache' in cache_updated.keys():
+    #     accessibility_cache = cache_updated['accessibility_cache']
+    #     print("\nSaving optimization caches...")
+    #     save_accessibility_cache(accessibility_cache, interim_dir, hazard_dir)
     
-    if hazard_extraction_cache:
-        save_hazard_extraction_cache(hazard_extraction_cache, interim_dir, hazard_dir)
+    # if hazard_extraction_cache:
+    #     save_hazard_extraction_cache(hazard_extraction_cache, interim_dir, hazard_dir)
     
-    if overlap_cache:
-        save_overlap_cache(overlap_cache, interim_dir, hazard_dir)
+    # if overlap_cache:
+    #     save_overlap_cache(overlap_cache, interim_dir, hazard_dir)
     
     # Save island cache if it was updated
-    if island_cache:
-        try:
-            cache_dir = interim_dir / "cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
+    # if 'island_cache' in cache_updated.keys():
+    #     try:
+    #         cache_dir = interim_dir / "cache"
+    #         cache_dir.mkdir(parents=True, exist_ok=True)
             
-            # Create island cache filename with hazard directory context
-            hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
+    #         # Create island cache filename with hazard directory context
+    #         hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
             
-            island_cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
+    #         island_cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
             
-            with open(island_cache_file, 'wb') as f:
-                pickle.dump(island_cache, f)
-            
-            print(f"Saved updated island cache with {len(island_cache)} entries to {island_cache_file}")
-            
-        except Exception as e:
-            print(f"Warning: Could not save island cache: {e}")
+    #         with open(island_cache_file, 'wb') as f:
+    #             pickle.dump(cache_updated['island_cache'], f)
+
+    #         print(f"Saved updated island cache with {len(cache_updated['island_cache'])} entries to {island_cache_file}")
+
+    #     except Exception as e:
+    #         print(f"Warning: Could not save island cache: {e}")
     
     # Create results DataFrame
-    results_df = pd.DataFrame(results)
+    # results_df = pd.DataFrame(results)
     
     # Copy of config.py file as text to log_config_executionid.txt
     try:
@@ -606,54 +814,21 @@ def simulate_asset_damage_recovery_access_optimized(
         print(f"Saved simulation configuration to {config_output_file}")
     except Exception as e:
         print(f"Warning: Could not save configuration file: {e}")
+    
+    all_results_df = pd.DataFrame(all_results)
+    all_results_df.columns = ['Simulation ID', 'Results summary', 'Timestep Results']
+    # all_results_df.to_parquet(output_dir / f'simulation_results_{execution_id}.parquet', index=False)
 
-    return results_df, {
-        'operational': operational,
-        'hazard_value': current_hazard_values,
-        'damage_ratio': damage_ratio,
-        'repair_time': repair_time,
-        'accessible': accessible,
-        'repair_crews_assigned': repair_crews_assigned
+    return all_results, {
+        'operational': state.operational,
+        'hazard_value': state.current_hazard_values,
+        'damage_ratio': state.damage_ratio,
+        'repair_time': state.repair_time,
+        'accessible': state.accessible,
+        'repair_crews_assigned': state.repair_crews_assigned
     }
 
 
-
-
-def write_timestep_buffer_to_parquet(buffer, output_file):
-    """
-    Write buffered timestep data to parquet file, appending if file exists.
-    
-    Args:
-        buffer (list): List of DataFrames to write
-        output_file (Path): Path to output parquet file
-    """
-    if not buffer:
-        return
-    
-    # Combine buffer data
-    combined_df = pd.concat(buffer, ignore_index=True)
-    
-    # Append to existing file or create new one
-    if output_file.exists():
-        try:
-            existing_df = pd.read_parquet(output_file)
-            combined_df = pd.concat([existing_df, combined_df], ignore_index=True)
-        except Exception as e:
-            print(f"Warning: Could not read existing parquet file {output_file}: {e}")
-            print("Creating new file instead")
-    
-    # Write to parquet with compression
-    try:
-        combined_df.to_parquet(output_file, index=False, engine='pyarrow', compression='snappy')
-    except ImportError:
-        # Fallback to default engine if pyarrow not available
-        combined_df.to_parquet(output_file, index=False, compression='gzip')
-    except Exception as e:
-        print(f"Error writing to parquet file {output_file}: {e}")
-        # Fallback to CSV if parquet fails
-        csv_file = output_file.with_suffix('.csv')
-        combined_df.to_csv(csv_file, index=False)
-        print(f"Saved as CSV instead: {csv_file}")
 
 
 def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 

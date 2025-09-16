@@ -15,7 +15,7 @@ from pyproj import Transformer
 import time
 
 from src.utils import project_graph_coords, filter_hazard_graph
-from src.caching import load_island_cache, save_island_cache_silent, save_island_cache, create_overlap_cache_key
+from src.caching import load_island_cache, save_island_cache_silent, save_island_cache, create_overlap_cache_key, save_overlap_cache
 
 # Import hazard extraction method from config
 import sys
@@ -346,8 +346,8 @@ def _optimized_overlap_calculation(current_islands, previous_islands, buffer_dis
 def update_repair_crew_islands_with_overlap_cached(
     available_repair_crews, island_ids, dissolved_roads, 
     previous_dissolved_roads=None, buffer_distance=1,
-    current_map=None, previous_map=None, hazard_threshold=None, 
-    overlap_cache=None, hazard_dir=None, verbose=False
+    current_map=None, previous_map=None, hazard_threshold=None,
+    overlap_cache=None, hazard_dir=None, _config=None, verbose=False
 ):
     """
     Update repair crew distribution with cached overlap percentages.
@@ -355,12 +355,12 @@ def update_repair_crew_islands_with_overlap_cached(
     present_islands = dissolved_roads.copy()
     unique_islands = np.unique(island_ids)
     unique_islands = unique_islands[~pd.isna(unique_islands)]
-    
-    print(f"Updating repair crew distribution for {len(unique_islands)} islands.")
-    
+
+    if verbose: print(f"Updating repair crew distribution for {len(unique_islands)} islands.")
+
     if isinstance(available_repair_crews, int):
         # Initial distribution logic when crews are given as an integer
-        print(f"Initial distribution of {available_repair_crews} crews across {len(unique_islands)} islands")
+        if verbose: print(f"Initial distribution of {available_repair_crews} crews across {len(unique_islands)} islands")
         
         if len(unique_islands) == 0:
             return {}
@@ -434,6 +434,8 @@ def update_repair_crew_islands_with_overlap_cached(
             # Cache the result (only store percentages)
             if overlap_cache is not None and overlap_cache_key is not None:
                 overlap_cache[overlap_cache_key] = overlaps_by_prev_island
+                cache_dir = _config['interim_dir']
+                save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
                 print(f"Cached overlaps for {overlap_cache_key}")
         
         new_crew_distribution = {island: 0 for island in present_islands['island_id']}
@@ -475,7 +477,7 @@ def update_repair_crew_islands_with_overlap_cached(
                     
                     new_crew_distribution[nearest_island_id] += crew_count
                     total_redistributed_crews += crew_count
-                    print(f"Assigned {crew_count} crews to nearest island {nearest_island_id}")
+                    if verbose: print(f"Assigned {crew_count} crews to nearest island {nearest_island_id}")
                     continue
                 
                 total_overlap_pct = sum(overlaps.values())
@@ -502,19 +504,22 @@ def update_repair_crew_islands_with_overlap_cached(
                             crews_distributed_this_island += count
                         
                         total_redistributed_crews += crews_distributed_this_island
-                        print(f"Redistributed {crew_count} crews from previous island {prev_island_id} based on cached overlaps to:")
-                        print([(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0])
-        
+                        if verbose: 
+                            print(f"Redistributed {crew_count} crews from previous island {prev_island_id} based on cached overlaps to:")
+                            print([(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0])
+
         if total_redistributed_crews != input_total_crews:
-            print(f"Crew redistribution mismatch. Input: {input_total_crews}, Redistributed: {total_redistributed_crews}")
-        
-        if verbose: print(f"Overlap-based crew redistribution complete: {[(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0]}")
-        
+            if verbose: 
+                print(f"Crew redistribution mismatch. Input: {input_total_crews}, Redistributed: {total_redistributed_crews}")
+
+        if verbose: 
+            print(f"Overlap-based crew redistribution complete: {[(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0]}")
+
         return new_crew_distribution
 
     # Handle other cases
     elif isinstance(available_repair_crews, dict):
-        print("No previous dissolved roads provided, treating as initial distribution")
+        if verbose: print("No previous dissolved roads provided, treating as initial distribution")
         current_crew_distribution = {island: 0 for island in unique_islands}
         for island_id, crew_count in available_repair_crews.items():
             if island_id in current_crew_distribution:
