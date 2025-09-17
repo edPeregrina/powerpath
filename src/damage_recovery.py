@@ -81,7 +81,5 @@ def default_fragility_function(hazard_values, asset_type):
     # Binary decision: 0 = failed, 1 = operational
     # Asset fails if random value < failure probability
     operational_status = (random_values >= failure_probability).astype(int)
-
-    print('Count of potentially failed assets: ', np.sum(operational_status == 0))
     
     return operational_status

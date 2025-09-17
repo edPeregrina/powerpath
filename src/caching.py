@@ -177,9 +177,9 @@ def create_hazard_extraction_cache_key(hazard_map_path, map_counter, extraction_
 
     return f"hazard_extraction_{extraction_method}_{hazard_dir_name}_{hazard_file}_map{map_counter:02d}_{gdf_hash}"
 
-def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
+def save_hazard_extraction_cache(cache_dict, interim_dir, hazard_dir=None):
     """Save hazard extraction cache to disk with hazard directory context."""
-    cache_dir = Path(cache_dir) / "cache"
+    cache_dir = Path(interim_dir) / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Create hazard-specific cache file
@@ -194,10 +194,10 @@ def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
     
     print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
 
-def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
+def load_hazard_extraction_cache(interim_dir, hazard_dir=None):
     """Load hazard extraction cache from disk."""
-    cache_dir = Path(cache_dir) / "cache"
-    
+    cache_dir = Path(interim_dir) / "cache"
+
     if hazard_dir:
         hazard_dir_name = Path(hazard_dir).name
         cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
