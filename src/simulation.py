@@ -111,22 +111,20 @@ def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_
         else:
             print(f"Cache miss for {cache_key}, computing islands on the fly...")
             try:
-                temp_gdf_for_islands = state.temp_gdf.copy()
+                temp_gdf_for_islands = state.temp_gdf#.copy()
                 temp_gdf_for_islands, dissolved_roads = match_island_ids_assets(
                     temp_gdf_for_islands,
                     hazard_threshold=flood_threshold,
                     hazard_column=haz_col_str,
                     config=_config,
                 )
+                # Assign island for each asset for the current state
                 state.island_ids = temp_gdf_for_islands['island_id'].values
                 island_data = {
                     'hazard_map': str(hazard_map),
                     'threshold': flood_threshold,
                     'island_ids': state.island_ids,
                     'dissolved_roads': dissolved_roads,
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'computed_on_demand',
-                    'method': 'match_island_ids_assets'
                 }
                 island_cache[cache_key] = island_data
                 cache_updated['island_cache'] = island_cache
@@ -161,8 +159,7 @@ def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_
     flooded_mask = state.current_hazard_values > flood_threshold
 
     # Apply fragility to assets that are not currently under repair
-    not_under_repair_mask = ~state.repair_crews_assigned
-    assets_to_evaluate = flooded_mask & not_under_repair_mask & state.operational
+    assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.operational
 
     # Update operational status based on fragility for assets above threshold
     if np.any(assets_to_evaluate):
@@ -455,11 +452,11 @@ def simulate_asset_damage_recovery_access_optimized(
                     'asset_id': range(num_assets),
                     'damage_ratio': state.damage_ratio.copy(),
                     'repair_time': state.repair_time.copy(),
-                    'operational': state.operational.astype(int),
-                    'accessible': state.accessible.astype(int),
-                    'unreachable': state.unreachable.astype(int),
-                    'flooded': flooded_mask.astype(int),
-                    'crew_assigned': state.repair_crews_assigned.astype(int),
+                    'operational': state.operational.astype(int).copy(),
+                    'accessible': state.accessible.astype(int).copy(),
+                    'unreachable': state.unreachable.astype(int).copy(),
+                    'flooded': flooded_mask.astype(int).copy(),
+                    'crew_assigned': state.repair_crews_assigned.astype(int).copy(),
                     'hazard_value': state.current_hazard_values.copy(),
                     'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int)
                 }

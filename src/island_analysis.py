@@ -36,20 +36,6 @@ def initialize_island_cache(interim_dir, hazard_dir):
     
     return island_cache
 
-# def create_spatial_index(dissolved_roads):
-#     """
-#     Create R-tree spatial index for fast spatial queries
-#     """
-#     # Build R-tree index
-#     idx = index.Index()
-    
-#     # Insert each island's bounding box into the index
-#     for i, row in dissolved_roads.iterrows():
-#         bounds = row.geometry.bounds  # (minx, miny, maxx, maxy)
-#         idx.insert(i, bounds, obj=row)
-    
-#     return idx
-
 def create_spatial_index(gdf):
     """
     Create R-tree spatial index for fast spatial queries
@@ -70,92 +56,121 @@ def create_spatial_index(gdf):
     
     return idx
 
-# def create_spatial_index_with_rtree(
-#     gdf: gpd.GeoDataFrame
-# ) -> Index:
+# def _optimized_overlap_calculation(current_islands, previous_islands, buffer_distance=1):
 #     """
-#     Create R-tree spatial index for fast spatial queries using rtree library.
-
-#     Args:
-#         gdf (gpd.GeoDataFrame): GeoDataFrame containing geometries to index.
-
-#     Returns:
-#         Index: R-tree spatial index (rtree.Index).
+#     Geometric intersection computation with R-tree spatial indexing and bounds checking
 #     """
-#     from rtree import index as rtree_index, Index, Property
-
-#     prop = Property()
-#     prop.dimension = 2
-
-#     items = ((i, row.geometry.bounds, None) for i, row in gdf.iterrows())
-#     spatial_idx = Index(items, properties=prop)
-
-#     return spatial_idx
+#     # Pre-buffer all geometries once
+#     current_buffered = current_islands.copy()
+#     current_buffered['geometry'] = current_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre') 
+    
+#     previous_buffered = previous_islands.copy()  
+#     previous_buffered['geometry'] = previous_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')#TODO: Add union to merge
+    
+#     spatial_idx = create_spatial_index(current_buffered)
+    
+#     overlaps_by_prev_island = {}
+    
+#     for _, prev_island in previous_buffered.iterrows():
+#         prev_geom = prev_island.geometry
+#         prev_area = prev_geom.area  
+#         prev_bounds = prev_geom.bounds  
+        
+#         overlaps = {}
+        
+#         # Use R-tree to get candidates (prevents checking all)
+#         try:
+#             # Get candidate islands from spatial index
+#             candidate_indices = list(spatial_idx.intersection(prev_bounds))
+            
+#             # If no spatial candidates found, skip this island
+#             if not candidate_indices:
+#                 overlaps_by_prev_island[prev_island['island_id']] = overlaps
+#                 continue
+                
+#         except Exception as e:
+#             # Fallback to all islands if R-tree fails
+#             print(f"Warning: R-tree query failed, falling back to full scan: {e}")
+#             candidate_indices = list(current_buffered.index)
+        
+#         # Process only candidate islands
+#         for candidate_idx in candidate_indices:
+#             try:
+#                 current_island = current_buffered.iloc[candidate_idx]
+#                 current_geom = current_island.geometry
+#                 current_bounds = current_geom.bounds
+                
+#                 # Check if within bounds
+#                 if not (prev_bounds[2] >= current_bounds[0] and  # prev_maxx >= curr_minx
+#                         prev_bounds[0] <= current_bounds[2] and  # prev_minx <= curr_maxx
+#                         prev_bounds[3] >= current_bounds[1] and  # prev_maxy >= curr_miny
+#                         prev_bounds[1] <= current_bounds[3]):    # prev_miny <= curr_maxy
+#                     continue
+                    
+#                 # Geometric intersection check
+#                 if prev_geom.intersects(current_geom):  # Boolean check first
+#                     intersection = prev_geom.intersection(current_geom)
+#                     if not intersection.is_empty:
+#                         overlap_pct = (intersection.area / prev_area)
+#                         overlaps[current_island['island_id']] = overlap_pct
+                        
+#             except Exception:
+#                 continue
+        
+#         overlaps_by_prev_island[prev_island['island_id']] = overlaps
+    
+#     return overlaps_by_prev_island
 
 def _optimized_overlap_calculation(current_islands, previous_islands, buffer_distance=1):
     """
-    Geometric intersection computation with R-tree spatial indexing and bounds checking
+    Geometric intersection computation with R-tree spatial indexing and vectorized boolean masks.
     """
     # Pre-buffer all geometries once
     current_buffered = current_islands.copy()
-    current_buffered['geometry'] = current_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre') 
-    
+    current_buffered['geometry'] = current_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')
+    current_buffered = current_buffered.reset_index(drop=True) 
     previous_buffered = previous_islands.copy()  
-    previous_buffered['geometry'] = previous_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')#TODO: Add union to merge
-    
+    previous_buffered['geometry'] = previous_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')
+
     spatial_idx = create_spatial_index(current_buffered)
-    
     overlaps_by_prev_island = {}
-    
+
+    # Convert geometry column to array for fast access
+    current_geoms = current_buffered.geometry.values
+    current_island_ids = current_buffered['island_id'].values
+
     for _, prev_island in previous_buffered.iterrows():
         prev_geom = prev_island.geometry
-        prev_area = prev_geom.area  
-        prev_bounds = prev_geom.bounds  
-        
+        prev_area = prev_geom.area
+        prev_bounds = prev_geom.bounds
+
         overlaps = {}
-        
-        # Use R-tree to get candidates (prevents checking all)
-        try:
-            # Get candidate islands from spatial index
-            candidate_indices = list(spatial_idx.intersection(prev_bounds))
-            
-            # If no spatial candidates found, skip this island
-            if not candidate_indices:
-                overlaps_by_prev_island[prev_island['island_id']] = overlaps
-                continue
-                
-        except Exception as e:
-            # Fallback to all islands if R-tree fails
-            print(f"Warning: R-tree query failed, falling back to full scan: {e}")
-            candidate_indices = list(current_buffered.index)
-        
-        # Process only candidate islands
-        for candidate_idx in candidate_indices:
-            try:
-                current_island = current_buffered.iloc[candidate_idx]
-                current_geom = current_island.geometry
-                current_bounds = current_geom.bounds
-                
-                # Check if within bounds
-                if not (prev_bounds[2] >= current_bounds[0] and  # prev_maxx >= curr_minx
-                        prev_bounds[0] <= current_bounds[2] and  # prev_minx <= curr_maxx
-                        prev_bounds[3] >= current_bounds[1] and  # prev_maxy >= curr_miny
-                        prev_bounds[1] <= current_bounds[3]):    # prev_miny <= curr_maxy
-                    continue
-                    
-                # Geometric intersection check
-                if prev_geom.intersects(current_geom):  # Boolean check first
-                    intersection = prev_geom.intersection(current_geom)
-                    if not intersection.is_empty:
-                        overlap_pct = (intersection.area / prev_area)
-                        overlaps[current_island['island_id']] = overlap_pct
-                        
-            except Exception:
-                continue
-        
+
+        # R-tree bounding box filter
+        candidate_indices = list(spatial_idx.intersection(prev_bounds))
+        if not candidate_indices:
+            overlaps_by_prev_island[prev_island['island_id']] = overlaps
+            continue
+
+        # Vectorized intersects filter
+        candidate_geoms = current_geoms[candidate_indices]
+        candidate_ids = current_island_ids[candidate_indices]
+        intersects_mask = np.array([prev_geom.intersects(g) for g in candidate_geoms])
+
+        # Only process true intersections
+        if np.any(intersects_mask):
+            intersecting_geoms = candidate_geoms[intersects_mask]
+            intersecting_ids = candidate_ids[intersects_mask]
+            intersections = [prev_geom.intersection(g) for g in intersecting_geoms]
+            for island_id, intersection in zip(intersecting_ids, intersections):
+                if not intersection.is_empty:
+                    overlap_pct = intersection.area / prev_area
+                    overlaps[island_id] = overlap_pct
+
         overlaps_by_prev_island[prev_island['island_id']] = overlaps
-    
+
     return overlaps_by_prev_island
+
 
 def update_repair_crew_islands_with_overlap_cached(
     available_repair_crews, island_ids, dissolved_roads, 
@@ -244,7 +259,7 @@ def update_repair_crew_islands_with_overlap_cached(
             overlaps_by_prev_island = _optimized_overlap_calculation(
                 current_islands, previous_islands, buffer_distance
             )
-            
+            print("Overlap computation complete.")
             # Cache the result (only store percentages)
             if overlap_cache is not None and overlap_cache_key is not None:
                 overlap_cache[overlap_cache_key] = overlaps_by_prev_island
@@ -356,32 +371,36 @@ def update_repair_crew_islands_with_overlap_cached(
             hazard_dir=hazard_dir
         )
 
-def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str, buffer_distance: float = 2.5) -> gpd.GeoDataFrame:
+def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str, buffer_distance: float = 2.5, verbose: bool = False) -> gpd.GeoDataFrame:
     """
     Create GeoDataFrame from graph with buffered road geometries for spatial operations.
     Deduplicates before buffering for efficiency.
     """
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
-        G = nx.DiGraph(G)
+        # G = nx.DiGraph(G)
 
     G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
     G = filter_hazard_graph(G, hazard_threshold, hazard_column)
 
     # Identify strongly connected components
-    components = list(nx.strongly_connected_components(G))
+    if G.is_directed():
+        components = list(nx.strongly_connected_components(G))
+    else:
+        components = list(nx.connected_components(G))
     fid_to_island = {}
 
     # Assign island_id to each fid
     for i, comp in enumerate(components):
         subgraph = G.subgraph(comp)
         for u, v, data in subgraph.edges(data=True):
+            fid_to_island[u] = i
             fid_to_island[v] = i
 
     # Create transformer for projecting geometries
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
     
-    # Build edge records with geometry and length (NO BUFFERING YET)
+    # Build edge records with geometry and length 
     records = []
 
     for u, v, data in G.edges(data=True):
@@ -414,7 +433,8 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
 
     # Deduplication and buffering
     gdf = gdf.drop_duplicates(subset=["geometry", "island_id"])
-    print(f"After deduplication: {len(gdf)} road segments")
+    if verbose:
+        print(f"After deduplication: {len(gdf)} road segments")
 
     buffered_geometries = []
     original_geometries = []
@@ -438,7 +458,8 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
     gdf['original_geometry'] = original_geometries
     gdf['geometry'] = buffered_geometries  # Replace with buffered geometries
     
-    print(f"Buffered {len(gdf)} road segments with {buffer_distance}m buffer")
+    if verbose:
+        print(f"Buffered {len(gdf)} road segments with {buffer_distance}m buffer")
 
     # Compute island sizes using original linestring lengths (more accurate for road network analysis)
     island_sizes = gdf.groupby("island_id")["length_m"].sum().reset_index()
@@ -449,7 +470,8 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
     gdf = gdf.merge(island_sizes, on="island_id", how="left")
     gdf["island_size_km"] = gdf["island_size_km"].fillna(0.0)
 
-    print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
+    if verbose:
+        print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
     return gdf
 
 def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=None):
@@ -462,6 +484,7 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
     else:
         _config = config    
 
+    verbose = _config['simulation_config']['verbose']    
     start_time = time.time()
     boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
     boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
@@ -469,73 +492,74 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
     # Load cached boundary assets if available
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
-        print(f"Loading graph from: {hazard_graph_path}")
-        print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
-        
+        if verbose: 
+            print(f"Loading graph from: {hazard_graph_path}")
+            print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
+
         islands_gdf = compute_island_geodataframe_from_graph(
             hazard_graph_path, hazard_threshold=hazard_threshold, 
-            hazard_column=hazard_column, buffer_distance=20
+            hazard_column=hazard_column, buffer_distance=20, verbose=verbose
         )
 
         # Dissolve roads by island_id to get road network per island
-        dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False)
-        print(f"Created {len(dissolved_roads)} dissolved road islands")
-        
+        dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False) #it is possible that dissolving is not necessary?
+        if verbose: 
+            print(f"Created {len(dissolved_roads)} dissolved road islands")
+
         # Initialize island_id column with -1 for all assets
-        temp_gdf = temp_gdf.copy()
+        # temp_gdf = temp_gdf.copy()
         temp_gdf['island_id'] = -1
 
         projected_crs = 'epsg:28992'
         dissolved_roads = dissolved_roads.to_crs(projected_crs)
-        temp_gdf = temp_gdf.to_crs(projected_crs)
+        temp_gdf = temp_gdf.to_crs(projected_crs) #TODO: Drop unused columns
+
+        array_island_ids = dissolved_roads.island_id.values
+        def assign_island_id(asset_geom) -> int:  
+            mask = asset_geom.intersects(dissolved_roads.geometry)
+            ids = array_island_ids[mask]
+            if len(ids) == 0:
+                return -1
+            return ids[0]
+        
+        # Assign island_id for all assets (works for both EV0 and else)
+        temp_gdf['island_id'] = temp_gdf.geometry.apply(assign_island_id)
+        main_island_id = dissolved_roads['island_id'].value_counts().idxmax()
 
         # Handle boundary island identification using geographic features
         is_initial_status = 'EV0' in hazard_column
+        if is_initial_status: 
+            if verbose: 
+                print("EV0 initial status - caching and scrapping boundary assets and islands")   
 
-        if is_initial_status: # Spatial join only for the first step, so lower priority
-            print("EV0 initial status - caching and scrapping boundary assets and islands")   
-            spatial_join = gpd.sjoin(temp_gdf, dissolved_roads, 
-                                    how='left', predicate='intersects')
-            
-
-            # Assign island_ids from spatial join
-            if 'index_right' in spatial_join.columns:
-                successful_joins = spatial_join['index_right'].notna()
-                index_to_island = dict(zip(dissolved_roads.index, dissolved_roads['island_id']))
-                grouped = spatial_join[successful_joins].groupby(level=0)['index_right'].last()
-                for idx, dissolved_idx in grouped.items():
-                    island_id = index_to_island[dissolved_idx]
-                    temp_gdf.loc[idx, 'island_id'] = island_id
-
-            # After spatial join
+            # Identify unassigned assets (island_id == -1)
             unassigned_mask = temp_gdf['island_id'] == -1
             unassigned_indices = temp_gdf[unassigned_mask].index.tolist()
 
-            # Try to assign unassigned assets to any non-main island by distance
+            # Try to assign unassigned assets to an island by distance
             distance_threshold = 5.0  # meters
             for idx in unassigned_indices:
                 asset_geom = temp_gdf.loc[idx, 'geometry']
                 # Exclude main island
-                candidate_islands = dissolved_roads[dissolved_roads['island_id'] > 0]
-                distances = candidate_islands.geometry.distance(asset_geom)
+                distances = dissolved_roads.geometry.distance(asset_geom)
                 if not distances.empty and distances.min() < distance_threshold:
                     nearest_idx = distances.idxmin()
-                    nearest_island_id = candidate_islands.loc[nearest_idx, 'island_id']
+                    nearest_island_id = dissolved_roads.loc[nearest_idx, 'island_id']
                     temp_gdf.loc[idx, 'island_id'] = nearest_island_id
 
-            # Now, boundary assets are those with island_id > 0 or still -1
-            boundary_asset_mask = (temp_gdf['island_id'] > 0) | (temp_gdf['island_id'] == -1)
+            # Now, boundary assets are those with island_id != main_island_id or still -1
+            boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
             boundary_asset_indices = temp_gdf[boundary_asset_mask].index.tolist()
 
             # Pickle for future use
             with open(boundary_assets_cache_path, 'wb') as f:
                 pickle.dump(boundary_asset_indices, f)
 
-            # Set all island_id to 0 for EV0 (no filtering)
-            temp_gdf['island_id'] = 0
+            # # Set all island_id to 0 for EV0 (no filtering)
+            # temp_gdf['island_id'] = 0
 
             # Identify boundary islands (non-main islands that exist in baseline)
-            boundary_islands = dissolved_roads[dissolved_roads['island_id'] > 0]
+            boundary_islands = dissolved_roads[dissolved_roads['island_id'] != main_island_id]
             
             # Create stable geographic identifiers for boundary islands
             boundary_island_features = []
@@ -556,27 +580,30 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
                     'osmid': island_row['osmid']
                 }
                 boundary_island_features.append(geo_signature)
-            
-            print(f"Found {len(boundary_island_features)} boundary islands by geography (all assets assigned to main island)")
-            
+
+            if verbose:
+                print(f"Found {len(boundary_island_features)} boundary islands by geography (all assets assigned to main island)")
+
             # Cache boundary geographic features (stable across timesteps)
             with open(boundary_islands_cache_path, 'wb') as f:
                 pickle.dump(boundary_island_features, f)
-            
-            print(f"Cached {len(boundary_island_features)} boundary island geographic features from {hazard_column}")
+
+            if verbose:
+                print(f"Cached {len(boundary_island_features)} boundary island geographic features from {hazard_column}")
             
             # IMMEDIATE EXCLUSION: Return only main island assets and roads
             clean_gdf_assets = temp_gdf  # All assets are already on island 0
-            clean_dissolved_roads = dissolved_roads[dissolved_roads['island_id'] == 0]
-            print(clean_dissolved_roads.head())
+            clean_dissolved_roads = dissolved_roads[dissolved_roads['island_id'] == main_island_id]
             
-            print(f"EV0 baseline: {len(clean_gdf_assets)} assets on main island, {len(boundary_islands)} boundary islands excluded")
-            print(f"EV0 processing completed in {time.time() - start_time:.2f} seconds")
-            
+            if verbose:
+                print(f"EV0 baseline: {len(clean_gdf_assets)} assets on main island, {len(boundary_islands)} boundary islands excluded")
+                print(f"EV0 processing completed in {time.time() - start_time:.2f} seconds")
+
         else:
             # For non-EV0 timesteps
             spatial_start = time.time()
-            print(f"Performing spatial assignment of {len(temp_gdf)} assets to {len(dissolved_roads)} islands...")
+            if verbose:
+                print(f"Performing spatial assignment of {len(temp_gdf)} assets to {len(dissolved_roads)} islands...")
 
             # Load boundary asset indices
             with open(boundary_assets_cache_path, 'rb') as f:
@@ -589,8 +616,7 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             # Identify boundary assets using spatial signature match
             boundary_island_ids_current = []
             tolerance = 5.0  # meters
-
-            current_non_main_islands = dissolved_roads[dissolved_roads['island_id'] > 0]
+            current_non_main_islands = dissolved_roads[dissolved_roads['island_id'] != main_island_id]
 
             for cached_feature in boundary_island_features:
                 for _, current_island in current_non_main_islands.iterrows():
@@ -608,33 +634,17 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
 
                     if centroid_match or (bounds_match and area_match):
                         boundary_island_ids_current.append(current_island['island_id'])
-                        print(f"Found current boundary island {current_island['island_id']} matching cached feature by Centroid: {centroid_match} or by Area: {area_match} and Bounds:{bounds_match}")
+                        if verbose: 
+                            print(f"Matched boundary island ID {current_island['island_id']} using cached geographic signature")
                         break
 
             # Exclude boundary islands from dissolved_roads
             dissolved_roads = dissolved_roads[~dissolved_roads['island_id'].isin(boundary_island_ids_current)]
-            
-            # Exclude boundary assets from spatial join (always go to main island)
-            assets_for_join = temp_gdf[~temp_gdf.index.isin(boundary_asset_indices)]
-            print(f"  Assets for spatial join: {len(assets_for_join)}")
-
-            # Create a subset of dissolved roads candidate assets using spatial index 
-            # sindex = create_spatial_index
-
-            # Spatial join for non-boundary assets
-            spatial_join = gpd.sjoin(assets_for_join, dissolved_roads, # TODO: Make from diss road sp index >create subset of dissolved roads, then repeat spatial join OR intersects with subst of disolved roads (boolean); then try again spatial join
-                                     how='left', predicate='intersects') 
-
-            if 'index_right' in spatial_join.columns:
-                successful_joins = spatial_join['index_right'].notna()
-                index_to_island = dict(zip(dissolved_roads.index, dissolved_roads['island_id']))
-                grouped = spatial_join[successful_joins].groupby(level=0)['index_right'].last()
-                for idx, dissolved_idx in grouped.items():
-                    island_id = index_to_island[dissolved_idx]
-                    temp_gdf.loc[idx, 'island_id'] = island_id
-
-            # Assign all boundary assets to main island (island_id = 0)
-            temp_gdf.loc[boundary_asset_indices, 'island_id'] = 0
+            # array_island_ids = dissolved_roads.island_id.values
+            # # Assign island_id for non-boundary assets only
+            # non_boundary_mask = ~temp_gdf.index.isin(boundary_asset_indices)
+            # temp_gdf.loc[non_boundary_mask, 'island_id'] = temp_gdf.loc[non_boundary_mask, 'geometry'].apply(assign_island_id)
+            temp_gdf.loc[boundary_asset_indices, 'island_id'] = main_island_id  # Assign boundary assets to main island (or -1 if preferred)
             
             # For any remaining unassigned assets, use spatial index or assign to largest island as fallback
             unassigned_mask = temp_gdf['island_id'] == -1
@@ -655,19 +665,21 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
                         nearest_island_id = candidate_roads.loc[nearest_candidate_idx, 'island_id']
                     else:
                         # Fallback: assign to largest island (usually island 0)
-                        largest_island = dissolved_roads.loc[dissolved_roads.geometry.area.idxmax()]
-                        nearest_island_id = largest_island['island_id']
+                        # largest_island = dissolved_roads.loc[dissolved_roads.geometry.area.idxmax()]
+                        nearest_island_id = main_island_id#largest_island['island_id']
                     temp_gdf.loc[idx, 'island_id'] = nearest_island_id
             
             clean_dissolved_roads=dissolved_roads
             clean_gdf_assets=temp_gdf
 
-            print(f"Assigned {len(temp_gdf)} assets to {len(dissolved_roads)} islands")
-            print(f"Island distribution: {temp_gdf['island_id'].value_counts().sort_index().to_dict()}")
-            print(f"Spatial assignment completed in {time.time() - spatial_start:.2f} seconds")
+            if verbose:
+                print(f"Assigned {len(temp_gdf)} assets to {len(dissolved_roads)} islands")
+                print(f"Island distribution: {temp_gdf['island_id'].value_counts().sort_index().to_dict()}")
+                print(f"Spatial assignment completed in {time.time() - spatial_start:.2f} seconds")
         
-        print(f"Final results: {len(clean_gdf_assets)} clean assets, {len(clean_dissolved_roads)} clean road islands")
-        print(f"Total processing time: {time.time() - start_time:.2f} seconds")
+        if verbose: 
+            print(f"Final results: {len(clean_gdf_assets)} clean assets, {len(clean_dissolved_roads)} clean road islands")
+        print(f">>>>Total processing time: {time.time() - start_time:.2f} seconds")
 
         return clean_gdf_assets, clean_dissolved_roads
         
@@ -681,68 +693,4 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
         return temp_gdf_copy, None
 
 
-# def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=_config):
-#     """
-#     Get islands wrapping polygons for a specific day and assign island IDs to assets.
-    
-#     Parameters:
-#     temp_gdf (gpd.GeoDataFrame): GeoDataFrame with asset geometries
-#     hazard_threshold (float): Threshold for hazard analysis
-#     hazard_column (str): Column name for hazard data
-#     config (dict): Configuration dictionary with 'root_dir' key
-    
-#     Returns:
-#     tuple: (temp_gdf_with_island_ids, dissolved_roads) where temp_gdf_with_island_ids 
-#            has island_id column and dissolved_roads is the islands wrapping polygons
-#     """
-#     try:
-#         # Fetch graph with grid-based accessibility hex with islands
-#         hazard_graph_path = config['data_dir'] / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
-#         print(f"Loading graph from: {hazard_graph_path}")
-#         print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
-        
-#         islands_gdf = compute_island_geodataframe_from_graph(hazard_graph_path, hazard_threshold=hazard_threshold, hazard_column=hazard_column)
-#         print(f"Loaded {len(islands_gdf)} island features")
-        
-#         islands_gdf = islands_gdf.drop_duplicates(subset=["geometry", "island_id"])
-#         print(f"After deduplication: {len(islands_gdf)} island features")
-
-#         # Dissolve roads by island_id to get road network per island
-#         dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False)
-#         print(f"Created {len(dissolved_roads)} dissolved road islands")
-        
-#         # Initialize island_id column with -1 for all assets
-#         temp_gdf = temp_gdf.copy()  # Make sure we're working with a copy
-#         temp_gdf['island_id'] = -1  # Initialize island_id column with -1 for all assets
-
-#         projected_crs = 'epsg:28992'  # Use a projected CRS for accurate distance calculations
-#         dissolved_roads = dissolved_roads.to_crs(projected_crs)
-#         temp_gdf = temp_gdf.to_crs(projected_crs)  # Ensure temp_gdf is in the same CRS
-
-#         # Assign each asset to the nearest island
-#         for idx, asset_row in temp_gdf.iterrows():
-#             asset_geom = asset_row.geometry
-            
-#             # Calculate distance to island boundaries
-#             distances = dissolved_roads.geometry.distance(asset_geom)
-#             nearest_island_idx = distances.idxmin()
-#             nearest_island_id = dissolved_roads.loc[nearest_island_idx, 'island_id']
-            
-#             # Update the island_id in temp_gdf 
-#             temp_gdf.loc[idx, 'island_id'] = nearest_island_id
-
-#         print(f"Successfully assigned {len(temp_gdf)} assets to islands")
-#         return temp_gdf, dissolved_roads
-        
-#     except Exception as e:
-#         print(f"Error in match_island_ids_assets: {e}")
-#         print(f"Hazard graph path: {hazard_graph_path}")
-#         print(f"Hazard threshold: {hazard_threshold}")
-#         print(f"Hazard column: {hazard_column}")
-#         import traceback
-#         traceback.print_exc()
-#         # Fallback: assign all assets to island 0
-#         temp_gdf_copy = temp_gdf.copy()
-#         temp_gdf_copy['island_id'] = 0
-#         return temp_gdf_copy, None
     
