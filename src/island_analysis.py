@@ -22,6 +22,9 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 from config import get_config
 
+# #progress apply 
+from tqdm import tqdm
+tqdm.pandas()
 
 def initialize_island_cache(interim_dir, hazard_dir):
     """
@@ -503,28 +506,53 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
 
         # Dissolve roads by island_id to get road network per island
         dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False) #it is possible that dissolving is not necessary?
+        main_island_id = dissolved_roads['island_id'].value_counts().idxmax()
+        
         if verbose: 
             print(f"Created {len(dissolved_roads)} dissolved road islands")
 
         # Initialize island_id column with -1 for all assets
-        # temp_gdf = temp_gdf.copy()
+        print("Copying temp_gdf...")
+        temp_gdf = temp_gdf.copy()
+        print("Copy done.")
         temp_gdf['island_id'] = -1
 
+        print("Transforming CRS for dissolved_roads and temp_gdf...")
         projected_crs = 'epsg:28992'
         dissolved_roads = dissolved_roads.to_crs(projected_crs)
+        print("CRS transform done for dissolved_roads.")
         temp_gdf = temp_gdf.to_crs(projected_crs) #TODO: Drop unused columns
+        print("CRS transform done for temp_gdf.")
 
         array_island_ids = dissolved_roads.island_id.values
-        def assign_island_id(asset_geom) -> int:  
-            mask = asset_geom.intersects(dissolved_roads.geometry)
-            ids = array_island_ids[mask]
-            if len(ids) == 0:
-                return -1
-            return ids[0]
+
+        # Good for initial steps with clear documentation of results
+        spatial_join = gpd.sjoin(temp_gdf, dissolved_roads, 
+                                how='left', predicate='intersects')
+
+        # Assign island_ids from spatial join
+        if 'index_right' in spatial_join.columns:
+            successful_joins = spatial_join['index_right'].notna()
+            index_to_island = dict(zip(dissolved_roads.index, dissolved_roads['island_id']))
+            grouped = spatial_join[successful_joins].groupby(level=0)['index_right'].last()
+            
+            print("Assigning island_ids to assets...")
+            for idx, dissolved_idx in tqdm(grouped.items(), total=len(grouped), desc="Island assignment"):
+                island_id = index_to_island[dissolved_idx]
+                temp_gdf.loc[idx, 'island_id'] = island_id
+
+        # dissolved_roads = dissolved_roads.reset_index(drop=True)
+
+        # temp_gdf['island_id'] = temp_gdf.geometry.progress_apply(lambda geom: array_island_ids[geom.intersects(dissolved_roads.geometry)])
         
+        # def assign_island_id(asset_geom) -> int:  
+        #     mask = asset_geom.intersects(dissolved_roads.geometry)
+        #     ids = array_island_ids[mask]
+        #     if len(ids) == 0:
+        #         return -1
+        #     return ids[0]        
         # Assign island_id for all assets (works for both EV0 and else)
-        temp_gdf['island_id'] = temp_gdf.geometry.apply(assign_island_id)
-        main_island_id = dissolved_roads['island_id'].value_counts().idxmax()
+        # temp_gdf['island_id'] = temp_gdf.geometry.progress_apply(assign_island_id)
 
         # Handle boundary island identification using geographic features
         is_initial_status = 'EV0' in hazard_column
