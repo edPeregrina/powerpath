@@ -15,7 +15,7 @@ from pyproj import Transformer
 import time
 
 from src.utils import project_graph_coords, filter_hazard_graph
-from src.caching import load_island_cache, save_island_cache_silent, save_island_cache, create_overlap_cache_key, save_overlap_cache
+from src.caching import load_island_cache, save_island_cache_silent, create_island_cache_key, save_island_cache, create_overlap_cache_key, save_overlap_cache
 
 # Import hazard extraction method from config
 import sys
@@ -25,19 +25,6 @@ from config import get_config
 # #progress apply 
 from tqdm import tqdm
 tqdm.pandas()
-
-def initialize_island_cache(interim_dir, hazard_dir):
-    """
-    Initialize island assignment cache, sets up the cache structure for on-demand computation.
-    """
-    
-    cache_dir = interim_dir / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Load existing cache (don't overwrite existing computations)
-    island_cache = load_island_cache(cache_dir, hazard_dir)
-    
-    return island_cache
 
 def create_spatial_index(gdf):
     """
@@ -477,10 +464,20 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
         print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
     return gdf
 
-def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', config=None):
+def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', 
+                           config=None, island_cache=None, cache_dir=None, hazard_dir=None):
     """
     Get islands and assign IDs to assets with stable boundary island identification using geographic features.
     Boundary assets are excluded immediately based on spatial location.
+    
+    Args:
+        temp_gdf: GeoDataFrame of assets to assign islands to
+        hazard_threshold: Threshold for hazard values
+        hazard_column: Column name for hazard values
+        config: Configuration dictionary
+        island_cache: Existing island cache dictionary (optional)
+        cache_dir: Directory to save cache files (optional)
+        hazard_dir: Hazard directory for cache naming (optional)
     """
     if config is None:
         _config = get_config()
@@ -491,6 +488,22 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
     start_time = time.time()
     boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
     boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
+    
+        # Debug prints at the start
+    print(f"DEBUG: match_island_ids_assets called")
+    print(f"DEBUG: island_cache is {'not None' if island_cache is not None else 'None'}")
+    print(f"DEBUG: cache_dir is {'not None' if cache_dir is not None else 'None'}: {cache_dir}")
+    print(f"DEBUG: hazard_dir is {'not None' if hazard_dir is not None else 'None'}: {hazard_dir}")
+
+    # Create cache key for this computation
+    if island_cache is not None and cache_dir is not None:
+        cache_key = create_island_cache_key(hazard_column, hazard_threshold)
+        
+        # Check if this computation is already cached
+        if cache_key in island_cache:
+            if verbose:
+                print(f"Using cached island assignment for {cache_key}")
+            return island_cache[cache_key]['assets'], island_cache[cache_key]['roads']
     
     # Load cached boundary assets if available
     try:
@@ -512,17 +525,12 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             print(f"Created {len(dissolved_roads)} dissolved road islands")
 
         # Initialize island_id column with -1 for all assets
-        print("Copying temp_gdf...")
         temp_gdf = temp_gdf.copy()
-        print("Copy done.")
+        # temp_gdf = temp_gdf[['geometry', 'type', 'island_id']]
         temp_gdf['island_id'] = -1
-
-        print("Transforming CRS for dissolved_roads and temp_gdf...")
         projected_crs = 'epsg:28992'
         dissolved_roads = dissolved_roads.to_crs(projected_crs)
-        print("CRS transform done for dissolved_roads.")
         temp_gdf = temp_gdf.to_crs(projected_crs) #TODO: Drop unused columns
-        print("CRS transform done for temp_gdf.")
 
         array_island_ids = dissolved_roads.island_id.values
 
@@ -709,7 +717,21 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             print(f"Final results: {len(clean_gdf_assets)} clean assets, {len(clean_dissolved_roads)} clean road islands")
         print(f">>>>Total processing time: {time.time() - start_time:.2f} seconds")
 
-        return clean_gdf_assets, clean_dissolved_roads
+        # Cache the results
+        if island_cache is not None and cache_dir is not None:
+            # Store the computed results in the cache
+            island_cache[cache_key] = {
+                'island_ids': clean_gdf_assets['island_id'].values,  
+                'dissolved_roads': clean_dissolved_roads
+            }
+            
+            # Save the updated cache using the standardized function
+            save_island_cache(island_cache, cache_dir, hazard_dir)
+            
+            if verbose:
+                print(f"Saved island assignment to cache with key {cache_key}")
+
+        return clean_gdf_assets['island_id'].values, clean_dissolved_roads
         
     except Exception as e:
         print(f"Error in match_island_ids_assets: {e}")

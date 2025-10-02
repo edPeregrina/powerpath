@@ -52,7 +52,7 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
-def default_fragility_function(hazard_values, asset_type):
+def default_fragility_function(hazard_values, asset_type, k=None):
     """
     Calculate binary operational status from hazard values using fragility curve.
     Returns 1 for operational, 0 for failed, based on probabilistic sampling.
@@ -64,7 +64,8 @@ def default_fragility_function(hazard_values, asset_type):
     """
     failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
 
-    k = np.random.uniform(5, 7.5)
+    if k is None:
+        k = np.random.uniform(5, 7.5)
 
     hazard_mask = hazard_values > 0
     ls_mask = asset_type == 'ls'

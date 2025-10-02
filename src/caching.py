@@ -12,6 +12,11 @@ import pickle
 import json
 from pathlib import Path
 
+def _get_hazard_dir_name(hazard_dir):
+    """Helper function to consistently get hazard directory name."""
+    if hazard_dir:
+        return Path(hazard_dir).name
+    return "unknown"
 
 def create_grid_accessibility_cache_key(hazard_map, flood_threshold, hazard_dir=None):
     """
@@ -25,12 +30,7 @@ def create_grid_accessibility_cache_key(hazard_map, flood_threshold, hazard_dir=
     Returns:
         str: Unique cache key
     """
-    # Get hazard directory name for cache organization
-    if hazard_dir is not None:
-        hazard_dir_name = Path(hazard_dir).name
-    else:
-        hazard_dir_name = Path(hazard_map).parent.name
-    
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir) if hazard_dir else Path(hazard_map).parent.name
     hazard_file = Path(hazard_map).stem  # filename without extension
     
     cache_key = f"grid_accessibility_{hazard_dir_name}_{hazard_file}_{flood_threshold}"
@@ -42,17 +42,16 @@ def save_grid_accessibility_cache(cache_dict, cache_dir, hazard_dir=None):
     
     Args:
         cache_dict (dict): Dictionary containing grid accessibility results
-        cache_dir (Path): Directory to save cache files
+        cache_dir (Path or str): Directory to save cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create hazard-specific subdirectory
-    if hazard_dir:
-        hazard_subdir = cache_dir / f"grid_accessibility_{Path(hazard_dir).name}"
-    else:
-        hazard_subdir = cache_dir / "grid_accessibility"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     
+    # Create hazard-specific subdirectory
+    hazard_subdir = cache_dir / f"grid_accessibility_{hazard_dir_name}"
     hazard_subdir.mkdir(parents=True, exist_ok=True)
     
     # Save as pickle
@@ -82,17 +81,16 @@ def load_grid_accessibility_cache(cache_dir, hazard_dir=None):
     Load grid accessibility cache from disk.
     
     Args:
-        cache_dir (Path): Directory containing cache files
+        cache_dir (Path or str): Directory containing cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     
     Returns:
         dict: Grid accessibility cache dictionary
     """
-    if hazard_dir:
-        hazard_subdir = cache_dir / f"grid_accessibility_{Path(hazard_dir).name}"
-    else:
-        hazard_subdir = cache_dir / "grid_accessibility"
+    cache_dir = Path(cache_dir)
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     
+    hazard_subdir = cache_dir / f"grid_accessibility_{hazard_dir_name}"
     pickle_file = hazard_subdir / "grid_accessibility_cache.pkl"
     
     if pickle_file.exists():
@@ -109,8 +107,19 @@ def load_grid_accessibility_cache(cache_dir, hazard_dir=None):
         return {}
 
 def create_accessibility_cache_key(timestep, threshold, hazard_dir, accessibility_model=None):
-    """Create cache key for single timestep accessibility."""
-    hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
+    """
+    Create cache key for single timestep accessibility.
+    
+    Args:
+        timestep (int): Simulation timestep
+        threshold (float): Hazard threshold value
+        hazard_dir (str or Path): Hazard directory path
+        accessibility_model (object, optional): Accessibility model instance
+        
+    Returns:
+        str: Unique cache key
+    """
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     model_type = type(accessibility_model).__name__ if accessibility_model else "default"
     return f"accessibility_{hazard_dir_name}_{timestep}_{threshold}_{model_type}"
 
@@ -120,17 +129,14 @@ def save_accessibility_cache(cache_dict, cache_dir, hazard_dir=None):
     
     Args:
         cache_dict (dict): Dictionary containing accessibility results
-        cache_dir (Path): Directory to save cache files
+        cache_dir (Path or str): Directory to save cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create hazard-specific cache file
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"accessibility_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "accessibility_cache.pkl"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"accessibility_cache_{hazard_dir_name}.pkl"
     
     with open(cache_file, 'wb') as f:
         pickle.dump(cache_dict, f)
@@ -142,17 +148,15 @@ def load_accessibility_cache(cache_dir, hazard_dir=None):
     Load accessibility cache from disk.
     
     Args:
-        cache_dir (Path): Directory containing cache files
+        cache_dir (Path or str): Directory containing cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     
     Returns:
         dict: Accessibility cache dictionary
     """
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"accessibility_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "accessibility_cache.pkl"
+    cache_dir = Path(cache_dir)
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"accessibility_cache_{hazard_dir_name}.pkl"
     
     if cache_file.exists():
         try:
@@ -168,41 +172,59 @@ def load_accessibility_cache(cache_dir, hazard_dir=None):
         return {}
 
 def create_hazard_extraction_cache_key(hazard_map_path, map_counter, extraction_method, gdf_hash, hazard_dir):
-    """Create a unique cache key for hazard extraction based on hazard map and asset geometry."""
+    """
+    Create a unique cache key for hazard extraction based on hazard map and asset geometry.
+    
+    Args:
+        hazard_map_path (str or Path): Path to hazard map file
+        map_counter (int): Map index/counter
+        extraction_method (str): Method used for hazard extraction
+        gdf_hash (str): Hash of the geodataframe
+        hazard_dir (str or Path): Hazard directory path
+        
+    Returns:
+        str: Unique cache key
+    """
     # Get hazard file identifier
     hazard_file = Path(hazard_map_path).stem  # e.g., "hazard_01"
-    
-    # Include hazard directory name for differentiation
-    hazard_dir_name = Path(hazard_dir).name if hazard_dir else "default"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
 
     return f"hazard_extraction_{extraction_method}_{hazard_dir_name}_{hazard_file}_map{map_counter:02d}_{gdf_hash}"
 
-def save_hazard_extraction_cache(cache_dict, interim_dir, hazard_dir=None):
-    """Save hazard extraction cache to disk with hazard directory context."""
-    cache_dir = Path(interim_dir) / "cache"
+def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
+    """
+    Save hazard extraction cache to disk with hazard directory context.
+    
+    Args:
+        cache_dict (dict): Dictionary containing hazard extraction results
+        cache_dir (Path or str): Directory to save cache files
+        hazard_dir (str or Path, optional): Hazard directory for organization
+    """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create hazard-specific cache file
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "hazard_extraction_cache.pkl"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
     
     with open(cache_file, 'wb') as f:
         pickle.dump(cache_dict, f)
     
     print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
 
-def load_hazard_extraction_cache(interim_dir, hazard_dir=None):
-    """Load hazard extraction cache from disk."""
-    cache_dir = Path(interim_dir) / "cache"
-
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "hazard_extraction_cache.pkl"
+def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
+    """
+    Load hazard extraction cache from disk.
+    
+    Args:
+        cache_dir (Path or str): Directory containing cache files
+        hazard_dir (str or Path, optional): Hazard directory for organization
+    
+    Returns:
+        dict: Hazard extraction cache dictionary
+    """
+    cache_dir = Path(cache_dir)
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
     
     if cache_file.exists():
         try:
@@ -217,15 +239,33 @@ def load_hazard_extraction_cache(interim_dir, hazard_dir=None):
         print(f"No hazard extraction cache found at {cache_file}")
         return {}
 
+def create_island_cache_key(hazard_column, hazard_threshold):
+    """
+    Create a standardized cache key for island assignment.
+    
+    Args:
+        hazard_column (str): The hazard column name (e.g., 'EV1_ma')
+        hazard_threshold (float): The hazard threshold value (e.g., 0.2)
+        
+    Returns:
+        str: Standardized cache key
+    """
+    return f"island_assignment_{hazard_column}_{hazard_threshold}"
+
 def save_island_cache_silent(cache_dict, cache_dir, hazard_dir=None):
-    """Save island assignment cache to disk without printing message."""
+    """
+    Save island assignment cache to disk without printing message.
+    
+    Args:
+        cache_dict (dict): Dictionary containing island assignment results
+        cache_dir (Path or str): Directory to save cache files
+        hazard_dir (str or Path, optional): Hazard directory for organization
+    """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "island_cache.pkl"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
     
     with open(cache_file, 'wb') as f:
         pickle.dump(cache_dict, f)
@@ -237,39 +277,40 @@ def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
     
     Args:
         cache_dict (dict): Dictionary containing island assignment results
-        cache_dir (Path): Directory to save cache files
+        cache_dir (Path or str): Directory to save cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create hazard-specific cache file
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "island_cache.pkl"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
     
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
+    print(f"DEBUG: Saving to file: {cache_file}")
     
-    print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_dict, f)
+        print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        print(f"ERROR: Failed to save island cache: {e}")
 
 def load_island_cache(cache_dir, hazard_dir=None):
     """
     Load island assignment cache from disk.
     
     Args:
-        cache_dir (Path): Directory containing cache files
+        cache_dir (Path or str): Directory containing cache files
         hazard_dir (str or Path, optional): Hazard directory for organization
     
     Returns:
         dict: Island assignment cache dictionary
     """
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "island_cache.pkl"
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)  # Added this line from initialize_island_cache
+    
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
     
     if cache_file.exists():
         try:
@@ -285,19 +326,35 @@ def load_island_cache(cache_dir, hazard_dir=None):
         return {}
 
 def create_overlap_cache_key(prev_map, current_map, hazard_threshold, hazard_dir=None):
-    """Create cache key for overlap percentages between timesteps."""
-    hazard_dir_name = Path(hazard_dir).name if hazard_dir else "unknown"
+    """
+    Create cache key for overlap percentages between timesteps.
+    
+    Args:
+        prev_map (str or int): Previous map identifier
+        current_map (str or int): Current map identifier
+        hazard_threshold (float): Hazard threshold value
+        hazard_dir (str or Path, optional): Hazard directory path
+        
+    Returns:
+        str: Unique cache key
+    """
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     return f"overlap_{hazard_dir_name}_{prev_map}_{current_map}_{hazard_threshold}"
 
 def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
-    """Save overlap cache as pickle."""
+    """
+    Save overlap cache as pickle.
+    
+    Args:
+        cache_dict (dict): Dictionary containing overlap results
+        cache_dir (Path or str): Directory to save cache files
+        hazard_dir (str or Path, optional): Hazard directory for organization
+    """
+    cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "overlap_cache.pkl"
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
     
     with open(cache_file, 'wb') as f:
         pickle.dump(cache_dict, f)
@@ -305,12 +362,19 @@ def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
     print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
 
 def load_overlap_cache(cache_dir, hazard_dir=None):
-    """Load overlap cache pickle."""
-    if hazard_dir:
-        hazard_dir_name = Path(hazard_dir).name
-        cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
-    else:
-        cache_file = cache_dir / "overlap_cache.pkl"
+    """
+    Load overlap cache pickle.
+    
+    Args:
+        cache_dir (Path or str): Directory containing cache files
+        hazard_dir (str or Path, optional): Hazard directory for organization
+    
+    Returns:
+        dict: Overlap cache dictionary
+    """
+    cache_dir = Path(cache_dir)
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
     
     if cache_file.exists():
         try:
@@ -323,3 +387,141 @@ def load_overlap_cache(cache_dir, hazard_dir=None):
             return {}
     else:
         return {}
+    
+def load_simulation_caches(cache_dir, hazard_dir=None):
+    """
+    Load all simulation caches from the cache directory.
+    
+    Args:
+        cache_dir (Path or str): Directory where cache files are stored
+        hazard_dir (Path or str, optional): Hazard directory for cache naming
+    
+    Returns:
+        dict: Dictionary with loaded caches with keys:
+            'accessibility_cache': Loaded accessibility cache or None
+            'hazard_extraction_cache': Loaded hazard extraction cache or None  
+            'overlap_cache': Loaded overlap cache or None
+            'island_cache': Loaded island cache or None
+    """
+    # Convert to Path objects
+    cache_dir = Path(cache_dir)
+    
+    # Ensure cache directory exists
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize empty caches
+    caches = {
+        'accessibility_cache': None,
+        'hazard_extraction_cache': None,
+        'overlap_cache': None,
+        'island_cache': None
+    }
+    
+    print("Loading simulation caches...")
+    
+    # Load accessibility cache
+    try:
+        caches['accessibility_cache'] = load_accessibility_cache(cache_dir, hazard_dir)
+    except Exception as e:
+        print(f"Note: Could not load accessibility cache: {e}")
+    
+    # Load hazard extraction cache
+    try:
+        caches['hazard_extraction_cache'] = load_hazard_extraction_cache(cache_dir, hazard_dir)
+    except Exception as e:
+        print(f"Note: Could not load hazard extraction cache: {e}")
+    
+    # Load overlap cache
+    try:
+        caches['overlap_cache'] = load_overlap_cache(cache_dir, hazard_dir)
+    except Exception as e:
+        print(f"Note: Could not load overlap cache: {e}")
+    
+    # Load island cache
+    try:
+        caches['island_cache'] = load_island_cache(cache_dir, hazard_dir)
+    except Exception as e:
+        print(f"Note: Could not load island cache: {e}")
+    
+    return caches
+
+def save_simulation_caches(cache_updated, cache_dir, hazard_dir=None):
+    """
+    Save all updated simulation caches to the cache directory.
+    
+    Args:
+        cache_updated (dict): Dictionary containing updated caches with keys like 
+                             'accessibility_cache', 'hazard_extraction_cache', etc.
+        cache_dir (Path or str): Directory where cache files will be stored
+        hazard_dir (Path or str, optional): Hazard directory for cache naming
+    
+    Returns:
+        dict: Dictionary with saved cache stats (counts, paths, etc.)
+    """
+    saved_stats = {}
+    
+    if not cache_updated:
+        print("No caches to update.")
+        return saved_stats
+    
+    print("\nSaving updated simulation caches...")
+    
+    # Convert to Path object
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    
+    # Save accessibility cache if updated
+    if 'accessibility_cache' in cache_updated:
+        try:
+            accessibility_cache = cache_updated['accessibility_cache']
+            save_accessibility_cache(accessibility_cache, cache_dir, hazard_dir)
+            saved_stats['accessibility_cache'] = {
+                'count': len(accessibility_cache),
+                'path': str(cache_dir / f"accessibility_cache_{hazard_dir_name}.pkl")
+            }
+            print(f"Saved accessibility cache with {len(accessibility_cache)} entries")
+        except Exception as e:
+            print(f"Warning: Could not save accessibility cache: {e}")
+    
+    # Save hazard extraction cache if updated
+    if 'hazard_extraction_cache' in cache_updated:
+        try:
+            hazard_extraction_cache = cache_updated['hazard_extraction_cache']
+            save_hazard_extraction_cache(hazard_extraction_cache, cache_dir, hazard_dir)
+            saved_stats['hazard_extraction_cache'] = {
+                'count': len(hazard_extraction_cache),
+                'path': str(cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl")
+            }
+            print(f"Saved hazard extraction cache with {len(hazard_extraction_cache)} entries")
+        except Exception as e:
+            print(f"Warning: Could not save hazard extraction cache: {e}")
+    
+    # Save overlap cache if updated
+    if 'overlap_cache' in cache_updated:
+        try:
+            overlap_cache = cache_updated['overlap_cache']
+            save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+            saved_stats['overlap_cache'] = {
+                'count': len(overlap_cache),
+                'path': str(cache_dir / f"overlap_cache_{hazard_dir_name}.pkl")
+            }
+            print(f"Saved overlap cache with {len(overlap_cache)} entries")
+        except Exception as e:
+            print(f"Warning: Could not save overlap cache: {e}")
+    
+    # Save island cache if updated
+    if 'island_cache' in cache_updated:
+        try:
+            island_cache = cache_updated['island_cache']
+            save_island_cache(island_cache, cache_dir, hazard_dir)
+            saved_stats['island_cache'] = {
+                'count': len(island_cache),
+                'path': str(cache_dir / f"island_cache_{hazard_dir_name}.pkl")
+            }
+            print(f"Saved island cache with {len(island_cache)} entries")
+        except Exception as e:
+            print(f"Warning: Could not save island cache: {e}")
+    
+    return saved_stats
