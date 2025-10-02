@@ -32,7 +32,7 @@ class SimulationState:
         self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
-        self.temp_gdf = gdf_assets.copy()
+        self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_dir_name, flood_threshold, repair_crew_assignment_method,
                               _config, accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache,
@@ -66,8 +66,6 @@ def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_
     """
 
     repair_threshold = _config['recovery_parameters'].get('repair_threshold', 2.0)
-    # flood_threshold = _config['simulation_config'].get('flood_threshold', 0.2)
-    # repair_crew_assignment_method = _config['simulation_config'].get('repair_crew_assignment_method', 'islands')
     damage_ratio_coefficients = _config['recovery_parameters'].get('damage_ratio_coefficients', (0.0468, 0.0077))
     repair_time_coefficients = _config['recovery_parameters'].get('repair_time_coefficients', [702.72, 3.14, 1.9891])
     cache_updated = {}
@@ -112,7 +110,7 @@ def _update_hazard_map_states(state, timestep, major_timestep, hazard_maps, haz_
         else:
             print(f"Cache miss for {cache_key}, computing islands on the fly...")
             try:
-                temp_gdf_for_islands = state.temp_gdf#.copy()
+                temp_gdf_for_islands = state.temp_gdf
                 asset_island_ids, dissolved_roads = match_island_ids_assets(
                     temp_gdf_for_islands,
                     hazard_threshold=flood_threshold,
@@ -718,178 +716,6 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                 return available_repair_crews, repair_crews_assigned
     
     return available_repair_crews, repair_crews_assigned
-
-
-def analyze_simulation_performance(gdf_assets, hazard_maps, config, max_maps=3):
-    """
-    Analyze simulation performance using the current workflow and functions.
-    Tracks execution time and memory usage for key steps.
-    """
-    import time
-    import psutil
-    import functools
-
-    performance_data = {
-        'timing': {},
-        'memory': [],
-        'function_calls': {}
-    }
-
-    process = psutil.Process()
-    baseline_memory = process.memory_info().rss / 1024 / 1024  # MB
-    print(f"Starting performance analysis (max {max_maps} maps)")
-    print(f"Baseline memory: {baseline_memory:.1f} MB")
-
-    # Decorator to time function execution
-    def timed_function(func_name, original_func):
-        @functools.wraps(original_func)
-        def wrapper(*args, **kwargs):
-            start = time.time()
-            result = original_func(*args, **kwargs)
-            duration = time.time() - start
-            performance_data['function_calls'].setdefault(func_name, []).append(duration)
-            return result
-        return wrapper
-
-    # Patch key functions for timing
-    from src.island_analysis import (
-        match_island_ids_assets as orig_match_islands,
-        update_repair_crew_islands_with_overlap_cached as orig_island_overlaps,
-        initialize_island_cache as orig_initialize_island_cache,
-        create_spatial_index as orig_create_spatial_index,
-        compute_island_geodataframe_from_graph as orig_compute_island_geodataframe_from_graph,
-    )
-    from src.hazard_analysis_electricity import (
-        find_hazard_value_at_points_optimized as orig_hazard_extract,
-        get_valid_mean as orig_get_valid_mean,
-        _fallback_rasterio_method as orig_fallback_rasterio_method,
-    )
-    from src.simulation import (
-        update_repair_crew_assignment_optimized as orig_crew_assignment,
-        _update_hazard_map_states as orig_update_hazard_map_states,
-        # simulate_asset_damage_recovery_access_optimized as orig_simulate_asset_damage_recovery_access_optimized,
-        # analyze_simulation_performance as orig_analyze_simulation_performance,
-    )
-    # import src.grid_based_accessibility_hex as grid_hex
-
-    patched = {
-        'match_island_ids_assets': timed_function('match_islands', orig_match_islands),
-        'update_repair_crew_islands_with_overlap_cached': timed_function('island_overlaps', orig_island_overlaps),
-        'initialize_island_cache': timed_function('initialize_island_cache', orig_initialize_island_cache),
-        'create_spatial_index': timed_function('create_spatial_index', orig_create_spatial_index),
-        'compute_island_geodataframe_from_graph': timed_function('compute_island_geodataframe_from_graph', orig_compute_island_geodataframe_from_graph),
-        'find_hazard_value_at_points_optimized': timed_function('hazard_extract', orig_hazard_extract),
-        'get_valid_mean': timed_function('get_valid_mean', orig_get_valid_mean),
-        '_fallback_rasterio_method': timed_function('fallback_rasterio_method', orig_fallback_rasterio_method),
-        'update_repair_crew_assignment_optimized': timed_function('crew_assignment', orig_crew_assignment),
-        '_update_hazard_map_states': timed_function('update_hazard_map_states', orig_update_hazard_map_states),
-    }
-
-    # Monkey patch
-    import src.island_analysis
-    import src.hazard_analysis_electricity
-    import src.simulation
-    src.island_analysis.match_island_ids_assets = patched['match_island_ids_assets']
-    src.island_analysis.update_repair_crew_islands_with_overlap_cached = patched['update_repair_crew_islands_with_overlap_cached']
-    src.island_analysis.initialize_island_cache = patched['initialize_island_cache']
-    src.island_analysis.create_spatial_index = patched['create_spatial_index']
-    src.island_analysis.compute_island_geodataframe_from_graph = patched['compute_island_geodataframe_from_graph']
-    src.hazard_analysis_electricity.find_hazard_value_at_points_optimized = patched['find_hazard_value_at_points_optimized']
-    src.hazard_analysis_electricity.get_valid_mean = patched['get_valid_mean']
-    src.hazard_analysis_electricity._fallback_rasterio_method = patched['_fallback_rasterio_method']
-    src.simulation.update_repair_crew_assignment_optimized = patched['update_repair_crew_assignment_optimized']
-    src.simulation._update_hazard_map_states = patched['_update_hazard_map_states']
-
-    try:
-        start_time = time.time()
-        performance_data['memory'].append(process.memory_info().rss / 1024 / 1024)
-
-        # Run simulation with limited maps
-        results, final_state = simulate_asset_damage_recovery_access_optimized(
-            gdf_assets=gdf_assets,
-            hazard_maps=hazard_maps[:max_maps],
-            number_repair_crews=config['simulation_config']['number_repair_crews'],
-            repair_crew_assignment_method=config['simulation_config']['repair_crew_assignment_method'],
-            flood_threshold=config['simulation_config']['flood_threshold'],
-            recovery_parameters=config['recovery_parameters'],
-            root_dir=config['root_dir'],
-            verbose=False,
-            timestep_output=True,
-            execution_id=None,
-            config=config,
-            major_timestep=config['simulation_config'].get('major_timestep', 24),
-            iterations=10
-        )
-
-        total_time = time.time() - start_time
-        performance_data['timing']['total'] = total_time
-        performance_data['memory'].append(process.memory_info().rss / 1024 / 1024)
-
-        print(f"\nPERFORMANCE REPORT")
-        print(f"Total simulation time: {total_time:.2f}s")
-        print(f"Memory usage: {performance_data['memory'][0]:.1f} MB → {performance_data['memory'][-1]:.1f} MB (Δ{performance_data['memory'][-1]-performance_data['memory'][0]:+.1f} MB)")
-        print(f"Timesteps processed: {len(results)}")
-
-        print(f"\nFUNCTION PERFORMANCE:")
-        for func_name, times in performance_data['function_calls'].items():
-            if times:
-                avg_time = sum(times) / len(times)
-                total_func_time = sum(times)
-                print(f"  {func_name}:")
-                print(f"    Calls: {len(times)}")
-                print(f"    Total time: {total_func_time:.3f}s ({total_func_time/total_time*100:.1f}% of simulation)")
-                print(f"    Average per call: {avg_time:.3f}s")
-                print(f"    Min/Max: {min(times):.3f}s / {max(times):.3f}s")
-
-        print(f'\nPercentage of total time spent in key functions:')
-        for func_name, times in performance_data['function_calls'].items():
-            if times:
-                total_func_time = sum(times)
-                percentage = total_func_time / total_time * 100
-                print(f"  {func_name}: {percentage:.1f}%")
-
-        print(f"\nBOTTLENECK ANALYSIS:")
-        bottlenecks = []
-        for func_name, times in performance_data['function_calls'].items():
-            if times:
-                total_func_time = sum(times)
-                percentage = total_func_time / total_time * 100
-                if percentage > 10:
-                    bottlenecks.append((func_name, percentage, total_func_time))
-        bottlenecks.sort(key=lambda x: x[1], reverse=True)
-        if bottlenecks:
-            for func_name, percentage, total_func_time in bottlenecks:
-                print(f"  🔴 {func_name}: {percentage:.1f}% ({total_func_time:.2f}s)")
-        else:
-            print("  ✅ All functions <10% of total time")
-
-        return performance_data, results, total_time
-
-    # finally:
-    #     # Restore original functions
-    #     src.island_analysis.match_island_ids_assets = orig_match_islands
-    #     src.hazard_analysis_electricity.find_hazard_value_at_points_optimized = orig_hazard_extract
-    #     src.simulation.update_repair_crew_assignment_optimized = orig_crew_assignment
-    #     src.island_analysis.update_repair_crew_islands_with_overlap_cached = orig_island_overlaps
-    #     # grid_hex.accessibility_model = orig_grid_accessibility
-
-    finally:
-        # Restore original functions
-        src.island_analysis.match_island_ids_assets = orig_match_islands
-        src.island_analysis.update_repair_crew_islands_with_overlap_cached = orig_island_overlaps
-        src.island_analysis.initialize_island_cache = orig_initialize_island_cache
-        src.island_analysis.create_spatial_index = orig_create_spatial_index
-        src.island_analysis.compute_island_geodataframe_from_graph = orig_compute_island_geodataframe_from_graph
-        src.hazard_analysis_electricity.find_hazard_value_at_points_optimized = orig_hazard_extract
-        src.hazard_analysis_electricity.get_valid_mean = orig_get_valid_mean
-        src.hazard_analysis_electricity._fallback_rasterio_method = orig_fallback_rasterio_method
-        src.simulation.update_repair_crew_assignment_optimized = orig_crew_assignment
-        src.simulation._update_hazard_map_states = orig_update_hazard_map_states
-        # src.simulation.simulate_asset_damage_recovery_access_optimized = orig_simulate_asset_damage_recovery_access_optimized
-        # src.simulation.analyze_simulation_performance = orig_analyze_simulation_performance
-        # grid_hex.accessibility_model = grid_hex.accessibility_model  # Restore if you have orig_grid_accessibility
-
-
 
 def _initialize_simulation(
     gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,

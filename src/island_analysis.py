@@ -517,6 +517,7 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             hazard_column=hazard_column, buffer_distance=20, verbose=verbose
         )
 
+        islands_gdf = islands_gdf[['geometry', 'island_id', 'island_size_km', 'osmid']]
         # Dissolve roads by island_id to get road network per island
         dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False) #it is possible that dissolving is not necessary?
         main_island_id = dissolved_roads['island_id'].value_counts().idxmax()
