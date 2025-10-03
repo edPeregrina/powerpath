@@ -46,71 +46,6 @@ def create_spatial_index(gdf):
     
     return idx
 
-# def _optimized_overlap_calculation(current_islands, previous_islands, buffer_distance=1):
-#     """
-#     Geometric intersection computation with R-tree spatial indexing and bounds checking
-#     """
-#     # Pre-buffer all geometries once
-#     current_buffered = current_islands.copy()
-#     current_buffered['geometry'] = current_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre') 
-    
-#     previous_buffered = previous_islands.copy()  
-#     previous_buffered['geometry'] = previous_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')#TODO: Add union to merge
-    
-#     spatial_idx = create_spatial_index(current_buffered)
-    
-#     overlaps_by_prev_island = {}
-    
-#     for _, prev_island in previous_buffered.iterrows():
-#         prev_geom = prev_island.geometry
-#         prev_area = prev_geom.area  
-#         prev_bounds = prev_geom.bounds  
-        
-#         overlaps = {}
-        
-#         # Use R-tree to get candidates (prevents checking all)
-#         try:
-#             # Get candidate islands from spatial index
-#             candidate_indices = list(spatial_idx.intersection(prev_bounds))
-            
-#             # If no spatial candidates found, skip this island
-#             if not candidate_indices:
-#                 overlaps_by_prev_island[prev_island['island_id']] = overlaps
-#                 continue
-                
-#         except Exception as e:
-#             # Fallback to all islands if R-tree fails
-#             print(f"Warning: R-tree query failed, falling back to full scan: {e}")
-#             candidate_indices = list(current_buffered.index)
-        
-#         # Process only candidate islands
-#         for candidate_idx in candidate_indices:
-#             try:
-#                 current_island = current_buffered.iloc[candidate_idx]
-#                 current_geom = current_island.geometry
-#                 current_bounds = current_geom.bounds
-                
-#                 # Check if within bounds
-#                 if not (prev_bounds[2] >= current_bounds[0] and  # prev_maxx >= curr_minx
-#                         prev_bounds[0] <= current_bounds[2] and  # prev_minx <= curr_maxx
-#                         prev_bounds[3] >= current_bounds[1] and  # prev_maxy >= curr_miny
-#                         prev_bounds[1] <= current_bounds[3]):    # prev_miny <= curr_maxy
-#                     continue
-                    
-#                 # Geometric intersection check
-#                 if prev_geom.intersects(current_geom):  # Boolean check first
-#                     intersection = prev_geom.intersection(current_geom)
-#                     if not intersection.is_empty:
-#                         overlap_pct = (intersection.area / prev_area)
-#                         overlaps[current_island['island_id']] = overlap_pct
-                        
-#             except Exception:
-#                 continue
-        
-#         overlaps_by_prev_island[prev_island['island_id']] = overlaps
-    
-#     return overlaps_by_prev_island
-
 def _optimized_overlap_calculation(current_islands, previous_islands, buffer_distance=1):
     """
     Geometric intersection computation with R-tree spatial indexing and vectorized boolean masks.
@@ -488,12 +423,6 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
     start_time = time.time()
     boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
     boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
-    
-        # Debug prints at the start
-    print(f"DEBUG: match_island_ids_assets called")
-    print(f"DEBUG: island_cache is {'not None' if island_cache is not None else 'None'}")
-    print(f"DEBUG: cache_dir is {'not None' if cache_dir is not None else 'None'}: {cache_dir}")
-    print(f"DEBUG: hazard_dir is {'not None' if hazard_dir is not None else 'None'}: {hazard_dir}")
 
     # Create cache key for this computation
     if island_cache is not None and cache_dir is not None:
@@ -526,8 +455,7 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             print(f"Created {len(dissolved_roads)} dissolved road islands")
 
         # Initialize island_id column with -1 for all assets
-        temp_gdf = temp_gdf.copy()
-        # temp_gdf = temp_gdf[['geometry', 'type', 'island_id']]
+        temp_gdf = temp_gdf[['geometry', 'type']].copy()
         temp_gdf['island_id'] = -1
         projected_crs = 'epsg:28992'
         dissolved_roads = dissolved_roads.to_crs(projected_crs)
@@ -591,9 +519,6 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             # Pickle for future use
             with open(boundary_assets_cache_path, 'wb') as f:
                 pickle.dump(boundary_asset_indices, f)
-
-            # # Set all island_id to 0 for EV0 (no filtering)
-            # temp_gdf['island_id'] = 0
 
             # Identify boundary islands (non-main islands that exist in baseline)
             boundary_islands = dissolved_roads[dissolved_roads['island_id'] != main_island_id]
@@ -677,10 +602,6 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
 
             # Exclude boundary islands from dissolved_roads
             dissolved_roads = dissolved_roads[~dissolved_roads['island_id'].isin(boundary_island_ids_current)]
-            # array_island_ids = dissolved_roads.island_id.values
-            # # Assign island_id for non-boundary assets only
-            # non_boundary_mask = ~temp_gdf.index.isin(boundary_asset_indices)
-            # temp_gdf.loc[non_boundary_mask, 'island_id'] = temp_gdf.loc[non_boundary_mask, 'geometry'].apply(assign_island_id)
             temp_gdf.loc[boundary_asset_indices, 'island_id'] = main_island_id  # Assign boundary assets to main island (or -1 if preferred)
             
             # For any remaining unassigned assets, use spatial index or assign to largest island as fallback
@@ -701,9 +622,7 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
                         nearest_candidate_idx = distances.idxmin()
                         nearest_island_id = candidate_roads.loc[nearest_candidate_idx, 'island_id']
                     else:
-                        # Fallback: assign to largest island (usually island 0)
-                        # largest_island = dissolved_roads.loc[dissolved_roads.geometry.area.idxmax()]
-                        nearest_island_id = main_island_id#largest_island['island_id']
+                        nearest_island_id = main_island_id
                     temp_gdf.loc[idx, 'island_id'] = nearest_island_id
             
             clean_dissolved_roads=dissolved_roads

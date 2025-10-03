@@ -637,12 +637,9 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
 
     # If available_repair_crews is an int, we have a global constraint
     if available_repair_crews == 0:
-        print("No available repair crews, cannot assign any assets for repair.")
         return available_repair_crews, repair_crews_assigned 
     
-    if available_repair_crews > 0:
-        print(f"Available repair crews: {available_repair_crews}, proceeding with assignment...")
-        
+    if available_repair_crews > 0:       
         repairable_assets = accessible & ~flooded_mask & (repair_time > 0) & ~repair_crews_assigned
 
         if not 'islands' in str(method):  # Convert method to string to handle None case
@@ -651,8 +648,6 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                 newly_assigned_crews = repairable_assets.sum()
                 repair_crews_assigned[repairable_assets] = True
                 available_repair_crews -= newly_assigned_crews
-
-                print(f"Assigned {newly_assigned_crews} repair crews to all repairable assets; There remain {available_repair_crews} available repair crews")
                 
                 return available_repair_crews, repair_crews_assigned
             
