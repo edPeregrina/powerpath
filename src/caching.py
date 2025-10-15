@@ -11,12 +11,21 @@ The cache is saved as pickle files for efficient loading and saving.
 import pickle
 import json
 from pathlib import Path
+import hashlib
+import warnings
 
 def _get_hazard_dir_name(hazard_dir):
     """Helper function to consistently get hazard directory name."""
     if hazard_dir:
         return Path(hazard_dir).name
     return "unknown"
+
+def get_asset_centroid_hash(temp_gdf):
+    n_assets = len(temp_gdf)
+    bbox = temp_gdf.total_bounds  # [minx, miny, maxx, maxy]
+    bbox_str = ",".join([f"{v:.6f}" for v in bbox])
+    hashkey = hashlib.md5(bbox_str.encode()).hexdigest()
+    return f"n{n_assets}_{hashkey}"
 
 def create_grid_accessibility_cache_key(hazard_map, flood_threshold, hazard_dir=None):
     """
@@ -239,37 +248,24 @@ def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
         print(f"No hazard extraction cache found at {cache_file}")
         return {}
 
-def create_island_cache_key(hazard_column, hazard_threshold):
+def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None):
     """
-    Create a standardized cache key for island assignment.
+    Create a standardized cache key for island assignment, including asset count and bounds.
     
     Args:
         hazard_column (str): The hazard column name (e.g., 'EV1_ma')
         hazard_threshold (float): The hazard threshold value (e.g., 0.2)
+        asset_hash (str, optional): Hash of the asset geodataframe for uniqueness
         
     Returns:
         str: Standardized cache key
     """
-    return f"island_assignment_{hazard_column}_{hazard_threshold}"
+    if asset_hash is None:
+        asset_hash = "unknown_assets"
 
-def save_island_cache_silent(cache_dict, cache_dir, hazard_dir=None):
-    """
-    Save island assignment cache to disk without printing message.
-    
-    Args:
-        cache_dict (dict): Dictionary containing island assignment results
-        cache_dir (Path or str): Directory to save cache files
-        hazard_dir (str or Path, optional): Hazard directory for organization
-    """
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
-    cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
-    
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
-    # No print message for silent version
+    key = f"island_assignment_{hazard_column}_{hazard_threshold}_{asset_hash}"
+
+    return key
 
 def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
     """
@@ -285,9 +281,7 @@ def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
     
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
-    
-    print(f"DEBUG: Saving to file: {cache_file}")
-    
+        
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_dict, f)

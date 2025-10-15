@@ -1,4 +1,5 @@
 
+from tabnanny import verbose
 from rtree import index
 from pathlib import Path
 import sys
@@ -15,7 +16,7 @@ from pyproj import Transformer
 import time
 
 from src.utils import project_graph_coords, filter_hazard_graph
-from src.caching import load_island_cache, save_island_cache_silent, create_island_cache_key, save_island_cache, create_overlap_cache_key, save_overlap_cache
+from src.caching import load_island_cache, create_island_cache_key, save_island_cache, create_overlap_cache_key, save_overlap_cache, get_asset_centroid_hash
 
 # Import hazard extraction method from config
 import sys
@@ -42,259 +43,9 @@ def create_spatial_index(gdf):
     # Insert each geometry's bounding box into the index
     for i, row in gdf.iterrows():
         bounds = row.geometry.bounds  # (minx, miny, maxx, maxy)
-        idx.insert(i, bounds, obj=row)
+        idx.insert(i, bounds)#, obj=row) #use case for obj=row is only when the rest of the row should be directly queried
     
     return idx
-
-def _optimized_overlap_calculation(current_islands, previous_islands, buffer_distance=1):
-    """
-    Geometric intersection computation with R-tree spatial indexing and vectorized boolean masks.
-    """
-    # Pre-buffer all geometries once
-    current_buffered = current_islands.copy()
-    current_buffered['geometry'] = current_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')
-    current_buffered = current_buffered.reset_index(drop=True) 
-    previous_buffered = previous_islands.copy()  
-    previous_buffered['geometry'] = previous_islands.geometry.buffer(buffer_distance, cap_style='square', join_style='mitre')
-
-    spatial_idx = create_spatial_index(current_buffered)
-    overlaps_by_prev_island = {}
-
-    # Convert geometry column to array for fast access
-    current_geoms = current_buffered.geometry.values
-    current_island_ids = current_buffered['island_id'].values
-
-    for _, prev_island in previous_buffered.iterrows():
-        prev_geom = prev_island.geometry
-        prev_area = prev_geom.area
-        prev_bounds = prev_geom.bounds
-
-        overlaps = {}
-
-        # R-tree bounding box filter
-        candidate_indices = list(spatial_idx.intersection(prev_bounds))
-        if not candidate_indices:
-            overlaps_by_prev_island[prev_island['island_id']] = overlaps
-            continue
-
-        # Vectorized intersects filter
-        candidate_geoms = current_geoms[candidate_indices]
-        candidate_ids = current_island_ids[candidate_indices]
-        intersects_mask = np.array([prev_geom.intersects(g) for g in candidate_geoms])
-
-        # Only process true intersections
-        if np.any(intersects_mask):
-            intersecting_geoms = candidate_geoms[intersects_mask]
-            intersecting_ids = candidate_ids[intersects_mask]
-            intersections = [prev_geom.intersection(g) for g in intersecting_geoms]
-            for island_id, intersection in zip(intersecting_ids, intersections):
-                if not intersection.is_empty:
-                    overlap_pct = intersection.area / prev_area
-                    overlaps[island_id] = overlap_pct
-
-        overlaps_by_prev_island[prev_island['island_id']] = overlaps
-
-    return overlaps_by_prev_island
-
-
-def update_repair_crew_islands_with_overlap_cached(
-    available_repair_crews, island_ids, dissolved_roads, 
-    previous_dissolved_roads=None, buffer_distance=1,
-    current_map=None, previous_map=None, hazard_threshold=None,
-    overlap_cache=None, hazard_dir=None, _config=None, verbose=False
-):
-    """
-    Update repair crew distribution with cached overlap percentages.
-    """
-    present_islands = dissolved_roads.copy()
-    unique_islands = np.unique(island_ids)
-    unique_islands = unique_islands[~pd.isna(unique_islands)]
-
-    if verbose: print(f"Updating repair crew distribution for {len(unique_islands)} islands.")
-
-    if isinstance(available_repair_crews, int):
-        # Initial distribution logic when crews are given as an integer
-        if verbose: print(f"Initial distribution of {available_repair_crews} crews across {len(unique_islands)} islands")
-        
-        if len(unique_islands) == 0:
-            return {}
-        
-        island_sizes = []
-        for island in unique_islands:
-            island_mask = island_ids == island
-            asset_count = np.sum(island_mask)
-            island_sizes.append(asset_count)
-        
-        total_assets = sum(island_sizes)
-        
-        if total_assets > 0:
-            probabilities = np.array(island_sizes) / total_assets
-            assigned_crews = np.random.choice(
-                unique_islands, size=available_repair_crews, 
-                p=probabilities, replace=True
-            )
-            
-            unique_assigned, crew_counts = np.unique(assigned_crews, return_counts=True)
-            available_repair_crews_by_island = {island: 0 for island in unique_islands}
-            for island, count in zip(unique_assigned, crew_counts):
-                available_repair_crews_by_island[island] = count
-        
-        total_distributed = sum(available_repair_crews_by_island.values())
-        if total_distributed != available_repair_crews:
-            print(f"Warning: Crew distribution mismatch. Input: {available_repair_crews}, Distributed: {total_distributed}")
-                
-        if verbose: print(f"Initial crew distribution: {[(island, crews) for island, crews in available_repair_crews_by_island.items() if crews > 0]}")
-        return available_repair_crews_by_island
-    
-    elif isinstance(available_repair_crews, dict) and previous_dissolved_roads is not None:
-        if verbose: print("Performing overlap-based crew redistribution with caching...")
-        
-        input_total_crews = sum(available_repair_crews.values())
-        
-        # Check cache first
-        overlap_cache_key = None
-        cached_overlaps = None
-        
-        if (overlap_cache is not None and current_map is not None and 
-            previous_map is not None and hazard_threshold is not None):
-            
-            overlap_cache_key = create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir)
-            cached_overlaps = overlap_cache.get(overlap_cache_key)
-            
-            if cached_overlaps is not None:
-                if verbose: print(f"Using cached overlaps for {overlap_cache_key}")
-                overlaps_by_prev_island = cached_overlaps
-            else:
-                if verbose: print(f"Computing overlaps for {overlap_cache_key} (cache miss)")
-        
-        # Compute overlaps if not cached
-        if cached_overlaps is None:
-            current_islands = present_islands.copy()
-            previous_islands = previous_dissolved_roads.copy()
-            
-            # Handle CRS
-            if current_islands.crs is None:
-                current_islands = current_islands.set_crs('EPSG:28992')
-            if previous_islands.crs is None:
-                previous_islands = previous_islands.set_crs('EPSG:28992')
-                
-            current_islands = current_islands.to_crs('EPSG:28992')
-            previous_islands = previous_islands.to_crs('EPSG:28992')
-            
-            overlaps_by_prev_island = _optimized_overlap_calculation(
-                current_islands, previous_islands, buffer_distance
-            )
-            print("Overlap computation complete.")
-            # Cache the result (only store percentages)
-            if overlap_cache is not None and overlap_cache_key is not None:
-                overlap_cache[overlap_cache_key] = overlaps_by_prev_island
-                cache_dir = _config['interim_dir']
-                save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
-                print(f"Cached overlaps for {overlap_cache_key}")
-        
-        new_crew_distribution = {island: 0 for island in present_islands['island_id']}
-        total_redistributed_crews = 0
-        
-        for prev_island_id, crew_count in available_repair_crews.items():
-                if crew_count <= 0:
-                    continue
-                    
-                overlaps = overlaps_by_prev_island.get(prev_island_id, {})
-                
-                if not overlaps:
-                    if verbose: print(f"No overlaps found for previous island {prev_island_id}, assigning to nearest current island")
-                    
-                    if not present_islands.empty:
-                        if previous_dissolved_roads is not None:
-                            prev_island_geom = previous_dissolved_roads[previous_dissolved_roads['island_id'] == prev_island_id]
-                            if not prev_island_geom.empty:
-                                # Handle CRS for distance calculation
-                                prev_islands_crs = prev_island_geom.copy()
-                                current_islands_crs = present_islands.copy()
-                                
-                                if prev_islands_crs.crs is None:
-                                    prev_islands_crs = prev_islands_crs.set_crs('EPSG:28992')
-                                if current_islands_crs.crs is None:
-                                    current_islands_crs = current_islands_crs.set_crs('EPSG:28992')
-                                    
-                                prev_islands_crs = prev_islands_crs.to_crs('EPSG:28992')
-                                current_islands_crs = current_islands_crs.to_crs('EPSG:28992')
-                                
-                                prev_centroid = prev_islands_crs.geometry.iloc[0].centroid
-                                distances = current_islands_crs.geometry.centroid.distance(prev_centroid)
-                                nearest_island_idx = distances.idxmin()
-                                nearest_island_id = current_islands_crs.loc[nearest_island_idx, 'island_id']
-                            else:
-                                nearest_island_id = present_islands.iloc[0]['island_id']
-                        else:
-                            nearest_island_id = present_islands.iloc[0]['island_id']
-                    
-                    new_crew_distribution[nearest_island_id] += crew_count
-                    total_redistributed_crews += crew_count
-                    if verbose: print(f"Assigned {crew_count} crews to nearest island {nearest_island_id}")
-                    continue
-                
-                total_overlap_pct = sum(overlaps.values())
-                
-                if total_overlap_pct > 0:
-                    overlap_proportions = []
-                    overlap_island_ids = []
-                    
-                    for island_id, overlap_pct in overlaps.items():
-                        overlap_proportions.append(overlap_pct / total_overlap_pct)
-                        overlap_island_ids.append(island_id)
-                    
-                    if len(overlap_island_ids) > 0:
-                        assigned_crews = np.random.choice(
-                            overlap_island_ids, size=crew_count,
-                            p=overlap_proportions, replace=True
-                        )
-                        
-                        unique_assigned, crew_counts = np.unique(assigned_crews, return_counts=True)
-                        crews_distributed_this_island = 0
-                        
-                        for island_id, count in zip(unique_assigned, crew_counts):
-                            new_crew_distribution[island_id] += count
-                            crews_distributed_this_island += count
-                        
-                        total_redistributed_crews += crews_distributed_this_island
-                        if verbose: 
-                            print(f"Redistributed {crew_count} crews from previous island {prev_island_id} based on cached overlaps to:")
-                            print([(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0])
-
-        if total_redistributed_crews != input_total_crews:
-            if verbose: 
-                print(f"Crew redistribution mismatch. Input: {input_total_crews}, Redistributed: {total_redistributed_crews}")
-
-        if verbose: 
-            print(f"Overlap-based crew redistribution complete: {[(island, crews) for (island, crews) in new_crew_distribution.items() if crews > 0]}")
-
-        return new_crew_distribution
-
-    # Handle other cases
-    elif isinstance(available_repair_crews, dict):
-        if verbose: print("No previous dissolved roads provided, treating as initial distribution")
-        current_crew_distribution = {island: 0 for island in unique_islands}
-        for island_id, crew_count in available_repair_crews.items():
-            if island_id in current_crew_distribution:
-                current_crew_distribution[island_id] = crew_count
-            else:
-                if current_crew_distribution:
-                    first_island = list(current_crew_distribution.keys())[0]
-                    current_crew_distribution[first_island] += crew_count
-                    print(f"Warning! Redistributed {crew_count} crews from missing island {island_id} to island {first_island}")
-        
-        print(f"Updated crew distribution: {current_crew_distribution}")
-        return current_crew_distribution
-    
-    else:
-        print("Unexpected crew distribution format, treating as initial distribution")
-        return update_repair_crew_islands_with_overlap_cached(
-            len(unique_islands) * 2, island_ids, dissolved_roads,
-            current_map=current_map, previous_map=previous_map,
-            hazard_threshold=hazard_threshold, overlap_cache=overlap_cache,
-            hazard_dir=hazard_dir
-        )
 
 def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str, buffer_distance: float = 2.5, verbose: bool = False) -> gpd.GeoDataFrame:
     """
@@ -399,250 +150,199 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
         print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
     return gdf
 
-def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_ma', 
-                           config=None, island_cache=None, cache_dir=None, hazard_dir=None):
+def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
+                       config=None, island_cache=None, cache_dir=None, hazard_dir=None):
     """
-    Get islands and assign IDs to assets with stable boundary island identification using geographic features.
-    Boundary assets are excluded immediately based on spatial location.
-    
-    Args:
-        temp_gdf: GeoDataFrame of assets to assign islands to
-        hazard_threshold: Threshold for hazard values
-        hazard_column: Column name for hazard values
-        config: Configuration dictionary
-        island_cache: Existing island cache dictionary (optional)
-        cache_dir: Directory to save cache files (optional)
-        hazard_dir: Hazard directory for cache naming (optional)
+    Assign each asset in temp_gdf to the closest road section in islands_gdf using spatial index. 
+    This step is executed at initialization only since the access rfid is an attribute of the graph that does not change.
     """
     if config is None:
         _config = get_config()
     else:
         _config = config    
-
-    verbose = _config['simulation_config']['verbose']    
-    start_time = time.time()
+    verbose = _config['simulation_config']['verbose'] 
     boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
     boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
+    asset_access_cache_path = _config['interim_dir'] / 'asset_access_rfid.pkl'
+    road_segment_lengths_cache_path = _config['interim_dir'] / 'road_segment_lengths.pkl'
+    asset_hash = get_asset_centroid_hash(temp_gdf)
 
+    # Check if cached or initialize empty dictionaries
+    def load_or_init(path):
+        return pickle.load(open(path, 'rb')) if path.exists() else {}
+
+    boundary_assets_dict = load_or_init(boundary_assets_cache_path)
+    access_assets_dict = load_or_init(asset_access_cache_path)
+
+    # Load boundary islands and road segment lengths (these are not per asset set)
+    boundary_islands_rfids = pickle.load(open(boundary_islands_cache_path, 'rb')) if boundary_islands_cache_path.exists() else None
+    rfids_lengths = pickle.load(open(road_segment_lengths_cache_path, 'rb')) if road_segment_lengths_cache_path.exists() else None
+
+    # Check if all required cached values exist for this asset set
+    has_boundary = asset_hash in boundary_assets_dict
+    has_access = asset_hash in access_assets_dict
+    has_islands = boundary_islands_rfids is not None
+    has_lengths = rfids_lengths is not None
+
+    if has_boundary and has_access and has_islands and has_lengths:
+        boundary_asset_indices = boundary_assets_dict[asset_hash]
+        access_rfids = access_assets_dict[asset_hash]
+        if verbose:
+            print(f"Loaded {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
+            print(f"Loaded {len(boundary_islands_rfids)} boundary islands from cache.")
+            print(f"Loaded asset access rfids for {len(temp_gdf)} assets.")
+        return access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths
+
+    # If not cached, compute from scratch
+    try:
+        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        # Subgraphs are computed on the fly from the filtered hazard graph. each subgraph is an "island".
+        islands_gdf = compute_island_geodataframe_from_graph(
+            hazard_graph_path, hazard_threshold=hazard_threshold, 
+            hazard_column=hazard_column, buffer_distance=20, verbose=verbose
+        )  
+        rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
+
+        temp_gdf['access_rfid'] = -1
+
+        projected_crs = 'epsg:28992'
+        islands_gdf = islands_gdf.to_crs(projected_crs)
+        temp_gdf = temp_gdf.to_crs(projected_crs) 
+
+        # Build spatial index for road sections
+        spatial_idx = create_spatial_index(islands_gdf)
+
+        # Find main island id (largest by road length)
+        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
+
+        # For each asset, find nearest road section within a reasonable search radius
+        search_radius = 100  # meters
+
+        # Precompute centroids and buffers
+        temp_gdf['centroid'] = temp_gdf.geometry.centroid
+        temp_gdf['buffer'] = temp_gdf['centroid'].apply(lambda c: c.buffer(search_radius))
+
+        # For each asset, get candidate road indices and assign closest
+        def find_nearest_road(asset_row, spatial_idx, islands_gdf):
+            asset_centroid = asset_row['centroid']
+            asset_buffer = asset_row['buffer']
+            candidate_idxs = list(spatial_idx.intersection(asset_buffer.bounds))
+            if candidate_idxs:
+                candidates = islands_gdf.iloc[candidate_idxs]
+                if not candidates.empty:
+                    distances = candidates.geometry.distance(asset_centroid)
+                    if not distances.empty:
+                        nearest_idx = distances.idxmin()
+                        return candidates.loc[nearest_idx, 'rfid']
+            return -1
+        
+        temp_gdf['access_rfid'] = temp_gdf.apply(
+            lambda row: find_nearest_road(row, spatial_idx, islands_gdf), axis=1
+        )
+
+        def safe_island_lookup(rfid, islands_gdf):
+            if rfid == -1:
+                return -1
+            matches = islands_gdf[islands_gdf['rfid'] == rfid]['island_id'].values
+            return matches[0] if len(matches) > 0 else -1
+
+        temp_gdf['island_id'] = [safe_island_lookup(rfid, islands_gdf) for rfid in temp_gdf['access_rfid']]
+
+        # Now, boundary assets are those with island_id != main_island_id or still -1
+        boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
+        boundary_asset_indices = temp_gdf[boundary_asset_mask].index.tolist()
+        print(f"Identified {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
+
+        # Identify boundary islands (non-main islands that exist in baseline)
+        boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
+        
+        # Pickle for future use
+        boundary_assets_dict[asset_hash] = boundary_asset_indices
+        with open(boundary_assets_cache_path, 'wb') as f:
+            pickle.dump(boundary_assets_dict, f)
+
+        with open(boundary_islands_cache_path, 'wb') as f:
+            pickle.dump(boundary_islands_rfids, f)
+
+        access_assets_dict[asset_hash] = temp_gdf['access_rfid']
+        with open(asset_access_cache_path, 'wb') as f:
+            pickle.dump(access_assets_dict, f)
+
+        with open(road_segment_lengths_cache_path, 'wb') as f:
+            pickle.dump(rfids_lengths, f)
+
+        if verbose:
+            print(f"Cached {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
+            print(f"Cached {len(boundary_islands_rfids)} boundary island geographic features from {hazard_column}")
+            print(f"Cached asset access rfids for {len(temp_gdf)} assets.")
+
+        return temp_gdf['access_rfid'], boundary_asset_indices, boundary_islands_rfids, rfids_lengths
+
+    except Exception as e:
+        print(f"Error in computing islands from graph: {e}")
+        return None, None, None, None
+
+def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
+                            island_cache=None, cache_dir=None, hazard_dir=None):
+   
+    if config is None:
+        _config = get_config()
+    else:
+        _config = config    
+    verbose = _config['simulation_config']['verbose']
+    asset_hash = get_asset_centroid_hash(temp_gdf)
     # Create cache key for this computation
-    if island_cache is not None and cache_dir is not None:
-        cache_key = create_island_cache_key(hazard_column, hazard_threshold)
+    if island_cache is not None and cache_dir is not None: 
+        cache_key = create_island_cache_key(hazard_column, hazard_threshold, asset_hash)
         
         # Check if this computation is already cached
         if cache_key in island_cache:
             if verbose:
                 print(f"Using cached island assignment for {cache_key}")
-            return island_cache[cache_key]['assets'], island_cache[cache_key]['roads']
-    
-    # Load cached boundary assets if available
+            return island_cache[cache_key]['island_ids'], island_cache[cache_key]['rfids_islands']
+
+    if boundary_asset_indices is None or boundary_islands_rfids is None: 
+        boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
+        boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
+        # Load or initialize cache dicts
+        with open(boundary_assets_cache_path, 'rb') as f:
+            boundary_assets_dict = pickle.load(f)
+        if asset_hash in boundary_assets_dict:
+            boundary_asset_indices = boundary_assets_dict[asset_hash]
+        else:
+            print(f"Boundary asset indices not provided and not found in cache for asset hash {asset_hash}.")
+            return None, None
+
+        with open(boundary_islands_cache_path, 'rb') as f:
+            boundary_islands_rfids = pickle.load(f)
+
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
-        if verbose: 
-            print(f"Loading graph from: {hazard_graph_path}")
-            print(f"Using hazard_threshold={hazard_threshold}, hazard_column={hazard_column}")
-
+        print(f"Loading hazard graph from {hazard_graph_path}")
         islands_gdf = compute_island_geodataframe_from_graph(
             hazard_graph_path, hazard_threshold=hazard_threshold, 
             hazard_column=hazard_column, buffer_distance=20, verbose=verbose
-        )
+        )  
 
-        islands_gdf = islands_gdf[['geometry', 'island_id', 'island_size_km', 'osmid']]
-        # Dissolve roads by island_id to get road network per island
-        dissolved_roads = islands_gdf.dissolve(by='island_id', as_index=False) #it is possible that dissolving is not necessary?
-        main_island_id = dissolved_roads['island_id'].value_counts().idxmax()
-        
-        if verbose: 
-            print(f"Created {len(dissolved_roads)} dissolved road islands")
+        # Drop the boundary rfids and find the main island
+        islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
+        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
 
-        # Initialize island_id column with -1 for all assets
-        temp_gdf = temp_gdf[['geometry', 'type']].copy()
-        temp_gdf['island_id'] = -1
-        projected_crs = 'epsg:28992'
-        dissolved_roads = dissolved_roads.to_crs(projected_crs)
-        temp_gdf = temp_gdf.to_crs(projected_crs) #TODO: Drop unused columns
+        # Map assets to island ids
+        rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+        asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in temp_gdf['access_rfid']]
+        asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
+                            for i in range(len(asset_island_ids))]
+        asset_island_ids = np.array(asset_island_ids, dtype=int)
 
-        array_island_ids = dissolved_roads.island_id.values
-
-        # Good for initial steps with clear documentation of results
-        spatial_join = gpd.sjoin(temp_gdf, dissolved_roads, 
-                                how='left', predicate='intersects')
-
-        # Assign island_ids from spatial join
-        if 'index_right' in spatial_join.columns:
-            successful_joins = spatial_join['index_right'].notna()
-            index_to_island = dict(zip(dissolved_roads.index, dissolved_roads['island_id']))
-            grouped = spatial_join[successful_joins].groupby(level=0)['index_right'].last()
-            
-            print("Assigning island_ids to assets...")
-            for idx, dissolved_idx in tqdm(grouped.items(), total=len(grouped), desc="Island assignment"):
-                island_id = index_to_island[dissolved_idx]
-                temp_gdf.loc[idx, 'island_id'] = island_id
-
-        # dissolved_roads = dissolved_roads.reset_index(drop=True)
-
-        # temp_gdf['island_id'] = temp_gdf.geometry.progress_apply(lambda geom: array_island_ids[geom.intersects(dissolved_roads.geometry)])
-        
-        # def assign_island_id(asset_geom) -> int:  
-        #     mask = asset_geom.intersects(dissolved_roads.geometry)
-        #     ids = array_island_ids[mask]
-        #     if len(ids) == 0:
-        #         return -1
-        #     return ids[0]        
-        # Assign island_id for all assets (works for both EV0 and else)
-        # temp_gdf['island_id'] = temp_gdf.geometry.progress_apply(assign_island_id)
-
-        # Handle boundary island identification using geographic features
-        is_initial_status = 'EV0' in hazard_column
-        if is_initial_status: 
-            if verbose: 
-                print("EV0 initial status - caching and scrapping boundary assets and islands")   
-
-            # Identify unassigned assets (island_id == -1)
-            unassigned_mask = temp_gdf['island_id'] == -1
-            unassigned_indices = temp_gdf[unassigned_mask].index.tolist()
-
-            # Try to assign unassigned assets to an island by distance
-            distance_threshold = 5.0  # meters
-            for idx in unassigned_indices:
-                asset_geom = temp_gdf.loc[idx, 'geometry']
-                # Exclude main island
-                distances = dissolved_roads.geometry.distance(asset_geom)
-                if not distances.empty and distances.min() < distance_threshold:
-                    nearest_idx = distances.idxmin()
-                    nearest_island_id = dissolved_roads.loc[nearest_idx, 'island_id']
-                    temp_gdf.loc[idx, 'island_id'] = nearest_island_id
-
-            # Now, boundary assets are those with island_id != main_island_id or still -1
-            boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
-            boundary_asset_indices = temp_gdf[boundary_asset_mask].index.tolist()
-
-            # Pickle for future use
-            with open(boundary_assets_cache_path, 'wb') as f:
-                pickle.dump(boundary_asset_indices, f)
-
-            # Identify boundary islands (non-main islands that exist in baseline)
-            boundary_islands = dissolved_roads[dissolved_roads['island_id'] != main_island_id]
-            
-            # Create stable geographic identifiers for boundary islands
-            boundary_island_features = []
-            for _, island_row in boundary_islands.iterrows():
-                geom = island_row.geometry
-                centroid = geom.centroid
-                bounds = geom.bounds
-                
-                # Create a stable geographic signature
-                geo_signature = {
-                    'centroid_x': round(centroid.x, 1),  # Round to avoid floating point issues
-                    'centroid_y': round(centroid.y, 1),
-                    'bounds_minx': round(bounds[0], 1),
-                    'bounds_miny': round(bounds[1], 1), 
-                    'bounds_maxx': round(bounds[2], 1),
-                    'bounds_maxy': round(bounds[3], 1),
-                    'area': round(geom.area, 1),
-                    'osmid': island_row['osmid']
-                }
-                boundary_island_features.append(geo_signature)
-
-            if verbose:
-                print(f"Found {len(boundary_island_features)} boundary islands by geography (all assets assigned to main island)")
-
-            # Cache boundary geographic features (stable across timesteps)
-            with open(boundary_islands_cache_path, 'wb') as f:
-                pickle.dump(boundary_island_features, f)
-
-            if verbose:
-                print(f"Cached {len(boundary_island_features)} boundary island geographic features from {hazard_column}")
-            
-            # IMMEDIATE EXCLUSION: Return only main island assets and roads
-            clean_gdf_assets = temp_gdf  # All assets are already on island 0
-            clean_dissolved_roads = dissolved_roads[dissolved_roads['island_id'] == main_island_id]
-            
-            if verbose:
-                print(f"EV0 baseline: {len(clean_gdf_assets)} assets on main island, {len(boundary_islands)} boundary islands excluded")
-                print(f"EV0 processing completed in {time.time() - start_time:.2f} seconds")
-
-        else:
-            # For non-EV0 timesteps
-            spatial_start = time.time()
-            if verbose:
-                print(f"Performing spatial assignment of {len(temp_gdf)} assets to {len(dissolved_roads)} islands...")
-
-            # Load boundary asset indices
-            with open(boundary_assets_cache_path, 'rb') as f:
-                boundary_asset_indices = pickle.load(f)
-
-            # Load boundary island features (geo-signatures) from EV0
-            with open(boundary_islands_cache_path, 'rb') as f:
-                boundary_island_features = pickle.load(f)
-
-            # Identify boundary assets using spatial signature match
-            boundary_island_ids_current = []
-            tolerance = 5.0  # meters
-            current_non_main_islands = dissolved_roads[dissolved_roads['island_id'] != main_island_id]
-
-            for cached_feature in boundary_island_features:
-                for _, current_island in current_non_main_islands.iterrows():
-                    current_geom = current_island.geometry
-                    current_centroid = current_geom.centroid
-                    current_bounds = current_geom.bounds
-
-                    centroid_match = (abs(current_centroid.x - cached_feature['centroid_x']) < tolerance and
-                                    abs(current_centroid.y - cached_feature['centroid_y']) < tolerance)
-                    bounds_match = (abs(current_bounds[0] - cached_feature['bounds_minx']) < tolerance and
-                                    abs(current_bounds[1] - cached_feature['bounds_miny']) < tolerance and
-                                    abs(current_bounds[2] - cached_feature['bounds_maxx']) < tolerance and
-                                    abs(current_bounds[3] - cached_feature['bounds_maxy']) < tolerance)
-                    area_match = abs(current_geom.area - cached_feature['area']) < (tolerance * tolerance)
-
-                    if centroid_match or (bounds_match and area_match):
-                        boundary_island_ids_current.append(current_island['island_id'])
-                        if verbose: 
-                            print(f"Matched boundary island ID {current_island['island_id']} using cached geographic signature")
-                        break
-
-            # Exclude boundary islands from dissolved_roads
-            dissolved_roads = dissolved_roads[~dissolved_roads['island_id'].isin(boundary_island_ids_current)]
-            temp_gdf.loc[boundary_asset_indices, 'island_id'] = main_island_id  # Assign boundary assets to main island (or -1 if preferred)
-            
-            # For any remaining unassigned assets, use spatial index or assign to largest island as fallback
-            unassigned_mask = temp_gdf['island_id'] == -1
-            unassigned_count = unassigned_mask.sum()
-
-            if unassigned_count > 0:
-                print(f"  Using spatial index for {unassigned_count} unassigned assets...")
-                spatial_idx = create_spatial_index(dissolved_roads)
-                unassigned_assets = temp_gdf[unassigned_mask]
-                for idx, asset_row in unassigned_assets.iterrows():
-                    asset_geom = asset_row.geometry
-                    asset_point = asset_geom if asset_geom.geom_type == 'Point' else asset_geom.centroid
-                    nearby_islands = list(spatial_idx.intersection(asset_point.bounds))
-                    if nearby_islands:
-                        candidate_roads = dissolved_roads.loc[nearby_islands]
-                        distances = candidate_roads.geometry.distance(asset_point)
-                        nearest_candidate_idx = distances.idxmin()
-                        nearest_island_id = candidate_roads.loc[nearest_candidate_idx, 'island_id']
-                    else:
-                        nearest_island_id = main_island_id
-                    temp_gdf.loc[idx, 'island_id'] = nearest_island_id
-            
-            clean_dissolved_roads=dissolved_roads
-            clean_gdf_assets=temp_gdf
-
-            if verbose:
-                print(f"Assigned {len(temp_gdf)} assets to {len(dissolved_roads)} islands")
-                print(f"Island distribution: {temp_gdf['island_id'].value_counts().sort_index().to_dict()}")
-                print(f"Spatial assignment completed in {time.time() - spatial_start:.2f} seconds")
-        
-        if verbose: 
-            print(f"Final results: {len(clean_gdf_assets)} clean assets, {len(clean_dissolved_roads)} clean road islands")
-        print(f">>>>Total processing time: {time.time() - start_time:.2f} seconds")
+        rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
 
         # Cache the results
         if island_cache is not None and cache_dir is not None:
             # Store the computed results in the cache
             island_cache[cache_key] = {
-                'island_ids': clean_gdf_assets['island_id'].values,  
-                'dissolved_roads': clean_dissolved_roads
+                'island_ids': asset_island_ids,
+                'rfids_islands': rfids_islands
             }
             
             # Save the updated cache using the standardized function
@@ -651,16 +351,206 @@ def match_island_ids_assets(temp_gdf, hazard_threshold=0.2, hazard_column='EV1_m
             if verbose:
                 print(f"Saved island assignment to cache with key {cache_key}")
 
-        return clean_gdf_assets['island_id'].values, clean_dissolved_roads
-        
     except Exception as e:
-        print(f"Error in match_island_ids_assets: {e}")
+        print(f"Error in computing islands from graph: {e}")
+        return None
+
+    return asset_island_ids, rfids_islands
+
+def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, current_rfids_islands, rfids_lengths, 
+                              verbose=False, overlap_cache=None, current_map=None, previous_map=None, 
+                              hazard_threshold=None, hazard_dir=None, _config=None, cache_updated=None):
+    """
+    Distribute repair crews by island, based on road feature lengths.
+
+    Arguments:
+    - available_repair_crews: int (initial round) or dict (subsequent rounds) of available repair crews
+    - previous_rfids_islands: dict mapping road feature ids (rfids) to island ids from previous timestep (None if initial round)
+    - current_rfids_islands: dict mapping rfids to island ids from current timestep 
+    - rfids_lengths: dict mapping rfids to their lengths
+    - verbose: bool, whether to print detailed logs
+    - overlap_cache: dict for caching overlap computations  
+    - current_map: identifier for current hazard map (e.g., filename or timestamp)
+    - previous_map: identifier for previous hazard map (None if initial round)
+    - hazard_threshold: float, threshold used for hazard impact
+    - hazard_dir: directory path for hazard data (used in caching)
+    - _config: configuration dictionary (used in caching)
+    - cache_updated: dict to track if cache was updated (used in caching)
+    """
+    try: # Exceptions are handled by returning input crews as fallback, but a stack trace is printed for debugging
+        # First round: crews as int
+        if isinstance(available_repair_crews, int):
+            # Check cache first for initial distribution
+            initial_probabilities = None
+            overlap_cache_key = None
+            
+            if (overlap_cache is not None and current_map is not None and 
+                hazard_threshold is not None):
+                
+                # Special cache key for initial distribution
+                overlap_cache_key = create_overlap_cache_key("initial", current_map, hazard_threshold, hazard_dir)
+                
+                if overlap_cache_key in overlap_cache:
+                    if verbose:
+                        print(f"Using cached initial distribution for {overlap_cache_key}")
+                    initial_probabilities = overlap_cache[overlap_cache_key]
+            
+            # If cache hit, use cached probabilities directly
+            if initial_probabilities is not None:
+                unique_islands = list(initial_probabilities.keys())
+                probabilities = np.array([initial_probabilities[i] for i in unique_islands])
+            else:
+                # Cache miss - compute island lengths
+                print("Computing island lengths for initial distribution...")
+                curr_island_lengths = {}
+                for rfid, island_id in current_rfids_islands.items():
+                    curr_island_lengths.setdefault(island_id, 0)
+                    curr_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
+                
+                unique_islands = list(curr_island_lengths.keys())
+                lengths = np.array([curr_island_lengths[i] for i in unique_islands])
+                probabilities = lengths / lengths.sum() if lengths.sum() > 0 else np.ones_like(lengths)/len(lengths)
+                
+                # Cache computed probabilities
+                if overlap_cache is not None and overlap_cache_key is not None:
+                    initial_probabilities = dict(zip(unique_islands, probabilities))
+                    overlap_cache[overlap_cache_key] = initial_probabilities
+                    
+                    # Save to disk
+                    if _config is not None:
+                        cache_dir = _config['interim_dir']
+                        save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                        if verbose:
+                            print(f"Cached initial distribution for {overlap_cache_key}")
+                    
+                    # Update cache_updated
+                    if cache_updated is not None:
+                        cache_updated['overlap_cache'] = overlap_cache
+            
+            assigned = np.random.choice(unique_islands, size=available_repair_crews, p=probabilities, replace=True)
+            crew_counts = dict(zip(*np.unique(assigned, return_counts=True)))
+            available_repair_crews_by_island = {i: crew_counts.get(i, 0) for i in unique_islands}
+            
+            if verbose:
+                print(f"Initial crew distribution: {available_repair_crews_by_island}")
+            return available_repair_crews_by_island
+
+        # Subsequent rounds: crews as dict
+        elif isinstance(available_repair_crews, dict):
+            # Check cache first for transition probabilities
+            transition_probabilities = None
+            
+            if (overlap_cache is not None and current_map is not None and 
+                previous_map is not None and hazard_threshold is not None):
+                
+                overlap_cache_key = create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir)
+                
+                if overlap_cache_key in overlap_cache:
+                    if verbose:
+                        print(f"Using cached transition probabilities for {overlap_cache_key}")
+                    transition_probabilities = overlap_cache[overlap_cache_key]
+            
+            # If cache miss, compute transition probabilities
+            if transition_probabilities is None:
+                if verbose:
+                    print("Computing transition probabilities (cache miss)")
+                
+                # Now we need to compute island lengths
+                print("Computing island lengths...")
+                curr_island_lengths = {}
+                prev_island_lengths = {}
+                
+                for rfid, island_id in current_rfids_islands.items():
+                    curr_island_lengths.setdefault(island_id, 0)
+                    curr_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
+                
+                if previous_rfids_islands is not None:
+                    for rfid, island_id in previous_rfids_islands.items():
+                        prev_island_lengths.setdefault(island_id, 0)
+                        prev_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
+                
+                # Build transition probability dictionary
+                transition_probabilities = {}
+                
+                for prev_island in set(previous_rfids_islands.values()):
+                    # Find rfids in previous island
+                    rfids_in_prev = [rfid for rfid, island in previous_rfids_islands.items() if island == prev_island]
+                    
+                    # Map these rfids to current islands and sum lengths
+                    curr_lengths = {}
+                    for rfid in rfids_in_prev:
+                        curr_island = current_rfids_islands.get(rfid, None)
+                        if curr_island is not None:
+                            curr_lengths.setdefault(curr_island, 0)
+                            curr_lengths[curr_island] += rfids_lengths.get(rfid, 0)
+                    
+                    # Calculate probabilities for this previous island
+                    total_length = sum(curr_lengths.values())
+                    if total_length > 0:
+                        transition_probabilities[prev_island] = {
+                            curr_island: length / total_length 
+                            for curr_island, length in curr_lengths.items()
+                        }
+                
+                # Cache the computed transition probabilities
+                if (overlap_cache is not None and overlap_cache_key is not None):
+                    overlap_cache[overlap_cache_key] = transition_probabilities
+                    
+                    # Save to disk
+                    if _config is not None:
+                        cache_dir = _config['interim_dir']
+                        save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                        if verbose:
+                            print(f"Cached transition probabilities for {overlap_cache_key}")
+                    
+                    # Update cache_updated
+                    if cache_updated is not None:
+                        cache_updated['overlap_cache'] = overlap_cache
+            
+            # Use transition probabilities to redistribute crews
+            available_repair_crews_by_island = {}
+            
+            for prev_island, crew_count in available_repair_crews.items():
+                if prev_island in transition_probabilities and transition_probabilities[prev_island]:
+                    # Get transition probabilities for this island
+                    island_transitions = transition_probabilities[prev_island]
+                    
+                    # Extract islands and probabilities
+                    curr_islands = list(island_transitions.keys())
+                    probabilities = [island_transitions[i] for i in curr_islands]
+                    
+                    if verbose:
+                        print(f"Probability distribution from/to island {prev_island}: {dict(zip(curr_islands, probabilities))}")
+                    
+                    # Assign crews based on probabilities
+                    assigned = np.random.choice(curr_islands, size=crew_count, p=probabilities, replace=True)
+                    crew_counts = dict(zip(*np.unique(assigned, return_counts=True)))
+                    
+                    for i in curr_islands:
+                        available_repair_crews_by_island[i] = available_repair_crews_by_island.get(i, 0) + crew_counts.get(i, 0)
+                else:
+                    # Fallback: assign all crews to previous island
+                    available_repair_crews_by_island[prev_island] = available_repair_crews_by_island.get(prev_island, 0) + crew_count
+            
+            if verbose:
+                print(f"Redistributed crew distribution: {available_repair_crews_by_island}")
+            
+            return available_repair_crews_by_island
+        
+        else:
+            raise ValueError("available_repair_crews must be int or dict")
+            
+    except Exception as e:
+        print(f"Error in crew redistribution: {e}")
         import traceback
         traceback.print_exc()
-        # Fallback
-        temp_gdf_copy = temp_gdf.copy()
-        temp_gdf_copy['island_id'] = 0
-        return temp_gdf_copy, None
-
-
+        # Fallback: return input crews
+        if isinstance(available_repair_crews, dict):
+            return available_repair_crews
+        elif isinstance(available_repair_crews, int):
+            # Just put all crews on first island as fallback
+            first_island = list(current_rfids_islands.values())[0] if current_rfids_islands else 0
+            return {first_island: available_repair_crews}
+        else:
+            return {}
     
