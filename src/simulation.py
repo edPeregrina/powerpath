@@ -175,7 +175,7 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
         fragility_operational = np.ones_like(state.operational, dtype=bool)
         hazard_subset = state.current_hazard_values[assets_to_evaluate]
         asset_type_subset = asset_type[assets_to_evaluate]
-        fragility_result = default_fragility_function(hazard_subset, asset_type_subset, k=fragility_param_k)
+        fragility_result = default_fragility_function(hazard_subset, asset_type_subset, k=fragility_param_k, major_timestep=major_timestep)
         fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
         state.operational = np.minimum(state.operational, fragility_operational)
 

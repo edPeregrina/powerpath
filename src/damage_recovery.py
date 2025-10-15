@@ -52,16 +52,23 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
-def default_fragility_function(hazard_values, asset_type, k=None):
+def default_fragility_function(hazard_values, asset_type, k=None, major_timestep=24):
     """
     Calculate binary operational status from hazard values using fragility curve.
+    Failure probability is determined (by default daily, major_timestep=24 hours) and sampled for each asset.
     Returns 1 for operational, 0 for failed, based on probabilistic sampling.
     
     Following NKWK, a median failure depth (d_m) by voltage is considered - 0.3m for ls, 0.6m for msls
-    The equation used follows: P_f(d) = 1/(1 + exp(-k*(d - d_m)))
+    The equation used follows: 
+        P_f(d) = 1/(1 + exp(-k*(d - d_m)))
     
-    k is determined each run as a value between 5 and 7.5 for a hardened and softened curve (Boreel)
+    if k is not given, it is determined each run as a value between 5.0 and 7.5 for a hardened and softened curve (Boreel)
+
+    To adjust for non-daily timesteps, the failure probability is calculated as:
+
+        P_f_timestep = 1 - ((exp(-k*(d - d_m))) / (1 + exp(-k*(d - d_m))))^(major_timestep/24)
     """
+
     failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
 
     if k is None:
@@ -72,10 +79,16 @@ def default_fragility_function(hazard_values, asset_type, k=None):
     msls_mask = asset_type == 'msls'
 
     d_m = np.where(ls_mask, 0.3, np.where(msls_mask, 0.6, 0))  # Default median depth for other types
-    
+
+    timesteps_per_day = 24 / major_timestep if major_timestep is not None else 1
     # Calculate failure probability only for positive hazard values
-    failure_probability[hazard_mask] = 1 / (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
+    if timesteps_per_day == 1:
+        failure_probability[hazard_mask] = 1 / (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
     
+    else:
+        failure_probability[hazard_mask] = 1 - ( (np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask]))) / 
+                                                  (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask]))) 
+                                                  )**(1/timesteps_per_day)
     # Generate random values for each asset
     random_values = np.random.random(size=hazard_values.shape)
     
