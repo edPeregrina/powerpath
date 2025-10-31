@@ -187,10 +187,6 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
     if has_boundary and has_access and has_islands and has_lengths:
         boundary_asset_indices = boundary_assets_dict[asset_hash]
         access_rfids = access_assets_dict[asset_hash]
-        if verbose:
-            print(f"Loaded {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
-            print(f"Loaded {len(boundary_islands_rfids)} boundary islands from cache.")
-            print(f"Loaded asset access rfids for {len(temp_gdf)} assets.")
         return access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths
 
     # If not cached, compute from scratch
