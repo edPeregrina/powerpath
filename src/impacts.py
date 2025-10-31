@@ -433,6 +433,60 @@ def calculate_monetized_impacts_ema(detailed_results, asset_land_use_map, voll_r
     
     return timestep_results
 
+def calculate_cumulative_monetized_impacts_ema(detailed_results, asset_to_lu):
+    """
+    Calculate cumulative monetized impacts for EMA simulations using fast vectorized operations.
+    
+    Args:
+        detailed_results: List of timestep dictionaries with arrays for metrics
+        asset_to_lu: Pre-computed lookup dict {asset_id: [(lu_type, area, voll_rate), ...]}
+
+    Returns:
+        pd.DataFrame: DataFrame with timestep data and cumulative monetary impact metrics
+    """
+    
+    # Get monetary categories from the pre-computed lookup
+    monetary_categories = set()
+    for asset_data in asset_to_lu.values():
+        for lu_type, _, _ in asset_data:
+            monetary_categories.add(lu_type)
+
+    # Preallocate results dictionary
+    n_timesteps = len(detailed_results)
+    impact_by_ts = {ts_idx: {f'monetary_impact_{cat}': 0.0 for cat in monetary_categories}
+                    for ts_idx in range(n_timesteps)}
+    
+    # Initialize monetary_impact_total for all timesteps
+    for ts_idx in impact_by_ts.keys():
+        impact_by_ts[ts_idx]['monetary_impact_total'] = 0.0
+    
+    # Single pass through timesteps and assets
+    for ts_idx, ts in enumerate(detailed_results):
+        asset_ids = ts.get('asset_id', np.arange(len(ts['operational'])))
+        operational = np.array(ts['operational'], dtype=bool)
+        
+        for i, aid in enumerate(asset_ids):
+            if operational[i] or aid not in asset_to_lu:
+                continue
+            
+            # Calculate impact for this asset's land use types
+            for lu_type, area, voll_rate in asset_to_lu[aid]:
+                impact = area * voll_rate
+                impact_by_ts[ts_idx][f'monetary_impact_{lu_type}'] += impact
+                impact_by_ts[ts_idx]['monetary_impact_total'] += impact
+
+    # Convert to DataFrame
+    df = pd.DataFrame([
+        {'timestep': ts_idx, **impact_by_ts[ts_idx]} 
+        for ts_idx in range(n_timesteps)
+    ])
+
+    # Apply cumsum on monetary columns
+    monetary_cols = [col for col in df.columns if col.startswith('monetary_impact_')]
+    df[monetary_cols] = df[monetary_cols].cumsum()
+
+    return df
+
 def prepare_land_use_impact_data(land_use_data, voronoi_gdf=None):
     """
     Prepare land use data for impact calculation by associating land use types 
