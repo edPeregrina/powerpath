@@ -248,7 +248,7 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
     return available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated
 
 def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 
-                                           accessible, flooded_mask, repair_time, island_ids=None, method=None, verbose=False):    
+                                           accessible, flooded_mask, repair_time, island_ids=None, method=None, verbose=False, asset_impact_map=None):    
     """
     Assign repair crews to assets based on accessibility, flooding status, repair time, and assignment method.
 
@@ -266,6 +266,7 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
             - 'highest repair time': Assign to assets with highest repair time
             - 'island': Assign by island (requires available_repair_crews as dict)
         verbose (bool, optional): If True, print assignment details.
+        asset_impact_map (dict, optional): Mapping of asset indices to their impact values.
 
     Returns:
         tuple: (updated available_repair_crews, updated repair_crews_assigned)
@@ -314,7 +315,10 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                     elif 'highest repair time' in method:
                         sorted_indices = np.argsort(-repair_time[repairable_assets])
                         repair_crews_assigned[repairable_assets_indices[sorted_indices[:crew_count]]] = True
-                    
+                    elif 'impact' in method:
+                        sorted_indices = np.argsort(-np.array([asset_impact_map.get(idx, 0) for idx in repairable_assets_indices]))
+                        repair_crews_assigned[repairable_assets_indices[sorted_indices[:crew_count]]] = True
+
                     newly_assigned_crews = crew_count
                     # Bounds checking: ensure we don't assign more crews than available
                     newly_assigned_crews = min(newly_assigned_crews, available_repair_crews[island_id])
@@ -531,12 +535,12 @@ def _process_timestep(
 
 def _assign_repair_crews(
     timestep, available_repair_crews, repair_crews_assigned, accessible, flooded_mask,
-    repair_time, island_ids, method, verbose
+    repair_time, island_ids, method, verbose, asset_impact_map=None
 ):
     """Assign repair crews using the assignment method."""
     return update_repair_crew_assignment_optimized(
         timestep, available_repair_crews, repair_crews_assigned, accessible, flooded_mask,
-        repair_time, island_ids, method=method, verbose=verbose
+        repair_time, island_ids, method=method, verbose=verbose, asset_impact_map=asset_impact_map
     )
 
 def _update_repair_progress(state, flooded_mask):
@@ -683,7 +687,9 @@ def simulate_asset_damage_recovery_access_breakdown(
     hazard_extraction_cache=None,
     overlap_cache=None,
     island_cache=None,
-    fragility_param_k=None
+    fragility_param_k=None,
+    asset_population_map=None,
+    asset_to_lu=None
 ):
     """
     Runs a time-stepped simulation of asset damage and recovery, considering hazard exposure, accessibility, and repair crew assignment.
@@ -758,6 +764,15 @@ def simulate_asset_damage_recovery_access_breakdown(
         access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths = match_assets_access(state.temp_gdf, hazard_threshold=flood_threshold, hazard_column='EV0_ma',
                        config=_config, island_cache=island_cache, cache_dir=interim_dir, hazard_dir=hazard_dir)
         state.temp_gdf['access_rfid'] = access_rfids
+        if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
+            asset_impact_map = {
+                aid: sum(area * rate for (lu, area, rate) in asset_to_lu[aid])
+                for aid in asset_to_lu
+            }
+        elif 'population' in repair_crew_assignment_method and asset_population_map is not None:
+            asset_impact_map = asset_population_map
+        else:
+            asset_impact_map = None
 
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
@@ -771,7 +786,7 @@ def simulate_asset_damage_recovery_access_breakdown(
             state, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
             accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, boundary_islands_rfids,
             interim_dir, hazard_dir, available_repair_crews, previous_rfids_islands, previous_map_counter,
-            asset_type, num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k
+            asset_type, num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k 
         )
         
         # Merge cache updates
@@ -781,7 +796,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         # 2. Repair crew assignment
         available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
             timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
-            flooded_mask, state.repair_time, state.island_ids, repair_crew_assignment_method, verbose
+            flooded_mask, state.repair_time, state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map
         )
         
         # 3. Update repair progress
