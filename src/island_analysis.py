@@ -15,7 +15,7 @@ from pyproj import Transformer
 
 import time
 
-from src.utils import project_graph_coords, filter_hazard_graph
+from src.utils import project_graph_coords, filter_hazard_graph, create_spatial_index
 from src.caching import load_island_cache, create_island_cache_key, save_island_cache, create_overlap_cache_key, save_overlap_cache, get_asset_centroid_hash
 
 # Import hazard extraction method from config
@@ -27,25 +27,6 @@ from config import get_config
 from tqdm import tqdm
 tqdm.pandas()
 
-def create_spatial_index(gdf):
-    """
-    Create R-tree spatial index for fast spatial queries
-    
-    Arguments:
-    - gdf: GeoDataFrame containing geometries to index
-
-    Returns:
-    - R-tree spatial index
-    """
-    # Build R-tree index
-    idx = index.Index()
-    
-    # Insert each geometry's bounding box into the index
-    for i, row in gdf.iterrows():
-        bounds = row.geometry.bounds  # (minx, miny, maxx, maxy)
-        idx.insert(i, bounds)#, obj=row) #use case for obj=row is only when the rest of the row should be directly queried
-    
-    return idx
 
 def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str, buffer_distance: float = 2.5, verbose: bool = False) -> gpd.GeoDataFrame:
     """

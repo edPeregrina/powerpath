@@ -3,6 +3,26 @@ from pyproj import Transformer
 import shapely.geometry as sg
 import pandas as pd
 from scipy.spatial import Voronoi
+from rtree import index
+
+def create_spatial_index(gdf):
+    """
+    Create R-tree spatial index for fast spatial queries.
+    
+    Arguments:
+    - gdf: GeoDataFrame containing geometries to index
+
+    Returns:
+    - R-tree spatial index
+    """
+    idx = index.Index()
+    
+    # Insert each geometry's bounding box into the index
+    for i, row in gdf.iterrows():
+        bounds = row.geometry.bounds  # (minx, miny, maxx, maxy)
+        idx.insert(i, bounds)
+    
+    return idx
 
 
 def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
