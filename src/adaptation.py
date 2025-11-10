@@ -12,9 +12,10 @@ import networkx as nx
 import hashlib
 from typing import Optional, Tuple, List, Dict
 
+
+
 # Module-level cache for adaptation arrays
 _ADAPTATION_CACHE: Dict[tuple, np.ndarray] = {}
-
 
 def _build_adaptation_arrays_cached(
     gdf_assets: gpd.GeoDataFrame,
@@ -319,3 +320,284 @@ def convert_l2_dict_to_geodataframe(l2_dict, gdf_assets):
     return l2_gdf
 
 
+def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
+    """
+    EMA-compatible wrapper for simulation with population and monetary impact calculation.
+
+    This wrapper manages memory by only creating arrays for requested outcomes. 
+    Use of 3D outcomes quickly causes out of memory errors. 
+    This functionality is kept in for troubleshooting/inspecting.
+
+    Parameters:
+    -----------
+    keep_3d_vars : list of str, optional
+        Variables to keep as 3D arrays (n_timesteps, n_assets).
+        Example: ['flooded', 'operational']
+        Default: []
+        
+    keep_2d_vars : list of str, optional
+        Variables to keep as 2D arrays (n_experiments, n_timesteps) - aggregated across assets.
+        Example: ['damage_ratio', 'repair_time', 'hazard_value']
+        Default: []
+        
+    Available asset metrics:
+        - 3D or 2D: 'damage_ratio', 'repair_time', 'operational', 'accessible',
+                    'unreachable', 'flooded', 'crew_assigned', 'hazard_value'
+        - 3D only: 'island_id' (arbitrary IDs, meaningless when aggregated)
+        
+    Note: Population and monetary impacts are always 1D (n_timesteps) - already aggregated.
+    """
+    import numpy as np
+    import pandas as pd
+    from src.simulation import simulate_asset_damage_recovery_access_breakdown  # ✅ ADD THIS!
+    from src.impacts import calculate_population_impacts, calculate_cumulative_monetized_impacts_ema
+
+    # Helper functions
+    
+    def _extract_configuration(kwargs):
+        """Extract and validate configuration parameters."""
+        monetary_categories = ['residential', 'commercial', 'industrial',
+                              'transport', 'public_sector']
+        
+        asset_population_map = kwargs.get('asset_population_map', {})
+        asset_to_lu = kwargs.get('asset_to_lu', {})
+        
+        keep_3d_vars = kwargs.pop('keep_3d_vars', [])
+        keep_2d_vars = kwargs.pop('keep_2d_vars', [])
+        
+        if keep_3d_vars is None:
+            keep_3d_vars = []
+        if keep_2d_vars is None:
+            keep_2d_vars = []
+        
+        return {
+            'monetary_categories': monetary_categories,
+            'asset_population_map': asset_population_map,
+            'asset_to_lu': asset_to_lu,
+            'keep_3d_vars': keep_3d_vars,
+            'keep_2d_vars': keep_2d_vars
+        }
+    
+    def _add_impact_metrics(timestep_results, detailed_results, asset_population_map, 
+                            asset_to_lu, monetary_categories):
+        """Calculate and add population and monetary impacts to timestep results."""
+        # Add population impacts
+        if asset_population_map:
+            timestep_results = calculate_population_impacts(detailed_results, asset_population_map)
+        
+        # Add monetary impacts
+        if asset_to_lu:
+            monetized_results = calculate_cumulative_monetized_impacts_ema(  
+                detailed_results, 
+                asset_to_lu,
+            )
+            
+            # Ensure all expected monetary columns exist
+            for category in monetary_categories:
+                expected_col = f'monetary_impact_{category}'
+                if expected_col not in monetized_results.columns:
+                    monetized_results[expected_col] = 0.0
+            
+            if 'monetary_impact_total' not in monetized_results.columns:
+                monetized_results['monetary_impact_total'] = 0.0
+            
+            # Copy monetary columns to timestep_results
+            for col in monetized_results.columns:
+                if col.startswith('monetary_'):
+                    timestep_results[col] = monetized_results[col]
+        else:
+            # No land use mapping - create zero columns
+            for category in monetary_categories:
+                timestep_results[f'monetary_impact_{category}'] = 0.0
+            timestep_results['monetary_impact_total'] = 0.0
+        
+        return timestep_results
+    
+    def _initialize_result_arrays(n_timesteps, n_assets, keep_3d_vars, keep_2d_vars,
+                                   asset_population_map, monetary_categories):
+        """Initialize result arrays based on requested metrics."""
+        aggregatable_metrics = [
+            'damage_ratio', 'repair_time', 'operational', 'accessible',
+            'unreachable', 'flooded', 'crew_assigned', 'hazard_value'
+        ]
+        three_d_only_metrics = ['island_id']
+        
+        result = {}
+        
+        # Always include timesteps
+        result['timesteps'] = np.zeros(n_timesteps)
+        
+        # Population impacts - always 1D (already aggregated)
+        if asset_population_map:
+            result['affected_population'] = np.zeros(n_timesteps)
+            result['served_population'] = np.zeros(n_timesteps)
+            result['affected_population_ratio'] = np.zeros(n_timesteps)
+        
+        # Monetary impacts - always 1D (already aggregated)
+        result['monetary_impact_total'] = np.zeros(n_timesteps)
+        for category in monetary_categories:
+            result[f'monetary_impact_{category}'] = np.zeros(n_timesteps)
+        
+        # Asset metrics 
+        # Tier 1: 3D arrays (per-asset, per-timestep)
+        for metric in keep_3d_vars:
+            if metric in aggregatable_metrics or metric in three_d_only_metrics:
+                result[metric] = np.zeros((n_timesteps, n_assets))
+            else:
+                print(f"Warning: '{metric}' in keep_3d_vars is not a valid asset metric. Skipping.")
+        
+        # Tier 2: 2D arrays (aggregated across assets)
+        for metric in keep_2d_vars:
+            if metric in aggregatable_metrics:
+                result[metric] = np.zeros(n_timesteps)
+            elif metric in three_d_only_metrics:
+                raise ValueError(
+                    f"Cannot include '{metric}' in keep_2d_vars - this metric is only meaningful "
+                    f"as a 3D array (per-asset). Island IDs are arbitrary and lose meaning when aggregated. "
+                    f"Either add it to keep_3d_vars or omit it."
+                )
+            else:
+                print(f"Warning: '{metric}' in keep_2d_vars is not a valid asset metric. Skipping.")
+        
+        return result
+    
+    def _fill_timestep_arrays(result, timestep_results, n_timesteps, n_assets,
+                              keep_3d_vars, keep_2d_vars, asset_population_map, 
+                              monetary_categories):
+        """Fill result arrays from timestep data for requested metrics."""
+        summary_to_metric = {
+            'avg_damage_ratio': 'damage_ratio',
+            'avg_repair_time': 'repair_time',
+        }
+        count_to_binary = {
+            'operational_count': 'operational',
+            'accessible_count': 'accessible',
+            'unreachable_count': 'unreachable',
+            'flooded_count': 'flooded',
+            'crews_assigned_count': 'crew_assigned'
+        }
+        
+        for t_idx, (_, ts) in enumerate(timestep_results.iterrows()):
+            # Timesteps
+            result['timesteps'][t_idx] = ts.get('timestep', t_idx)
+            
+            # Population impacts (1D)
+            if asset_population_map:
+                result['affected_population'][t_idx] = ts.get('affected_population', 0)
+                result['served_population'][t_idx] = ts.get('served_population', 0)
+                result['affected_population_ratio'][t_idx] = ts.get('affected_population_ratio', 0)
+            
+            # Monetary impacts (1D)
+            result['monetary_impact_total'][t_idx] = ts.get('monetary_impact_total', 0)
+            for category in monetary_categories:
+                col_name = f'monetary_impact_{category}'
+                result[col_name][t_idx] = ts.get(col_name, 0)
+            
+            # Asset metrics - ONLY process requested metrics
+            all_requested_metrics = keep_3d_vars + keep_2d_vars
+            
+            for metric in all_requested_metrics:
+                value = _get_metric_value(ts, metric, summary_to_metric, count_to_binary)
+                
+                if value is None:
+                    continue  # Skip if data not available
+                
+                if metric in keep_3d_vars:
+                    _store_3d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
+                elif metric in keep_2d_vars:
+                    _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
+        
+        return result
+    
+    def _get_metric_value(ts, metric, summary_to_metric, count_to_binary):
+        """Extract metric value from timestep data, checking multiple sources."""
+        if metric in ts:
+            return ts[metric]
+        
+        # Try summary columns
+        for summary_col, target_metric in summary_to_metric.items():
+            if target_metric == metric and summary_col in ts:
+                return ts[summary_col]
+        
+        # Try count columns
+        for count_col, target_metric in count_to_binary.items():
+            if target_metric == metric and count_col in ts:
+                return ts[count_col]
+        
+        return None
+    
+    def _store_3d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
+        """Store per-asset values in 3D array."""
+        if isinstance(value, (list, np.ndarray)):
+            result[metric][t_idx, :] = value[:n_assets]
+        elif metric in count_to_binary.values():
+            # Convert count to ratio for binary metrics
+            ratio = value / n_assets if n_assets > 0 else 0
+            result[metric][t_idx, :] = ratio
+        else:
+            result[metric][t_idx, :] = value
+    
+    def _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
+        """Aggregate and store metric as scalar in 2D array."""
+        if isinstance(value, (list, np.ndarray)):
+            # Aggregation strategy depends on metric type
+            if metric in ['damage_ratio', 'repair_time', 'hazard_value']:
+                # Mean for continuous values
+                result[metric][t_idx] = np.mean(value)
+            else:
+                # Sum for binary/count values
+                result[metric][t_idx] = np.sum(value)
+        elif metric in count_to_binary.values():
+            # Already a count, just store it
+            result[metric][t_idx] = value
+        else:
+            result[metric][t_idx] = value
+    
+    # ============================================================================
+    # Main function
+    
+    # Extract configuration
+    config = _extract_configuration(kwargs)
+    
+    # Run the simulation
+    results_df, final_state, cache_updated = simulate_asset_damage_recovery_access_breakdown(*args, **kwargs)
+    timestep_data = results_df[0][1]
+    detailed_results = results_df[0][2]
+    timestep_results = pd.DataFrame(timestep_data)
+    
+    # Add impact metrics
+    timestep_results = _add_impact_metrics(
+        timestep_results, 
+        detailed_results,
+        config['asset_population_map'],
+        config['asset_to_lu'],
+        config['monetary_categories']
+    )
+    
+    # Get dimensions
+    n_assets = len(kwargs['gdf_assets'])
+    n_timesteps = len(timestep_results)
+    
+    # Initialize result arrays (MEMORY OPTIMIZED)
+    result = _initialize_result_arrays(
+        n_timesteps,
+        n_assets,
+        config['keep_3d_vars'],
+        config['keep_2d_vars'],
+        config['asset_population_map'],
+        config['monetary_categories']
+    )
+    
+    # Fill result arrays (ONLY for requested metrics)
+    result = _fill_timestep_arrays(
+        result,
+        timestep_results,
+        n_timesteps,
+        n_assets,
+        config['keep_3d_vars'],
+        config['keep_2d_vars'],
+        config['asset_population_map'],
+        config['monetary_categories']
+    )
+    
+    return result
