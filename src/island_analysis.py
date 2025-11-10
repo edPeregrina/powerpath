@@ -1,6 +1,4 @@
 
-from tabnanny import verbose
-from rtree import index
 from pathlib import Path
 import sys
 sys.path.append(str(Path.cwd().parent))
@@ -28,23 +26,43 @@ from tqdm import tqdm
 tqdm.pandas()
 
 
-def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_threshold: float, hazard_column: str, buffer_distance: float = 2.5, verbose: bool = False) -> gpd.GeoDataFrame:
+def compute_island_geodataframe_from_graph(
+    graph_pickle_path: str, 
+    hazard_threshold: float, 
+    hazard_column: str, 
+    buffer_distance: float = 2.5, 
+    verbose: bool = False,
+    l1_area_geojson=None  
+) -> gpd.GeoDataFrame:
     """
-    Create GeoDataFrame from graph with buffered road geometries for spatial operations.
-    Deduplicates before buffering for efficiency.
+    Create GeoDataFrame from graph with buffered road geometries.
+    Applies L1 adaptations before filtering if provided.
     """
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
-        # G = nx.DiGraph(G)
 
     G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
-    G = filter_hazard_graph(G, hazard_threshold, hazard_column)
+    
+    G = filter_hazard_graph(
+        G, hazard_threshold, hazard_column, 
+        l1_area_geojson=l1_area_geojson,
+        verbose=verbose
+    )
 
+    # # DEBUG 1: Check graph structure after filtering
+    # print(f"DEBUG 1: Graph has {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    
     # Identify strongly connected components
     if G.is_directed():
         components = list(nx.strongly_connected_components(G))
     else:
         components = list(nx.connected_components(G))
+    
+    # # DEBUG 2: Check component distribution
+    # print(f"DEBUG 2: Found {len(components)} connected components")
+    # component_sizes = sorted([len(comp) for comp in components], reverse=True)
+    # print(f"DEBUG 2: Component sizes: {component_sizes[:10]}")  # Top 10
+    
     fid_to_island = {}
 
     # Assign island_id to each fid
@@ -54,42 +72,64 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
             fid_to_island[u] = i
             fid_to_island[v] = i
 
+    # # DEBUG 3: Check fid_to_island mapping
+    # print(f"DEBUG 3: fid_to_island has {len(fid_to_island)} entries")
+    # print(f"DEBUG 3: Island IDs in fid_to_island: {sorted(set(fid_to_island.values()))[:20]}")  # First 20
+
     # Create transformer for projecting geometries
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
     
     # Build edge records with geometry and length 
     records = []
+    # missing_island_count = 0  # DEBUG counter
 
     for u, v, data in G.edges(data=True):
         # Project the actual edge geometry
         original_geom = data['geometry']
         if hasattr(original_geom, 'coords'):
-            # Project all coordinates in the geometry
             projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
             projected_geom = LineString(projected_coords)
         else:
-            # Fallback: create LineString from node positions if no edge geometry
             projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
                                        (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
         
         length_m = data.get("length", None)
         if length_m is None:
-            print(f"Length not found for edge ({u}, {v}), calculating from projected geometry.")
-            length_m = projected_geom.length  # Use original linestring for length calculation
+            length_m = projected_geom.length
 
         island_id = fid_to_island.get(v, -1)
+        
+        # # DEBUG 4: Track edges that get island_id = -1
+        # if island_id == -1:
+        #     missing_island_count += 1
+        #     if missing_island_count <= 5:  # Print first 5 cases
+        #         print(f"DEBUG 4: Edge ({u}, {v}) has island_id = -1")
+        #         print(f"         u in fid_to_island: {u in fid_to_island}")
+        #         print(f"         v in fid_to_island: {v in fid_to_island}")
 
         record = data.copy()
-        record["geometry"] = projected_geom  # Keep original linestring geometry for now
+        record["geometry"] = projected_geom
         record["length_m"] = length_m
         record["island_id"] = island_id
         records.append(record)
 
+    # # DEBUG 5: Check how many edges got -1
+    # print(f"DEBUG 5: {missing_island_count} edges assigned island_id = -1 out of {len(records)}")
+
     # Create initial GeoDataFrame with linestring geometries
     gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:28992")
 
+    # # DEBUG 6: Check GeoDataFrame island distribution BEFORE deduplication
+    # print(f"DEBUG 6: BEFORE dedup - island_id distribution:")
+    # print(gdf['island_id'].value_counts().sort_index())
+
     # Deduplication and buffering
     gdf = gdf.drop_duplicates(subset=["geometry", "island_id"])
+    
+    # # DEBUG 7: Check GeoDataFrame island distribution AFTER deduplication
+    # print(f"DEBUG 7: AFTER dedup - island_id distribution:")
+    # print(gdf['island_id'].value_counts().sort_index())
+    
     if verbose:
         print(f"After deduplication: {len(gdf)} road segments")
 
@@ -132,7 +172,8 @@ def compute_island_geodataframe_from_graph(graph_pickle_path: str, hazard_thresh
     return gdf
 
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
-                       config=None, island_cache=None, cache_dir=None, hazard_dir=None):
+                       config=None, island_cache=None, cache_dir=None, hazard_dir=None,
+                       l1_area_geojson=None):  
     """
     Assign each asset in temp_gdf to the closest road section in islands_gdf using spatial index. 
     This step is executed at initialization only since the access rfid is an attribute of the graph that does not change.
@@ -173,11 +214,15 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
     # If not cached, compute from scratch
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
-        # Subgraphs are computed on the fly from the filtered hazard graph. each subgraph is an "island".
+        
         islands_gdf = compute_island_geodataframe_from_graph(
-            hazard_graph_path, hazard_threshold=hazard_threshold, 
-            hazard_column=hazard_column, buffer_distance=20, verbose=verbose
-        )  
+            hazard_graph_path, 
+            hazard_threshold=hazard_threshold, 
+            hazard_column=hazard_column, 
+            buffer_distance=20, 
+            verbose=verbose,
+            l1_area_geojson=l1_area_geojson  
+        )
         rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
 
         temp_gdf['access_rfid'] = -1
@@ -216,14 +261,49 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         temp_gdf['access_rfid'] = temp_gdf.apply(
             lambda row: find_nearest_road(row, spatial_idx, islands_gdf), axis=1
         )
+        # # DEBUG 8: Check rfid assignments
+        # print(f"DEBUG 8: access_rfid distribution:")
+        # rfid_counts = temp_gdf['access_rfid'].value_counts()
+        # print(f"         Assets with rfid = -1: {(temp_gdf['access_rfid'] == -1).sum()}")
+        # print(f"         Assets with valid rfid: {(temp_gdf['access_rfid'] != -1).sum()}")
 
         def safe_island_lookup(rfid, islands_gdf):
             if rfid == -1:
                 return -1
             matches = islands_gdf[islands_gdf['rfid'] == rfid]['island_id'].values
-            return matches[0] if len(matches) > 0 else -1
+            
+            # # DEBUG 9: Track failed lookups
+            # if len(matches) == 0:
+            #     print(f"DEBUG 9: rfid {rfid} not found in islands_gdf")
+            #     return -1
+            
+            island_id = matches[0]
+            
+            # # DEBUG 10: Track if matched island_id is -1
+            # if island_id == -1:
+            #     print(f"DEBUG 10: rfid {rfid} has island_id = -1 in islands_gdf")
+            
+            return island_id
 
         temp_gdf['island_id'] = [safe_island_lookup(rfid, islands_gdf) for rfid in temp_gdf['access_rfid']]
+
+        # # DEBUG 11: Final asset island distribution
+        # print(f"DEBUG 11: Final asset island_id distribution:")
+        # print(temp_gdf['island_id'].value_counts().sort_index())
+        # print(f"          Assets on island -1: {(temp_gdf['island_id'] == -1).sum()}")
+        
+        # # DEBUG 12: Check specific asset 66 if it exists
+        # if 66 in temp_gdf.index:
+        #     asset_66_rfid = temp_gdf.loc[66, 'access_rfid']
+        #     asset_66_island = temp_gdf.loc[66, 'island_id']
+        #     print(f"DEBUG 12: Asset 66 -> rfid {asset_66_rfid} -> island {asset_66_island}")
+            
+        #     if asset_66_rfid != -1:
+        #         matching_roads = islands_gdf[islands_gdf['rfid'] == asset_66_rfid]
+        #         if len(matching_roads) > 0:
+        #             print(f"          Road segment for asset 66 has island_id: {matching_roads['island_id'].iloc[0]}")
+        #         else:
+        #             print(f"          WARNING: rfid {asset_66_rfid} not found in islands_gdf!")
 
         # Now, boundary assets are those with island_id != main_island_id or still -1
         boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
@@ -259,18 +339,30 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         print(f"Error in computing islands from graph: {e}")
         return None, None, None, None
 
-def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
-                            island_cache=None, cache_dir=None, hazard_dir=None):
-   
+def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, 
+                            hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
+                            island_cache=None, cache_dir=None, hazard_dir=None,
+                            l1_area_geojson=None):
+       
+    """
+    Match assets to island IDs based on spatial intersection with road network islands.
+    Cache key now includes L1 adaptation hash if L1 is active.
+    """
     if config is None:
         _config = get_config()
     else:
         _config = config    
     verbose = _config['simulation_config']['verbose']
     asset_hash = get_asset_centroid_hash(temp_gdf)
-    # Create cache key for this computation
+    
+    # Create cache key 
     if island_cache is not None and cache_dir is not None: 
-        cache_key = create_island_cache_key(hazard_column, hazard_threshold, asset_hash)
+        cache_key = create_island_cache_key(
+            hazard_column, 
+            hazard_threshold, 
+            asset_hash,
+            l1_area_geojson=l1_area_geojson  
+        )
         
         # Check if this computation is already cached
         if cache_key in island_cache:
@@ -297,9 +389,13 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
         print(f"Loading hazard graph from {hazard_graph_path}")
         islands_gdf = compute_island_geodataframe_from_graph(
-            hazard_graph_path, hazard_threshold=hazard_threshold, 
-            hazard_column=hazard_column, buffer_distance=20, verbose=verbose
-        )  
+            hazard_graph_path, 
+            hazard_threshold=hazard_threshold, 
+            hazard_column=hazard_column, 
+            buffer_distance=20, 
+            verbose=verbose,
+            l1_area_geojson=l1_area_geojson  
+        )
 
         # Drop the boundary rfids and find the main island
         islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
@@ -334,9 +430,21 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
 
     return asset_island_ids, rfids_islands
 
-def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, current_rfids_islands, rfids_lengths, 
-                              verbose=False, overlap_cache=None, current_map=None, previous_map=None, 
-                              hazard_threshold=None, hazard_dir=None, _config=None, cache_updated=None):
+def update_repair_crew_islands(
+    available_repair_crews,      
+    previous_rfids_islands,      
+    current_rfids_islands,       
+    rfids_lengths,               
+    verbose=False, 
+    overlap_cache=None, 
+    current_map=None, 
+    previous_map=None, 
+    hazard_threshold=None, 
+    hazard_dir=None, 
+    _config=None, 
+    cache_updated=None,
+    l1_area_geojson=None
+):
     """
     Distribute repair crews by island, based on road feature lengths.
 
@@ -354,18 +462,19 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
     - _config: configuration dictionary (used in caching)
     - cache_updated: dict to track if cache was updated (used in caching)
     """
-    try: # Exceptions are handled by returning input crews as fallback, but a stack trace is printed for debugging
+    try:
         # First round: crews as int
         if isinstance(available_repair_crews, int):
-            # Check cache first for initial distribution
             initial_probabilities = None
             overlap_cache_key = None
             
             if (overlap_cache is not None and current_map is not None and 
                 hazard_threshold is not None):
                 
-                # Special cache key for initial distribution
-                overlap_cache_key = create_overlap_cache_key("initial", current_map, hazard_threshold, hazard_dir)
+                overlap_cache_key = create_overlap_cache_key(
+                    "initial", current_map, hazard_threshold, hazard_dir,
+                    l1_area_geojson=l1_area_geojson  
+                )
                 
                 if overlap_cache_key in overlap_cache:
                     if verbose:
@@ -414,14 +523,52 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
 
         # Subsequent rounds: crews as dict
         elif isinstance(available_repair_crews, dict):
+            # Guard: Handle first timestep when dict was initialized but no previous state exists
+            if previous_rfids_islands is None:
+                if verbose:
+                    print("First timestep with dict crews: redistributing from temporary island 0")
+                
+                # Get total crews from all islands in the dict
+                total_crews = sum(available_repair_crews.values())
+                
+                # Compute initial distribution based on current island lengths
+                curr_island_lengths = {}
+                for rfid, island_id in current_rfids_islands.items():
+                    if island_id == -1:
+                        continue
+                    curr_island_lengths.setdefault(island_id, 0)
+                    curr_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
+                
+                if not curr_island_lengths:
+                    print("WARNING: No valid islands found (all are -1). Using fallback.")
+                    unique_islands = [0]
+                    probabilities = np.array([1.0])
+                else:
+                    unique_islands = list(curr_island_lengths.keys())
+                    lengths = np.array([curr_island_lengths[i] for i in unique_islands])
+                    probabilities = lengths / lengths.sum() if lengths.sum() > 0 else np.ones_like(lengths)/len(lengths)
+                
+                # Distribute crews proportionally
+                assigned = np.random.choice(unique_islands, size=total_crews, p=probabilities, replace=True)
+                crew_counts = dict(zip(*np.unique(assigned, return_counts=True)))
+                available_repair_crews_by_island = {i: crew_counts.get(i, 0) for i in unique_islands}
+                
+                if verbose:
+                    print(f"Initial crew distribution (from dict): {available_repair_crews_by_island}")
+                
+                return available_repair_crews_by_island
+            
             # Check cache first for transition probabilities
             transition_probabilities = None
             
             if (overlap_cache is not None and current_map is not None and 
                 previous_map is not None and hazard_threshold is not None):
                 
-                overlap_cache_key = create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir)
-                
+                overlap_cache_key = create_overlap_cache_key(
+                    previous_map, current_map, hazard_threshold, hazard_dir,
+                    l1_area_geojson=l1_area_geojson
+                )
+
                 if overlap_cache_key in overlap_cache:
                     if verbose:
                         print(f"Using cached transition probabilities for {overlap_cache_key}")
@@ -438,11 +585,15 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
                 prev_island_lengths = {}
                 
                 for rfid, island_id in current_rfids_islands.items():
+                    if island_id == -1:
+                        continue
                     curr_island_lengths.setdefault(island_id, 0)
                     curr_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
                 
                 if previous_rfids_islands is not None:
                     for rfid, island_id in previous_rfids_islands.items():
+                        if island_id == -1:
+                            continue
                         prev_island_lengths.setdefault(island_id, 0)
                         prev_island_lengths[island_id] += rfids_lengths.get(rfid, 0)
                 
@@ -450,6 +601,8 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
                 transition_probabilities = {}
                 
                 for prev_island in set(previous_rfids_islands.values()):
+                    if prev_island == -1:
+                        continue
                     # Find rfids in previous island
                     rfids_in_prev = [rfid for rfid, island in previous_rfids_islands.items() if island == prev_island]
                     
@@ -457,9 +610,10 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
                     curr_lengths = {}
                     for rfid in rfids_in_prev:
                         curr_island = current_rfids_islands.get(rfid, None)
-                        if curr_island is not None:
-                            curr_lengths.setdefault(curr_island, 0)
-                            curr_lengths[curr_island] += rfids_lengths.get(rfid, 0)
+                        if curr_island is None or curr_island == -1:
+                            continue
+                        curr_lengths.setdefault(curr_island, 0)
+                        curr_lengths[curr_island] += rfids_lengths.get(rfid, 0)
                     
                     # Calculate probabilities for this previous island
                     total_length = sum(curr_lengths.values())
@@ -488,6 +642,9 @@ def update_repair_crew_islands(available_repair_crews, previous_rfids_islands, c
             available_repair_crews_by_island = {}
             
             for prev_island, crew_count in available_repair_crews.items():
+                if prev_island == -1:
+                    print(f"WARNING: Skipping crew redistribution from island_id = -1 ({crew_count} crews lost)")
+                    continue
                 if prev_island in transition_probabilities and transition_probabilities[prev_island]:
                     # Get transition probabilities for this island
                     island_transitions = transition_probabilities[prev_island]

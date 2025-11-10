@@ -14,6 +14,7 @@ from src.hazard_analysis_electricity import find_hazard_value_at_points_optimize
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
 from src.caching import create_accessibility_cache_key, create_island_cache_key, get_asset_centroid_hash
 import src.grid_based_accessibility_hex as grid_hex
+from src.adaptation import build_l1_l2_reduction_array, _build_adaptation_arrays_cached
 
 # Import hazard extraction method from config
 import sys
@@ -32,17 +33,22 @@ class SimulationState:
         self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
-        self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
+        # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
-def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, hazard_maps, haz_dir_name, flood_threshold, repair_crew_assignment_method,
-                              _config, accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, boundary_islands_rfids,
-                              interim_dir, hazard_dir, available_repair_crews, previous_rfids_islands, previous_map_counter,
-                              asset_type, num_assets, verbose, fragility_param_k=None):
+def _update_hazard_map_states(
+    state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, haz_dir_name, 
+    flood_threshold, repair_crew_assignment_method, _config, accessibility_cache, 
+    hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
+    boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
+    previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
+    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None
+):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
 
     Args:
         state (SimulationState): Current state of the simulation
+        gdf_assets (GeoDataFrame): GeoDataFrame of assets with geometries and asset types
         timestep (int): Current timestep in the simulation
         major_timestep (int): Major timestep interval for hazard map updates
         hazard_maps (list): List of paths to hazard map files (raster format)
@@ -60,6 +66,8 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
         asset_type (np.ndarray): Array of asset types corresponding to each asset
         num_assets (int): Total number of assets in the simulation
         verbose (bool): If True, print detailed simulation information
+        fragility_param_k (float or None): Parameter k for the fragility function, if applicable
+        depth_reductions (np.ndarray or None): 2D array of flood depth reductions
 
     Returns:
         tuple: Updated available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated (dictionary of updated caches)
@@ -80,11 +88,12 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
 
     if verbose:
         print(f"\n=== Processing timestep {timestep} (map {map_counter}) ===")
-
+    
     # Update hazard values
-    state.temp_gdf = find_hazard_value_at_points_optimized(
+    temp_gdf = gdf_assets[['type', 'geometry', 'access_rfid']].copy()
+    temp_gdf = find_hazard_value_at_points_optimized(
         hazard_map,
-        state.temp_gdf,
+        temp_gdf,
         map_counter,
         extraction_method=_config['analysis_config']['hazard_extraction_method'],
         hazard_cache=hazard_extraction_cache,
@@ -94,15 +103,29 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
     cache_updated['hazard_extraction_cache'] = hazard_extraction_cache
     haz_val_str = f'hazard_value_{map_counter}'
 
-    if haz_val_str in state.temp_gdf.columns:
-        state.current_hazard_values = state.temp_gdf[haz_val_str].fillna(0.0).values
+    if haz_val_str in temp_gdf.columns:
+        state.current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
     else:
-        state.current_hazard_values = state.temp_gdf[haz_col_str].fillna(0.0).values
+        state.current_hazard_values = temp_gdf[haz_col_str].fillna(0.0).values
+
+    # Apply L1/L2 adaptations (once per map, not accumulated per hour)
+    if depth_reductions is not None:
+        if timestep < depth_reductions.shape[0]:
+            state.current_hazard_values = np.maximum(
+                0.0, 
+                state.current_hazard_values - depth_reductions[timestep, :]
+            )
 
     # Island-based crew management
     if 'island' in repair_crew_assignment_method:
-        asset_hash = get_asset_centroid_hash(state.temp_gdf)
-        cache_key = create_island_cache_key(haz_col_str, flood_threshold, asset_hash)
+        assert isinstance(available_repair_crews, dict), f"Island method requires dict of recpair crews at this point, got {type(available_repair_crews)}"
+        asset_hash = get_asset_centroid_hash(temp_gdf)
+        cache_key = create_island_cache_key(
+            haz_col_str, 
+            flood_threshold, 
+            asset_hash,
+            l1_area_geojson=l1_area_geojson  
+        )
         if cache_key in island_cache:
             island_data = island_cache[cache_key]
             state.island_ids = island_data['island_ids']
@@ -112,7 +135,7 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
         else:
             print(f"Cache miss for {cache_key}, computing islands on the fly...")
             try:
-                temp_gdf_for_islands = state.temp_gdf
+                temp_gdf_for_islands = temp_gdf
                 
                 asset_island_ids, rfids_islands = match_island_ids_assets(
                     temp_gdf_for_islands, 
@@ -123,13 +146,13 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
                     config=_config,
                     island_cache=island_cache,
                     cache_dir=interim_dir,
-                    hazard_dir=hazard_dir)
+                    hazard_dir=hazard_dir,
+                    l1_area_geojson=l1_area_geojson  
+                )
                 state.island_ids = asset_island_ids
-
                 # Assign island for each asset for the current state
                 cache_updated['island_cache'] = island_cache
                 print(f"Successfully computed and cached islands for {cache_key}")
-
             except Exception as e:
                 print(f"Error computing islands for {cache_key}: {e}")
                 print("Falling back to simple island assignment")
@@ -154,12 +177,13 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
                 hazard_threshold=flood_threshold,
                 hazard_dir=hazard_dir,
                 _config=_config,
-                cache_updated=cache_updated
+                cache_updated=cache_updated,
+                l1_area_geojson=l1_area_geojson
             )
 
             previous_map_counter = map_counter
             previous_rfids_islands = rfids_islands.copy()
-            state.temp_gdf['island_id'] = state.island_ids                
+            temp_gdf['island_id'] = state.island_ids                
 
         else:
             print(f"Reachability not available for {cache_key}, using global crew assignment")
@@ -222,7 +246,7 @@ def _update_hazard_map_states(state, rfids_lengths, timestep, major_timestep, ha
                 print(f"Using cached accessibility for map {map_counter} (hazard dir: {haz_dir_name})")
         else:
             try:
-                assets_copy = state.temp_gdf.copy()
+                assets_copy = temp_gdf.copy()
                 accessibility_result = grid_hex.accessibility_model(
                     assets_copy.geometry, 
                     hazard_map, 
@@ -407,12 +431,18 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
     
     return available_repair_crews, repair_crews_assigned
 
+_DEPTH_REDUCTION_CACHE = {}
+
 def _initialize_simulation(
     gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,
-    accessibility_cache=None, hazard_extraction_cache=None, overlap_cache=None, island_cache=None, fragility_param_k=None
+    accessibility_cache=None, hazard_extraction_cache=None, overlap_cache=None, island_cache=None, 
+    fragility_param_k=None, major_timestep=24,
+    l1_area_geojson=None, l1_active_timesteps=None, 
+    l2_asset_geojson=None, l2_active_timesteps=None, 
+    verbose=False  
 ):
     """
-    Handles all setup: paths, directories, config, caches, etc. Returns initialized variables.
+    Handles all setup: paths, directories, config, caches, adaptation arrays, etc.
     
     Args:
         gdf_assets (GeoDataFrame): Asset geometries and types
@@ -426,23 +456,33 @@ def _initialize_simulation(
         overlap_cache (dict, optional): Existing overlap cache
         island_cache (dict, optional): Existing island cache
         fragility_param_k (float, optional): Fragility parameter for operational status modeling
+        major_timestep (int): Hours per hazard map update
+        l1_area_geojson (str or Path, optional): GeoJSON file path for L1 adaptation areas
+        l1_active_timesteps (list, optional): List of timesteps when L1 is active
+        l2_asset_geojson (str or Path, optional): GeoJSON file path for L2 protected assets
+        l2_active_timesteps (list, optional): List of timesteps when L2 is active
+        l2_asset_depth_red (dict, optional): Legacy L2 format {timestep: [(asset_idx, depth_red), ...]}
         
     Returns:
-        dict: Initialized variables including loaded caches
+        dict: Initialized variables including loaded caches and adaptation arrays
     """
+    # Use provided config or load default
     if config is None:
         _config = get_config()
     else:
         _config = config
 
+    # Set root directory
     if root_dir is None:
         root_dir = Path.cwd().parent
     else:
         root_dir = Path(root_dir)
 
+    # Create interim directory
     interim_dir = _config['interim_dir']
     interim_dir.mkdir(parents=True, exist_ok=True)
 
+    # Determine hazard directory
     if hazard_maps:
         hazard_dir = Path(hazard_maps[0]).parent
         hazard_dir_name = hazard_dir.name
@@ -450,6 +490,7 @@ def _initialize_simulation(
         hazard_dir = None
         hazard_dir_name = "unknown"
 
+    # Create output directory
     output_dir = root_dir / 'data' / 'output' / f"output_{hazard_dir_name}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -463,8 +504,9 @@ def _initialize_simulation(
             'repair_threshold': 2.0
         }
     elif not isinstance(recovery_parameters, dict):
-        raise TypeError("recovery_parameters must be a dictionary, list, or None")
+        raise TypeError("recovery_parameters must be a dictionary or None")
 
+    # Initialize grid-based accessibility if configured
     if _config['simulation_config']['accessibility_model'] is not None:
         print("Initializing grid-based accessibility analysis...")
         grid_hex.initialize_grid_analysis(root_dir)
@@ -494,6 +536,64 @@ def _initialize_simulation(
     num_assets = len(gdf_assets)
     asset_type = gdf_assets['type'].values
 
+    # Build L1/L2 depth reduction array (with caching)
+    depth_reductions = None
+    if l1_area_geojson is not None or l2_asset_geojson is not None:
+        # Create cache key
+        cache_key = (
+            str(l1_area_geojson) if l1_area_geojson else 'no_l1',
+            tuple(l1_active_timesteps) if l1_active_timesteps else (),
+            str(l2_asset_geojson) if l2_asset_geojson else 'no_l2',
+            tuple(l2_active_timesteps) if l2_active_timesteps else (),
+            len(hazard_maps),
+            major_timestep,
+            len(gdf_assets)
+        )
+        
+        # Check cache first
+        if cache_key in _DEPTH_REDUCTION_CACHE:
+            depth_reductions = _DEPTH_REDUCTION_CACHE[cache_key]
+            if verbose:
+                print("Using cached depth reduction array")
+        else:
+            if verbose:
+                print("\nBuilding adaptation depth reduction arrays...")
+            
+            n_timesteps = len(hazard_maps) * major_timestep
+            
+            # Build reduction array using existing function (NO CHANGES)
+            depth_reductions_3d = build_l1_l2_reduction_array(
+                gdf_assets=gdf_assets,
+                l1_area_geojson=l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
+                l2_asset_geojson=l2_asset_geojson,
+                l2_active_timesteps=l2_active_timesteps,
+                hazard_maps=hazard_maps,
+                major_timestep=major_timestep,
+                config=_config,
+                verbose=False
+            )
+            
+            if depth_reductions_3d is not None:
+                if verbose:
+                    print(f"Built adaptation reduction array: shape {depth_reductions_3d.shape}")
+                    l1_active = np.count_nonzero(depth_reductions_3d[:, :, 0])
+                    l2_active = np.count_nonzero(depth_reductions_3d[:, :, 1])
+                    print(f"  L1 active entries: {l1_active}")
+                    print(f"  L2 active entries: {l2_active}")
+                
+                depth_reductions = depth_reductions_3d.sum(axis=2)
+                
+                if verbose:
+                    print(f"Combined into 2D array: shape {depth_reductions.shape}")
+                    print(f"  Max combined reduction: {depth_reductions.max():.2f}m")
+            else:
+                depth_reductions = None
+            
+            # Store in cache (the 2D version)
+            _DEPTH_REDUCTION_CACHE[cache_key] = depth_reductions
+
+
     return {
         'config': _config,
         'root_dir': root_dir,
@@ -510,22 +610,30 @@ def _initialize_simulation(
         'hazard_extraction_cache': hazard_extraction_cache,
         'overlap_cache': overlap_cache,
         'island_cache': island_cache,
-        'fragility_param_k': fragility_param_k
+        'fragility_param_k': fragility_param_k,
+        'depth_reductions': depth_reductions,
+        'l1_area_geojson': l1_area_geojson
     }
 def _process_timestep(
-    state, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, config,
-    accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, boundary_islands_rfids,
-    interim_dir, hazard_dir, available_repair_crews, previous_rfids_islands, previous_map_counter,
-    asset_type, num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k
+    state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, config,
+    accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
+    boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
+    available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
+    num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
+    depth_reductions=None, l1_area_geojson=None  
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
     if timestep % major_timestep == 0:
         available_repair_crews, previous_rfids_islands, previous_map_counter, timestep_cache_updated = _update_hazard_map_states(
-            state, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, flood_threshold, repair_crew_assignment_method,
-            config, accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, boundary_islands_rfids,
-            interim_dir, hazard_dir, available_repair_crews, previous_rfids_islands, previous_map_counter,
-            asset_type, num_assets, verbose, fragility_param_k=fragility_param_k
+            state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, 
+            flood_threshold, repair_crew_assignment_method, config, accessibility_cache, 
+            hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
+            boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
+            previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
+            fragility_param_k=fragility_param_k, 
+            depth_reductions=depth_reductions,  
+            l1_area_geojson=l1_area_geojson  
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -579,19 +687,23 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
     return available_repair_crews
 
 def _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold):
-    """Update unreachable assets for island-based assignment."""
+    """Update unreachable assets for island-based assignment.
+    
+    Assets are marked unreachable if they are:
+    1. Damaged (damage > threshold), AND
+    2. NOT flooded (flooded assets can't be repaired anyway), AND
+    3. Either on island_id = -1 OR in an island without crews
+    """
     all_island_ids = np.unique(state.island_ids)
     
     # Convert dictionary keys to numpy array
-    idle_crew_islands = np.array([island_id for island_id, crew_count in available_repair_crews.items() # TODO: Handle case where available_repair_crews is an int instead of a dict
+    idle_crew_islands = np.array([island_id for island_id, crew_count in available_repair_crews.items()
                                  if crew_count > 0], dtype=state.island_ids.dtype)
     
     # Get assigned crew islands as numpy array
     if np.any(state.repair_crews_assigned):
-        # Extract unique island IDs where crews are assigned
         assigned_crew_islands = np.unique(state.island_ids[state.repair_crews_assigned])
     else:
-        # Empty array with same dtype
         assigned_crew_islands = np.array([], dtype=state.island_ids.dtype)
     
     # Combine arrays using numpy operations
@@ -607,14 +719,15 @@ def _update_unreachable_assets(state, available_repair_crews, flooded_mask, dama
     # Find islands without crews using numpy's set difference
     islands_without_crews = np.setdiff1d(all_island_ids, islands_with_crews)
     
-    # Use numpy's isin directly with the numpy array
     in_islands_without_crews = np.isin(state.island_ids, islands_without_crews)
     
-    # Set unreachable state
+    # - It's damaged AND not flooded AND (either on island -1 OR in an island without crews)
+    island_minus_one_mask = (state.island_ids == -1)
+    
     state.unreachable = (
         (state.damage_ratio > damage_threshold) &
         (~flooded_mask) &
-        in_islands_without_crews
+        (island_minus_one_mask | in_islands_without_crews)  # Either -1 OR no crews on island
     )
 
 def _collect_timestep_metrics(
@@ -673,24 +786,28 @@ def _save_config_file(output_dir, root_dir, execution_id):
 def simulate_asset_damage_recovery_access_breakdown(
     gdf_assets,
     hazard_maps,
-    number_repair_crews,
-    repair_crew_assignment_method,
-    flood_threshold,
-    recovery_parameters,
-    root_dir,
-    verbose,
-    timestep_output,
-    execution_id,
-    config,
-    major_timestep,
+    number_repair_crews=5,
+    repair_crew_assignment_method='islands',
+    flood_threshold=0.2,
+    recovery_parameters=None,
+    root_dir=None,
+    verbose=False,
+    timestep_output=False,
+    execution_id=None,
+    config=None,
+    major_timestep=24,
     accessibility_cache=None,
     hazard_extraction_cache=None,
     overlap_cache=None,
     island_cache=None,
     fragility_param_k=None,
     asset_population_map=None,
-    asset_to_lu=None
-):
+    asset_to_lu=None,
+    l1_area_geojson=None,
+    l1_active_timesteps=None,
+    l2_asset_geojson=None,
+    l2_active_timesteps=None
+    ):
     """
     Runs a time-stepped simulation of asset damage and recovery, considering hazard exposure, accessibility, and repair crew assignment.
   
@@ -712,6 +829,13 @@ def simulate_asset_damage_recovery_access_breakdown(
         overlap_cache (dict): Cache for overlap results.
         island_cache (dict): Cache for island analysis results.
         fragility_param_k (float, optional): Fragility parameter for operational status modeling.
+        asset_population_map (dict, optional): Mapping of asset indices to population impact values.
+        asset_to_lu (dict, optional): Mapping of asset indices to land-use impact values.
+        l1_area_geojson (GeoDataFrame or str, optional): GeoJSON defining L1 adaptation areas.
+        l1_active_timesteps (list[int], optional): Timesteps when L1 adaptation is
+            active (in hours).
+        l2_asset_depth_red (dict, optional): Mapping of timesteps to lists of tuples
+            (asset_index, depth_reduction) for L2 adaptation measures.
 
     Returns:
         tuple:
@@ -728,7 +852,11 @@ def simulate_asset_damage_recovery_access_breakdown(
     # --- Initialization ---
     init = _initialize_simulation(
         gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,
-        accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, fragility_param_k=None
+        accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
+        fragility_param_k, major_timestep,
+        l1_area_geojson, l1_active_timesteps, 
+        l2_asset_geojson, l2_active_timesteps,
+        verbose=verbose  
     )
     _config = init['config']
     root_dir = init['root_dir']
@@ -741,7 +869,9 @@ def simulate_asset_damage_recovery_access_breakdown(
     num_assets = init['num_assets']
     asset_type = init['asset_type']
     fragility_param_k = init['fragility_param_k']
-    
+    depth_reductions = init['depth_reductions']  
+    l1_area_geojson = init['l1_area_geojson']  
+
     # Get caches from initialization
     accessibility_cache = init['accessibility_cache']
     hazard_extraction_cache = init['hazard_extraction_cache']
@@ -761,18 +891,35 @@ def simulate_asset_damage_recovery_access_breakdown(
     
     island_method_active = 'island' in repair_crew_assignment_method
     if island_method_active:
-        access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths = match_assets_access(state.temp_gdf, hazard_threshold=flood_threshold, hazard_column='EV0_ma',
-                       config=_config, island_cache=island_cache, cache_dir=interim_dir, hazard_dir=hazard_dir)
-        state.temp_gdf['access_rfid'] = access_rfids
-        if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
-            asset_impact_map = {
-                aid: sum(area * rate for (lu, area, rate) in asset_to_lu[aid])
-                for aid in asset_to_lu
-            }
-        elif 'population' in repair_crew_assignment_method and asset_population_map is not None:
-            asset_impact_map = asset_population_map
+        access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths = match_assets_access(
+            gdf_assets, 
+            hazard_threshold=flood_threshold, 
+            hazard_column='EV0_ma',
+            config=_config, 
+            island_cache=island_cache, 
+            cache_dir=interim_dir, 
+            hazard_dir=hazard_dir,
+            l1_area_geojson=l1_area_geojson  
+        )
+        gdf_assets['access_rfid'] = access_rfids
+        if isinstance(number_repair_crews, int):
+            available_repair_crews = {0: number_repair_crews}
+            # print(f"Initialized island method with {number_repair_crews} crews in temporary island 0")
         else:
-            asset_impact_map = None
+            available_repair_crews = number_repair_crews
+
+    else:
+        available_repair_crews = number_repair_crews
+
+    if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
+        asset_impact_map = {
+            aid: sum(area * rate for (lu, area, rate) in asset_to_lu[aid])
+            for aid in asset_to_lu
+        }
+    elif 'population' in repair_crew_assignment_method and asset_population_map is not None:
+        asset_impact_map = asset_population_map
+    else:
+        asset_impact_map = None
 
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
@@ -783,10 +930,13 @@ def simulate_asset_damage_recovery_access_breakdown(
                 
         # 1. Process hazard map and update state if on major timestep
         available_repair_crews, previous_rfids_islands, previous_map_counter, flooded_mask, timestep_cache_updated = _process_timestep(
-            state, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
-            accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, boundary_islands_rfids,
-            interim_dir, hazard_dir, available_repair_crews, previous_rfids_islands, previous_map_counter,
-            asset_type, num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k 
+            state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
+            accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
+            boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
+            available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
+            num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
+            depth_reductions=depth_reductions,
+            l1_area_geojson=l1_area_geojson
         )
         
         # Merge cache updates
