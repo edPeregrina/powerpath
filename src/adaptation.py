@@ -217,24 +217,26 @@ def build_l1_l2_reduction_array(
             l1_gdf = l1_gdf.to_crs(gdf_assets.crs)
         
         if "depth_red" not in l1_gdf.columns:
-            # Default depth reduction if not specified
             l1_gdf['depth_red'] = 0.3
             print("Warning: L1 GeoJSON missing 'depth_red' column, using default 0.3m")
         
         # Build STRtree from ASSETS (larger dataset)
         asset_tree = shapely.STRtree(gdf_assets.geometry.values)
         
-        # Find assets protected by L1
         l1_per_asset = np.zeros(n_assets, dtype=np.float32)
         
         for l1_idx, l1_row in l1_gdf.iterrows():
             l1_geom = l1_row.geometry
             l1_depth_red = l1_row['depth_red']
             
-            intersecting_asset_indices = asset_tree.query(l1_geom, predicate='intersects')
+            # BROAD-PHASE: Get candidates from spatial index
+            candidate_indices = asset_tree.query(l1_geom, predicate='intersects')
             
-            for asset_idx in intersecting_asset_indices:
-                l1_per_asset[asset_idx] = max(l1_per_asset[asset_idx], l1_depth_red)
+            # NARROW-PHASE: Verify actual intersection
+            for asset_idx in candidate_indices:
+                asset_geom = gdf_assets.geometry.iloc[asset_idx]
+                if asset_geom.intersects(l1_geom):  # ✅ Actual geometry check
+                    l1_per_asset[asset_idx] = max(l1_per_asset[asset_idx], l1_depth_red)
         
         # Apply to specified timesteps
         for timestep in l1_active_timesteps:
@@ -243,7 +245,7 @@ def build_l1_l2_reduction_array(
         
         if verbose:
             print(f"Applied L1 to {np.count_nonzero(l1_per_asset)} assets at {len(l1_active_timesteps)} timesteps")
-    
+
     # L2: Asset-specific depth reductions (GeoJSON approach)
     if l2_asset_geojson is not None and l2_active_timesteps is not None:
         l2_gdf = (gpd.read_file(l2_asset_geojson) 
@@ -277,11 +279,20 @@ def build_l1_l2_reduction_array(
             for asset_idx, (idx, asset_row) in enumerate(gdf_assets.iterrows()):
                 asset_geom = asset_row.geometry
                 
-                intersecting_l2_indices = l2_tree.query(asset_geom, predicate='intersects')
+                # BROAD-PHASE: Get candidates
+                candidate_indices = l2_tree.query(asset_geom, predicate='intersects')
                 
-                if len(intersecting_l2_indices) > 0:
-                    l2_per_asset[asset_idx] = l2_gdf.iloc[intersecting_l2_indices]['depth_red'].max()
-        
+                # NARROW-PHASE: Verify actual intersection
+                if len(candidate_indices) > 0:
+                    max_reduction = 0
+                    for l2_idx in candidate_indices:
+                        l2_geom = l2_gdf.geometry.iloc[l2_idx]
+                        if asset_geom.intersects(l2_geom):  # ✅ Actual geometry check
+                            max_reduction = max(max_reduction, l2_gdf.iloc[l2_idx]['depth_red'])
+                    
+                    if max_reduction > 0:
+                        l2_per_asset[asset_idx] = max_reduction
+                                
         # Apply to specified timesteps
         for timestep in l2_active_timesteps:
             if 0 <= timestep < n_timesteps:
