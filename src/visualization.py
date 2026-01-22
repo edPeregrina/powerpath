@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
 from matplotlib.backends.backend_pdf import PdfPages
+from ema_workbench.analysis.plotting import lines
+from matplotlib.patches import Wedge
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+import contextily as ctx
 
 def plot_simulation_results_summary(results_df, gdf_assets, config=None, save_path=None):
     """
@@ -323,8 +328,6 @@ def print_simulation_summary(results_df, gdf_assets, config=None):
         peak_backlog = results_df['total_repair_backlog'].max()
         print(f"Repair backlog: Start={initial_backlog:.1f}hrs, Peak={peak_backlog:.1f}hrs, End={final_backlog:.1f}hrs")
     
-    print("=" * 70)
-
 def create_comprehensive_visualization(results_df, gdf_assets, config=None, save_path=None):
     """
     Create comprehensive 2x3 visualization for publication/reporting.
@@ -463,8 +466,6 @@ def create_comprehensive_visualization(results_df, gdf_assets, config=None, save
     
     return fig
 
-
-
 def save_all_visualizations(results_df, gdf_assets, config, output_dir):
     """
     Generate and save all visualization types to the output directory.
@@ -535,3 +536,511 @@ def save_all_visualizations(results_df, gdf_assets, config, output_dir):
     
     return saved_files
 
+
+def plot_population_and_landuse(
+    population_above_0,
+    sizes,
+    voronoi_gdf,
+    gdf_assets,
+    asset_land_use_map,
+):
+    """
+    Plot population distribution and land use distribution as pie charts on Voronoi polygons.
+
+    Parameters
+    ----------
+    population_above_0 : GeoDataFrame
+        Population polygons with nonzero population.
+    sizes : Series
+        Marker sizes for population points.
+    voronoi_gdf : GeoDataFrame
+        Voronoi polygons with asset_id and pop_map columns.
+    gdf_assets : GeoDataFrame
+        Asset polygons.
+    asset_land_use_map : dict
+        Mapping from asset_id to land use dict.
+    """
+    categories = ['residential', 'commercial', 'industrial', 'transport', 'public_sector']
+    colors = ['#ede342', '#d34552', '#a52cbe', '#30123b', '#4770e8']
+    crs = voronoi_gdf.crs
+
+    fig, ax = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Left plot: Population distribution
+    centroids = population_above_0.geometry.centroid
+    ax[0].scatter(centroids.x, centroids.y, s=sizes, alpha=0.6, c='darkblue', edgecolors='k', linewidth=0.5)
+    voronoi_gdf.plot(ax=ax[0], alpha=0.5, edgecolor='k', column='pop_map', cmap='viridis', legend=True)
+    ax[0].set_title('Population Distribution & Voronoi Service Areas')
+    ax[0].set_aspect('equal')
+
+    # Right plot: Land use distribution as pie charts
+    voronoi_gdf.plot(ax=ax[1], alpha=0.3, edgecolor='k', facecolor='lightgray')
+
+    # Get asset centroids for plotting
+    asset_centroids = gdf_assets.to_crs(crs).geometry.centroid
+
+    # Calculate max_total from ALL assets (not just those in voronoi_gdf order)
+    all_totals = []
+    for aid in asset_land_use_map.keys():
+        total = sum([asset_land_use_map[aid].get(cat, 0) for cat in categories])
+        if total > 0:
+            all_totals.append(total)
+    max_total = max(all_totals) if all_totals else 1.0
+
+    # Track statistics
+    assets_with_data = 0
+    assets_without_data = 0
+    assets_not_in_map = 0
+
+    # Plot ALL assets (remove max_pies limit)
+    for idx, row in voronoi_gdf.iterrows():
+        asset_id = row['asset_id']
+
+        if asset_id not in asset_land_use_map:
+            assets_not_in_map += 1
+            continue
+
+        lu_data = asset_land_use_map[asset_id]
+        values = [lu_data.get(cat, 0) for cat in categories]
+        total = sum(values)
+
+        # Get centroid position
+        centroid = asset_centroids[gdf_assets.index == asset_id].iloc[0]
+
+        if total > 0:
+            assets_with_data += 1
+
+            # Scale radius based on total
+            radius = (total / max_total) * 150
+
+            # Create wedges
+            angles = [0]
+            for val in values:
+                angles.append(angles[-1] + (val / total) * 360 if total > 0 else angles[-1])
+
+            for i, (cat, color) in enumerate(zip(categories, colors)):
+                if values[i] > 0:
+                    wedge = Wedge(
+                        (centroid.x, centroid.y),
+                        radius,
+                        angles[i],
+                        angles[i+1],
+                        facecolor=color,
+                        edgecolor='k',
+                        linewidth=0.2,
+                        alpha=0.8
+                    )
+                    ax[1].add_patch(wedge)
+        else:
+            assets_without_data += 1
+            # Plot a small marker for assets with no land use data
+            ax[1].plot(centroid.x, centroid.y, 'x', color='black', markersize=4, alpha=0.8)
+
+    # Print diagnostics
+    print(f"\nLand Use Visualization Statistics:")
+    print(f"  Total voronoi polygons: {len(voronoi_gdf)}")
+    print(f"  Assets with land use data: {assets_with_data}")
+    print(f"  Assets without land use data: {assets_without_data}")
+    print(f"  Assets not in mapping: {assets_not_in_map}")
+    print(f"  Total in asset_land_use_map: {len(asset_land_use_map)}")
+
+    ax[1].set_title(f'Land Use Distribution ({assets_with_data} assets with data, {assets_without_data} without)')
+    ax[1].set_aspect('equal')
+    ax[1].autoscale()
+
+    legend_elements = [Patch(facecolor=colors[i], label=categories[i].replace('_', ' ').title())
+                       for i in range(len(categories))]
+    # Use Line2D for marker-based legend entry
+    legend_elements.append(Line2D([0], [0], marker='x', color='w', markerfacecolor='black',
+                                   markersize=8, label='No land use data'))
+    ax[1].legend(handles=legend_elements, loc='upper right')
+
+    # Add basemap to both subplots
+    ctx.add_basemap(ax[0], crs=crs, source=ctx.providers.OpenStreetMap.Mapnik, zoom=15, alpha=0.5)
+    ctx.add_basemap(ax[1], crs=crs, source=ctx.providers.OpenStreetMap.Mapnik, zoom=15, alpha=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+def aggregate_outcomes(outcomes, outcomes_to_show):
+    """
+    Aggregate 3D outcomes (n_experiments, n_timesteps, n_assets) to 2D.
+    Leave 1D and 2D outcomes unchanged.
+    Returns a dict indicating which outcomes were aggregated.
+    """
+    aggregation_info = {}
+    
+    for key in outcomes_to_show:
+        if key not in outcomes:
+            print(f"Warning: Outcome '{key}' not found in outcomes dictionary")
+            aggregation_info[key] = 'missing'
+            continue
+        
+        arr = outcomes[key]
+        original_shape = arr.shape
+        
+        if arr.ndim == 3:  # (n_experiments, n_timesteps, n_assets)
+            print(f"Aggregating 3D outcome '{key}' from {arr.shape} -> mean across assets")
+            outcomes[key] = arr.mean(axis=2)  # -> (n_experiments, n_timesteps)
+            aggregation_info[key] = f'aggregated from {original_shape}'
+        elif arr.ndim == 2:  # (n_experiments, n_timesteps)
+            aggregation_info[key] = 'already 2D'
+        elif arr.ndim == 1:  # (n_timesteps,) - Used only to handle no impacts case
+            print(f"Outcome '{key}' is 1D {arr.shape}!!!")
+            # Broadcast to 2D by repeating for all experiments
+            n_experiments = len(outcomes[list(outcomes.keys())[0]])
+            outcomes[key] = np.tile(arr, (n_experiments, 1))
+            aggregation_info[key] = f'broadcast from {original_shape}'
+        else:
+            print(f"Warning: Outcome '{key}' has unexpected shape {arr.shape}")
+            aggregation_info[key] = f'unexpected shape {original_shape}'
+    
+    return aggregation_info
+
+
+def sample_experiments(var_val, experiments_df):    
+    """Sample experiments based on variable values."""
+    mask = pd.Series([True] * len(experiments_df))
+    for var, val in var_val.items():
+        if isinstance(val, tuple) and len(val) == 2:
+            # Range filter
+            mask &= (experiments_df[var] >= val[0]) & (experiments_df[var] <= val[1])
+        elif isinstance(val, list):
+            # List of values filter
+            mask &= experiments_df[var].isin(val)
+        else:
+            # Exact match filter
+            mask &= (experiments_df[var] == val)
+    return experiments_df[mask]
+
+# Bin creation helpers
+def create_float_bins(min_val, max_val, bin_size):
+    bins = []
+    val = min_val
+    while val < max_val:
+        bins.append((val, val + bin_size))
+        val += bin_size
+    return bins
+
+def create_bins(min_val, max_val, bin_size):
+    bins = []
+    start = min_val
+    while start <= max_val:
+        end = min(start + bin_size - 1, max_val)
+        bins.append((start, end))
+        start = end + 1
+    return bins
+
+def filter_valid_bins_for_outcomes(experiments_df, outcomes, outcomes_to_show, group_by, bin_ranges):
+    """Filter bins to ensure they contain valid data for all specified outcomes."""
+    valid_bins = []
+    for bin_range in bin_ranges:
+        mask = (experiments_df[group_by] >= bin_range[0]) & (experiments_df[group_by] <= bin_range[1])
+        experiment_indices = np.where(mask)[0]
+        count = len(experiment_indices)
+        
+        if count == 0:
+            print(f"Bin {bin_range}: No experiments")
+            continue
+        
+        all_valid = True
+        for outcome_name in outcomes_to_show:
+            if outcome_name not in outcomes:
+                print(f"Warning: Outcome '{outcome_name}' not found")
+                all_valid = False
+                break
+            
+            outcome_data = outcomes[outcome_name][experiment_indices]
+            
+            if outcome_data.size == 0 or np.all(np.isnan(outcome_data)):
+                print(f"Bin {bin_range}: Empty/NaN data for '{outcome_name}'")
+                all_valid = False
+                break
+        
+        if all_valid:
+            valid_bins.append(bin_range)
+            print(f"Bin {bin_range}: {count} experiments - VALID")
+        else:
+            print(f"Bin {bin_range}: {count} experiments - INVALID")
+    
+    return valid_bins
+
+# Better label formatting function
+def format_outcome_label(outcome_name):
+    """Convert outcome names to readable labels."""
+    # Handle monetary outcomes
+    if outcome_name.startswith('monetary_impact_'):
+        category = outcome_name.replace('monetary_impact_', '')
+        if category == 'total':
+            return 'Total Economic Impact'
+        else:
+            return f'{category.replace("_", " ").title()} Economic Impact'
+    
+    # Handle population outcomes
+    elif 'population' in outcome_name:
+        return outcome_name.replace('_', ' ').title()
+    
+    # Handle asset-level outcomes
+    elif outcome_name in ['flooded', 'operational', 'unreachable', 'accessible', 'crew_assigned']:
+        return f'{outcome_name.title()} Assets (Mean)'
+    
+    elif outcome_name in ['damage_ratio', 'repair_time', 'hazard_value']:
+        return f'{outcome_name.replace("_", " ").title()} (Mean)'
+    
+    else:
+        return outcome_name.replace('_', ' ').title()
+    
+
+def plot_grouped_outcomes(
+    group_by,
+    experiments_df,
+    outcomes,
+    outcomes_to_show,
+    var_val=None,
+    bin_ranges=None,
+    monetary_outcomes=None,
+    population_outcomes=None,
+    asset_outcomes_3d=None,
+    asset_outcomes_2d=None,
+):
+    """
+    Plot grouped outcomes for a given grouping variable.
+
+    Parameters
+    ----------
+    group_by : str
+        The variable to group by (e.g., "policy", "number_repair_crews", etc.)
+    experiments_df : pd.DataFrame
+        DataFrame of experiments.
+    outcomes : dict
+        Dictionary of outcome arrays.
+    outcomes_to_show : list
+        List of outcome names to plot.
+    var_val : dict, optional
+        Dictionary of filters to apply to experiments_df.
+    bin_ranges : list or None, optional
+        Bin ranges for grouping (if not grouping by policy).
+    monetary_outcomes, population_outcomes, asset_outcomes_3d, asset_outcomes_2d : list, optional
+        Lists of outcome names for special formatting.
+    """
+    # Filter experiments DataFrame for the desired value
+    experiments_sample = sample_experiments(var_val, experiments_df) if var_val else experiments_df
+    sample_indices = experiments_sample.index.values
+
+    # Filter outcomes for these indices
+    outcomes_for_sample = {k: v[sample_indices] for k, v in outcomes.items()}
+
+    # Validate bins
+    if group_by == "policy":
+        valid_bins = None
+        bins = None
+    else:
+        valid_bins = filter_valid_bins_for_outcomes(
+            experiments_sample, 
+            outcomes_for_sample, 
+            outcomes_to_show,
+            group_by, 
+            bin_ranges
+        )
+        bins = bin_ranges
+
+    # Plot outcomes
+    if valid_bins:
+        try:
+            fig, axes = lines(
+                experiments_sample,
+                outcomes_for_sample,
+                outcomes_to_show=outcomes_to_show,
+                group_by=group_by,
+                titles={outcome: format_outcome_label(outcome) for outcome in outcomes_to_show},
+                grouping_specifiers=valid_bins,
+                legend=True,
+                show_envelope=False,
+            )
+        except ValueError as e:
+            print(f"Error: {e}\nRetrying without envelope...")
+            fig, axes = lines(
+                experiments_sample,
+                outcomes_for_sample,
+                outcomes_to_show=outcomes_to_show,
+                group_by=group_by,
+                titles={outcome: format_outcome_label(outcome) for outcome in outcomes_to_show},
+                grouping_specifiers=valid_bins,
+                legend=True,
+                show_envelope=False,
+            )
+    else:
+        fig, axes = lines(
+                experiments_sample,
+                outcomes_for_sample,
+                outcomes_to_show=outcomes_to_show,
+                group_by=group_by,
+                titles={outcome: format_outcome_label(outcome) for outcome in outcomes_to_show},
+                legend=True,
+                show_envelope=True,
+            )
+    # Style plots differently for different outcome types
+    for outcome_name, ax in axes.items():
+        for line in ax.get_lines():
+            line.set_linewidth(0.1)
+            line.set_alpha(0.8)
+        
+        # Special formatting for monetary outcomes (cumulative, so should be monotonically increasing)
+        if monetary_outcomes and outcome_name in monetary_outcomes:
+            ax.set_ylabel('Cumulative Economic Impact (€)')
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'€{x:,.0f}'))
+            
+        elif population_outcomes and outcome_name in population_outcomes:
+            ax.set_ylabel('Population')
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:,.0f}'))
+            
+        elif asset_outcomes_3d and outcome_name in asset_outcomes_3d:
+            # These are mean counts of binary states (flooded/operational)
+            ax.set_ylabel('Mean Asset Count')
+            
+        elif asset_outcomes_2d and outcome_name in asset_outcomes_2d:
+            # These are already aggregated means (damage_ratio, repair_time)
+            if 'ratio' in outcome_name:
+                ax.set_ylabel('Mean Damage Ratio')
+            elif 'time' in outcome_name:
+                ax.set_ylabel('Mean Repair Time (hours)')
+            else:
+                ax.set_ylabel('Mean Value')        
+        else:
+            ax.set_ylabel('Value')
+        
+        # Common styling
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_xlabel('Timestep (hours)')
+
+    fig.set_size_inches(14, len(axes)*4)
+    plt.show()
+
+    # Print summary of what was actually plotted
+    print("\n")
+    print("Plot summary:")
+    print(f"\nGrouped by: {group_by}")
+    print(f"Number of bins: {len(valid_bins) if valid_bins is not None else 'N/A'}")
+    print(f"\nOutcomes plotted:")
+    for outcome in outcomes_to_show:
+        dim = 'missing'
+        if outcome in outcomes:
+            shape = outcomes[outcome].shape
+            if outcomes[outcome].ndim == 2:
+                dim = f'2D ({shape[0]} experiments x {shape[1]} timesteps)'
+            elif outcomes[outcome].ndim == 3:
+                dim = f'3D ({shape[0]} x {shape[1]} x {shape[2]}) - Should be aggregated'
+            else:
+                dim = f'{outcomes[outcome].ndim}D {shape}'
+        
+        category = ''
+        if monetary_outcomes and outcome in monetary_outcomes:
+            category = 'Monetary (cumulative)'
+        elif population_outcomes and outcome in population_outcomes:
+            category = 'Population'
+        elif asset_outcomes_3d and outcome in asset_outcomes_3d:
+            category = 'Asset (3D→2D aggregated)'
+        elif asset_outcomes_2d and outcome in asset_outcomes_2d:
+            category = 'Asset (2D pre-aggregated)'
+        
+        print(f"  • {outcome:40s} {category:30s} {dim}")
+
+    print("\n")
+    if monetary_outcomes:
+        print("Monetary impact")
+        for mon_outcome in monetary_outcomes:
+            if mon_outcome in outcomes:
+                final_values = outcomes[mon_outcome][:, -1]  # Last timestep
+                print(f"\n{mon_outcome}:")
+                print(f"  Shape: {outcomes[mon_outcome].shape}")
+                print(f"  Min final value: €{final_values.min():,.2f}")
+                print(f"  Max final value: €{final_values.max():,.2f}")
+                print(f"  Mean final value: €{final_values.mean():,.2f}")
+                print(f"  Non-zero scenarios: {(final_values > 0).sum()} / {len(final_values)}")
+            else:
+                print(f"\n{mon_outcome}: NOT FOUND IN OUTCOMES!")
+
+def compare_adaptation_policies(experiments_df, outcomes):
+    """
+    Simple comparison of adaptation policies.
+    """
+    
+    print("Impact results - all experiments (n={}):".format(len(experiments_df)))
+    print("Number of policies: {}".format(experiments_df['policy'].nunique()))
+    
+    monetary_outcomes = [
+        'monetary_impact_total',
+        'monetary_impact_residential',
+        'monetary_impact_commercial',
+        'monetary_impact_industrial',
+        'monetary_impact_transport',
+        'monetary_impact_public_sector',
+    ]
+    
+    # Print summary for each monetary outcome 
+    for outcome in monetary_outcomes:
+        if outcome in outcomes:      
+            # Calculate hourly impacts
+            hourly_impacts = np.diff(outcomes[outcome], axis=1, prepend=0)
+            peak_hourly = np.max(hourly_impacts)
+            
+            # Final cumulative impact per scenario
+            final_cumulative_per_scenario = outcomes[outcome][:, -1]
+            total_impact = np.mean(final_cumulative_per_scenario)
+            median_impact = np.median(final_cumulative_per_scenario)
+            
+            print(f"\n{outcome.replace('_', ' ').title()}:")
+            print(f"  - Peak hourly impact: €{peak_hourly:,.2f}")
+            print(f"  - Total impact (mean): €{total_impact:,.2f}")
+            print(f"  - Total impact (median): €{median_impact:,.2f}")
+    
+    # Compare by policy
+    policy_names = experiments_df['policy'].unique()
+    
+    if len(policy_names) > 1:
+        print("\n\nAdaptation Policy Comparison")
+
+        for policy in policy_names:
+            policy_idx = experiments_df['policy'] == policy
+            # Get final cumulative values for this policy
+            final_values = outcomes['monetary_impact_total'][policy_idx, -1]
+            policy_total = np.mean(final_values)
+            policy_std = np.std(final_values)
+            print(f"  {policy}: €{policy_total:,.2f} (±€{policy_std:,.2f})")
+        print("")
+        
+        for policy in policy_names:
+
+            print("Detailed results for policy: {}".format(policy))
+            # Get integer indices instead of boolean mask
+            policy_idx = np.where(experiments_df['policy'] == policy)[0]
+            n_scenarios = len(policy_idx)
+            
+            print(f"-- {policy} (n={n_scenarios}):")
+            
+            # Monetary impacts
+            final_values = outcomes['monetary_impact_total'][policy_idx, -1]
+            policy_total = np.mean(final_values)
+            policy_std = np.std(final_values)
+            print(f"  Total monetary impact: €{policy_total:,.2f} (±€{policy_std:,.2f})")
+            
+            # Operational metrics
+            peak_flooded = outcomes['flooded'][policy_idx].max(axis=1).mean()
+            min_operational = outcomes['operational'][policy_idx].min(axis=1).mean()
+            try:
+                peak_unreachable = outcomes['unreachable'][policy_idx].max(axis=1).mean()
+            except KeyError:
+                peak_unreachable = None
+            
+            print(f"  Peak flooded assets: {peak_flooded:.1f}")
+            print(f"  Min operational assets: {min_operational:.1f}")
+            if peak_unreachable is not None:
+                print(f"  Peak unreachable assets: {peak_unreachable:.1f}")
+            
+            # Population impact
+            if 'affected_population' in outcomes:
+                peak_affected_pop = outcomes['affected_population'][policy_idx].max(axis=1).mean()
+                print(f"  Peak affected population: {peak_affected_pop:,.0f}")
+            print("")

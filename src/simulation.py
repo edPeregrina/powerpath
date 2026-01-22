@@ -13,7 +13,6 @@ from src.island_analysis import match_island_ids_assets, match_assets_access, up
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
 from src.caching import create_accessibility_cache_key, create_island_cache_key, get_asset_centroid_hash
-import src.grid_based_accessibility_hex as grid_hex
 from src.adaptation import build_l1_l2_reduction_array, _build_adaptation_arrays_cached
 
 # Import hazard extraction method from config
