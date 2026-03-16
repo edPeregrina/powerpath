@@ -40,7 +40,7 @@ def _update_hazard_map_states(
     hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
-    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None
+    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -67,6 +67,8 @@ def _update_hazard_map_states(
         verbose (bool): If True, print detailed simulation information
         fragility_param_k (float or None): Parameter k for the fragility function, if applicable
         depth_reductions (np.ndarray or None): 2D array of flood depth reductions
+        l1_area_geojson (str or GeoDataFrame or None): Path to L1 adaptation GeoJSON or GeoDataFrame, if applicable
+        l1_active_timesteps (list or None): List of timesteps when L1 adaptation is active, or None for all timesteps
 
     Returns:
         tuple: Updated available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated (dictionary of updated caches)
@@ -123,7 +125,8 @@ def _update_hazard_map_states(
             haz_col_str, 
             flood_threshold, 
             asset_hash,
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=l1_area_geojson,
+            l1_active_timesteps=l1_active_timesteps
         )
         if cache_key in island_cache:
             island_data = island_cache[cache_key]
@@ -146,7 +149,8 @@ def _update_hazard_map_states(
                     island_cache=island_cache,
                     cache_dir=interim_dir,
                     hazard_dir=hazard_dir,
-                    l1_area_geojson=l1_area_geojson  
+                    l1_area_geojson=l1_area_geojson,
+                    l1_active_timesteps=l1_active_timesteps  
                 )
                 state.island_ids = asset_island_ids
                 # Assign island for each asset for the current state
@@ -177,7 +181,8 @@ def _update_hazard_map_states(
                 hazard_dir=hazard_dir,
                 _config=_config,
                 cache_updated=cache_updated,
-                l1_area_geojson=l1_area_geojson
+                l1_area_geojson=l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps
             )
 
             previous_map_counter = map_counter
@@ -619,7 +624,7 @@ def _process_timestep(
     boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
     available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
-    depth_reductions=None, l1_area_geojson=None  
+    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -632,7 +637,8 @@ def _process_timestep(
             previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
             fragility_param_k=fragility_param_k, 
             depth_reductions=depth_reductions,  
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=l1_area_geojson, 
+            l1_active_timesteps=l1_active_timesteps
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -935,7 +941,8 @@ def simulate_asset_damage_recovery_access_breakdown(
             available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
             num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
             depth_reductions=depth_reductions,
-            l1_area_geojson=l1_area_geojson
+            l1_area_geojson=l1_area_geojson,
+            l1_active_timesteps=l1_active_timesteps
         )
         
         # Merge cache updates

@@ -207,6 +207,12 @@ def build_l1_l2_reduction_array(
     n_assets = len(gdf_assets)
     reductions = np.zeros((n_timesteps, n_assets, 2), dtype=np.float32)
     
+    # Convert None to all timesteps
+    if l1_active_timesteps is None:
+        l1_active_timesteps = list(range(n_timesteps))
+    if l2_active_timesteps is None:
+        l2_active_timesteps = list(range(n_timesteps))
+
     # L1: Area-based depth reductions
     if l1_area_geojson is not None and l1_active_timesteps is not None:
         l1_gdf = (gpd.read_file(l1_area_geojson) 
@@ -235,7 +241,7 @@ def build_l1_l2_reduction_array(
             # NARROW-PHASE: Verify actual intersection
             for asset_idx in candidate_indices:
                 asset_geom = gdf_assets.geometry.iloc[asset_idx]
-                if asset_geom.intersects(l1_geom):  # ✅ Actual geometry check
+                if asset_geom.intersects(l1_geom):  # Actual geometry check
                     l1_per_asset[asset_idx] = max(l1_per_asset[asset_idx], l1_depth_red)
         
         # Apply to specified timesteps
@@ -287,7 +293,7 @@ def build_l1_l2_reduction_array(
                     max_reduction = 0
                     for l2_idx in candidate_indices:
                         l2_geom = l2_gdf.geometry.iloc[l2_idx]
-                        if asset_geom.intersects(l2_geom):  # ✅ Actual geometry check
+                        if asset_geom.intersects(l2_geom):  # Actual geometry check
                             max_reduction = max(max_reduction, l2_gdf.iloc[l2_idx]['depth_red'])
                     
                     if max_reduction > 0:

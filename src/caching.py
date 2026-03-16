@@ -249,16 +249,17 @@ def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
         print(f"No hazard extraction cache found at {cache_file}")
         return {}
 
-def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1_area_geojson=None):
+def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1_area_geojson=None, l1_active_timesteps=None):
     """
     Create a standardized cache key for island assignment, including asset count and bounds.
-    L1 adaptation hash is appended ONLY if L1 is active (backward compatible).
+    L1 adaptation hash (including timesteps) is appended ONLY if L1 is active (backward compatible).
     
     Args:
         hazard_column (str): The hazard column name (e.g., 'EV1_ma')
-        hazard_threshold (float): The hazard threshold value (e.g., 0.2)
+        hazard_threshold (float): The hazard value threshold
         asset_hash (str, optional): Hash of the asset geodataframe for uniqueness
         l1_area_geojson (str/Path/GeoDataFrame, optional): L1 adaptation for cache invalidation
+        l1_active_timesteps (list of int, optional): Timesteps when L1 is active (None = all)
         
     Returns:
         str: Standardized cache key
@@ -268,31 +269,41 @@ def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1
 
     key = f"island_assignment_{hazard_column}_{hazard_threshold}_{asset_hash}"
     
-    # Append L1 hash if adaptation is active 
+    # Append L1 hash (including timesteps) if adaptation is active
     if l1_area_geojson is not None:
-        l1_hash = _compute_l1_hash(l1_area_geojson)
-        key = f"{key}_L1{l1_hash}"  # Use L1 to distinguish from other suffixes
+        l1_hash = _compute_l1_hash(l1_area_geojson, l1_active_timesteps)
+        key = f"{key}_L1{l1_hash}"
     
     return key
 
-def _compute_l1_hash(l1_area_geojson):
-    """Helper function to compute L1 hash for cache key."""    
+
+def _compute_l1_hash(l1_area_geojson, l1_active_timesteps=None):
+    """Helper function to compute L1 hash for cache key, including timesteps."""    
+    # Build timestep component
+    if l1_active_timesteps is None:
+        ts_str = "all"
+    else:
+        ts_str = str(sorted(l1_active_timesteps))  # Ensure consistent ordering
+    
+    # Build geometry component
     if isinstance(l1_area_geojson, (str, Path)):
         l1_path = Path(l1_area_geojson)
         if l1_path.exists():
             l1_mtime = l1_path.stat().st_mtime
-            l1_str = f"{l1_path.name}_{l1_mtime}"
+            geom_str = f"{l1_path.name}_{l1_mtime}"
         else:
-            l1_str = str(l1_path)
+            geom_str = str(l1_path)
     else:
         if isinstance(l1_area_geojson, gpd.GeoDataFrame):
             bounds_str = str(l1_area_geojson.total_bounds)
             depth_str = str(l1_area_geojson['depth_red'].sum()) if 'depth_red' in l1_area_geojson.columns else ''
-            l1_str = bounds_str + depth_str
+            geom_str = bounds_str + depth_str
         else:
-            l1_str = str(id(l1_area_geojson))
+            geom_str = str(id(l1_area_geojson))
     
-    l1_hash = hashlib.md5(l1_str.encode()).hexdigest()[:8]
+    # Combine geometry and timesteps for final hash
+    combined_str = geom_str + ts_str
+    l1_hash = hashlib.md5(combined_str.encode()).hexdigest()[:8]
     return l1_hash
 
 def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
@@ -347,10 +358,10 @@ def load_island_cache(cache_dir, hazard_dir=None):
         print(f"No island cache found at {cache_file}")
         return {}
 
-def create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir, l1_area_geojson=None):
+def create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir, l1_area_geojson=None, l1_active_timesteps=None):
     """
     Create cache key for overlap computations between maps.
-    Now includes L1 hash when adaptations are active.
+    Now includes L1 hash (with timesteps) when adaptations are active.
     
     Parameters:
     -----------
@@ -364,13 +375,15 @@ def create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard
         Hazard directory path
     l1_area_geojson : str or Path, optional
         Path to L1 adaptation GeoJSON (if active)
+    l1_active_timesteps : list of int, optional
+        Timesteps when L1 is active (None = all)
     """
     hazard_dir_name = Path(hazard_dir).name if hazard_dir else "default"
     base_key = f"overlap_{previous_map}_{current_map}_{hazard_threshold}_{hazard_dir_name}"
     
-    # Add L1 hash if adaptations are active
+    # Add L1 hash (including timesteps) if adaptations are active
     if l1_area_geojson is not None:
-        l1_hash = _compute_l1_hash(l1_area_geojson)
+        l1_hash = _compute_l1_hash(l1_area_geojson, l1_active_timesteps)
         base_key += f"_L1{l1_hash}"
     
     return base_key

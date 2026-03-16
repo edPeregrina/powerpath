@@ -342,7 +342,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
 def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, 
                             hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
                             island_cache=None, cache_dir=None, hazard_dir=None,
-                            l1_area_geojson=None):
+                            l1_area_geojson=None, l1_active_timesteps=None):
        
     """
     Match assets to island IDs based on spatial intersection with road network islands.
@@ -361,7 +361,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             hazard_column, 
             hazard_threshold, 
             asset_hash,
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=l1_area_geojson, 
+            l1_active_timesteps=l1_active_timesteps  
         )
         
         # Check if this computation is already cached
@@ -443,7 +444,8 @@ def update_repair_crew_islands(
     hazard_dir=None, 
     _config=None, 
     cache_updated=None,
-    l1_area_geojson=None
+    l1_area_geojson=None,
+    l1_active_timesteps=None
 ):
     """
     Distribute repair crews by island, based on road feature lengths.
@@ -461,6 +463,8 @@ def update_repair_crew_islands(
     - hazard_dir: directory path for hazard data (used in caching)
     - _config: configuration dictionary (used in caching)
     - cache_updated: dict to track if cache was updated (used in caching)
+    - l1_area_geojson: Path to L1 adaptation GeoJSON (if active)
+    - l1_active_timesteps: List of timesteps when L1 is active, or None for all timesteps
     """
     try:
         # First round: crews as int
@@ -565,8 +569,12 @@ def update_repair_crew_islands(
                 previous_map is not None and hazard_threshold is not None):
                 
                 overlap_cache_key = create_overlap_cache_key(
-                    previous_map, current_map, hazard_threshold, hazard_dir,
-                    l1_area_geojson=l1_area_geojson
+                    previous_map, 
+                    current_map, 
+                    hazard_threshold, 
+                    hazard_dir,
+                    l1_area_geojson=l1_area_geojson,
+                    l1_active_timesteps=l1_active_timesteps
                 )
 
                 if overlap_cache_key in overlap_cache:
