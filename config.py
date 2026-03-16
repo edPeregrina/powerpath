@@ -86,6 +86,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
     else:
         # Default hazard directory paths (in order of preference)
         hazard_dir_options = [
+            root_dir / 'raw_data' / 'ZH_Delfland_interpolated_timesteps_tif' / 'hazard_maps_ZH_Delfland',            
             root_dir / 'raw_data' / 'ZH_Delfland' / 'hazard_maps_ZH_Delfland',
             Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\hazard_maps_ZH_Delfland'),
             # Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\timeseries_data\reprojected'),
