@@ -385,6 +385,9 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
             elif method == 'highest repair time':
                 sorted_indices = np.argsort(-repair_time[repairable_assets])
                 repair_crews_assigned[repairable_assets_indices[sorted_indices[:available_repair_crews]]] = True
+            elif 'impact' in method:
+                sorted_indices = np.argsort(-np.array([asset_impact_map.get(idx, 0) for idx in repairable_assets_indices]))
+                repair_crews_assigned[repairable_assets_indices[sorted_indices[:available_repair_crews]]] = True
             
             newly_assigned_crews = available_repair_crews
             available_repair_crews -= newly_assigned_crews
@@ -915,6 +918,9 @@ def simulate_asset_damage_recovery_access_breakdown(
 
     else:
         available_repair_crews = number_repair_crews
+        rfids_lengths = None
+        boundary_asset_indices = None
+        boundary_islands_rfids = None
 
     if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
         asset_impact_map = {
