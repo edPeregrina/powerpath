@@ -12,6 +12,7 @@ Usage:
 
 from pathlib import Path
 import os
+import shutil
 
 
 def get_config(root_dir=None, hazard_dir_override=None):
@@ -46,13 +47,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
     config = {
         'root_dir': root_dir,
         'data_dir': root_dir / 'raw_data/ZH_Delfland',
-        # 'data_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run'),
-
         'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
-        # 'electricity_dir': Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\electricity'),
 
-        # 'electricity_dir': root_dir / 'data' / 'electricity', 
-        
         # Simulation configuration
         'simulation_config': {
             'number_repair_crews': 20,
@@ -66,7 +62,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'recovery_parameters': {
             'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
-            'time_step_hours': 1,
+            # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
         },
@@ -86,10 +82,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
     else:
         # Default hazard directory paths (in order of preference)
         hazard_dir_options = [
-            root_dir / 'raw_data' / 'ZH_Delfland_interpolated_timesteps_tif' / 'hazard_maps_ZH_Delfland',            
-            root_dir / 'raw_data' / 'ZH_Delfland' / 'hazard_maps_ZH_Delfland',
-            Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\full_run\hazard_maps_ZH_Delfland'),
-            # Path(r'N:\Projects\11209000\11209175\B. Measurements and calculations\Data\timeseries_data\reprojected'),
+            root_dir / 'raw_data' / 'ZH_Delfland_interpolated_timesteps_tif' / 'hazard_maps_ZH_Delfland',
             root_dir / 'data' / 'static' / 'hazard' / 'processed',
             root_dir / 'data' / 'hazard',
             root_dir / 'hazard_data'
@@ -149,6 +142,38 @@ def setup_directories(config):
     config['interim_dir'].mkdir(parents=True, exist_ok=True)
     config['output_dir'].mkdir(parents=True, exist_ok=True)
 
+def setup_dev_directories(config, remove_cache=False, remove_output=False):
+    """
+    Create necessary directories if they don't exist.
+    
+    Args:
+        config (dict): Configuration dictionary
+    """
+    # Remove directories if requested
+    if remove_cache and config['interim_dir'].exists():
+        shutil.rmtree(config['interim_dir'])
+    if remove_output and config['output_dir'].exists():
+        shutil.rmtree(config['output_dir'])
+
+    # Always create directories, ignore if they exist
+    config['interim_dir'].mkdir(parents=True, exist_ok=True)
+    config['output_dir'].mkdir(parents=True, exist_ok=True)
+    print(f"Created directories: {config['interim_dir']}, {config['output_dir']}")
+
+def get_simulation_params(config):
+    simulation_params = {
+    'flood_threshold': config['simulation_config']['flood_threshold'],
+    'number_repair_crews': config['simulation_config']['number_repair_crews'],
+    'repair_crew_assignment_method': config['simulation_config']['repair_crew_assignment_method'],
+    'verbose': config['simulation_config']['verbose'],
+    'recovery_parameters': config['recovery_parameters'],
+    'config': config  # Pass entire config for directory management
+    }
+    # Convert string 'None' to actual None
+    for key, value in simulation_params.items():
+        if isinstance(value, str) and value.lower() == 'none':
+            simulation_params[key] = None
+    return simulation_params
 
 def print_config_summary(config):
     """
@@ -212,24 +237,6 @@ def get_production_config():
     config['simulation_config']['verbose'] = False
     return config
 
-
-# Configuration presets for different scenarios
-def get_high_resilience_config():
-    """Configuration for high resilience scenario (more crews, faster repair)."""
-    config = get_config()
-    config['simulation_config']['number_repair_crews'] = 20
-    config['recovery_parameters']['repair_time_coefficients'] = [351.36, 1.57, 0.995]  # Faster repair
-    return config
-
-
-def get_low_resilience_config():
-    """Configuration for low resilience scenario (fewer crews, slower repair)."""
-    config = get_config()
-    config['simulation_config']['number_repair_crews'] = 5
-    config['recovery_parameters']['repair_time_coefficients'] = [1405.44, 6.28, 3.978]  # Slower repair
-    return config
-
-
 if __name__ == "__main__":
     # Example usage and testing
     config = get_config()
@@ -257,90 +264,3 @@ if __name__ == "__main__":
         print("Missing directories:")
         for missing_dir in missing_dirs:
             print(f"  - {missing_dir}")
-
-
-
-
-
-
-
-
-
-
-
-# # Base data path (used across all notebooks)
-# BASE_DATA_PATH = Path('C:/data')
-
-# # Centralized data paths for all notebooks
-# data_paths = {
-#     'base_data_path': BASE_DATA_PATH,
-    
-#     # Electrical network data paths (from visualizations_telectrified.ipynb)
-#     'high_tension_stations': BASE_DATA_PATH / r'raw\StedinData\Hoogspanningsstations\Hoogspanningsstations.shp',
-#     'high_tension_network': BASE_DATA_PATH / r'raw\StedinData\Hoogspanningsverbindingen\Hoogspanningsverbindingen.shp',
-#     'mid_tension_stations': BASE_DATA_PATH / r'raw\StedinData\Middenspanningsstations\Middenspanningsstations.shp',
-#     'mid_tension_network': BASE_DATA_PATH / r'raw\StedinData\Middenspanningsverbindingen\Middenspanningsverbindingen.shp',
-#     'mid_low_tension_stations': BASE_DATA_PATH / r'raw\StedinData\MiddenLaagspanningsstations\MiddenLaagspanningsstations.shp',
-#     'low_tension_stations': BASE_DATA_PATH / r'raw\StedinData\Laagspanningsstations\Laagspanningsstations.shp',
-#     'low_tension_network': BASE_DATA_PATH / r'raw\StedinData\Laagspanningsverbindingen\Laagspanningsverbindingen.shp',
-    
-#     # Telecom data paths (from scrape_masts.ipynb)
-#     'telecom_c2000_masts': BASE_DATA_PATH / r'raw\TelecomData\c2000masten.geojson'
-# }
-
-# # Miraca color palette for visualizations
-# miraca_colors = {
-#     'primary blue': '#4069F6',
-#     'accent green': '#64F4C0',
-#     'white': '#FFFFFF',
-#     'black': '#171E37',
-#     'blue_900': '#233778',
-#     'blue_800': '#2A4396',
-#     'blue_700': '#314EB3',
-#     'blue_600': '#385AD1',
-#     'blue_500': '#4069F6',
-#     'blue_400': '#6687F8',
-#     'blue_300': '#94ABFA',
-#     'blue_200': '#C2CFFC',
-#     'blue_100': '#E0E7FE',
-#     'green_900': '#429787',
-#     'green_800': '#4CB499',
-#     'green_700': '#56CEA9',
-#     'green_600': '#5ADBB1',
-#     'green_500': '#64F4C0',
-#     'green_400': '#9CF8D7',
-#     'green_300': '#B5FAE1',
-#     'green_200': '#CDFCEB',
-#     'green_100': '#E0FDF2',
-#     'grey_900': '#373D52',
-#     'grey_800': '#545866',
-#     'grey_700': '#676B7A',
-#     'grey_600': '#7B7F8F',
-#     'grey_500': '#8F94A3',
-#     'grey_400': '#A5A9B8',
-#     'grey_300': '#BCBFCC',
-#     'grey_200': '#D3D6E0',
-#     'grey_100': '#EBEDF5',
-#     'red_danger': '#ED5861',
-#     'yellow_alert': '#F8CD48',
-#     'green_success': '#72DA95'
-# }
-
-# # Optional: Create configparser configuration for other tools that might need it
-# def create_config_file():
-#     """Create a .ini configuration file with the data paths and colors."""
-#     config = configparser.ConfigParser()
-    
-#     config['DEFAULT'] = {}
-    
-#     config['PATHS'] = {key: str(value) for key, value in data_paths.items()}
-    
-#     config['COLORS'] = miraca_colors
-    
-#     with open('config_plotting.ini', 'w') as configfile:
-#         config.write(configfile)
-    
-#     return config
-
-# # Uncomment the line below if you want to automatically create the .ini file
-# create_config_file()
