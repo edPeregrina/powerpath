@@ -4,9 +4,13 @@
 /data/book/cache/*
 /src/__pycache__/*
 /raw_data/*
+/obsolete/*
 
-# Except the to_repo folder
+# Except the to_repo folder...
 !/data/output/to_repo/
 !/data/output/to_repo/**
+!data/interim/interim_hazard_maps_ZH_Delfland/
+!data/interim/interim_hazard_maps_ZH_Delfland/**
+
 data/population/cbs_vk100_2024_v1.gpkg
 /__pycache__
