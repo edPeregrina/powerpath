@@ -1,4 +1,4 @@
-[TODO]-[DOI]
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20731868.svg)](https://doi.org/10.5281/zenodo.20731868)
 
 # PowerPath
 ## A critical infrastructure risk, resilience, and adaptation model
