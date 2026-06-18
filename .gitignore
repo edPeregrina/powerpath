@@ -1,4 +1,4 @@
-# Ignore everything in the output, interim folder and in book/cache, ignore raw data folder
+# Ignore everything in the output, interim folder and in book/cache, ignore raw data folder...
 /data/output/*
 /data/interim/*
 /data/book/cache/*
