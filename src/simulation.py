@@ -704,7 +704,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
         state.repair_crews_assigned[completed_repairs] = False
         if verbose:
             completed_repairs_indices = np.where(completed_repairs)[0]
-            print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
+            print(f"Assets {completed_repairs_indices.tolist()} completed repair at timestep {timestep}")
 
     return available_repair_crews
 
@@ -712,7 +712,7 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
     """Evaluate dependency rules each timestep using current state vectors."""
     dependency_config = config.get('dependency_parameters', {})
     state.operational = evaluate_dependencies(
-        np.ones_like(state.operational, dtype=bool),
+        state.operational,
         asset_type,
         hazard_values=state.current_hazard_values,
         flooded_mask=flooded_mask,
