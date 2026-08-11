@@ -61,9 +61,13 @@ def _compute_initial_distribution(
     total_actor_count: int,
     current_rfids_islands: Dict[int, int],
     rfids_lengths: Dict[int, float],
+    *,
+    skip_unassigned_islands: bool = False,
 ):
     curr_island_lengths = {}
     for rfid, island_id in current_rfids_islands.items():
+        if skip_unassigned_islands and island_id == -1:
+            continue
         curr_island_lengths.setdefault(island_id, 0.0)
         curr_island_lengths[island_id] += rfids_lengths.get(rfid, 0.0)
 
@@ -224,7 +228,12 @@ def update_actor_islands(
         if verbose:
             print(f"First timestep with dict {actor_type}: redistributing from aggregate count")
         total_count = int(sum(actor_counts.values()))
-        redistributed_counts, _ = _compute_initial_distribution(total_count, current_rfids_islands, rfids_lengths)
+        redistributed_counts, _ = _compute_initial_distribution(
+            total_count,
+            current_rfids_islands,
+            rfids_lengths,
+            skip_unassigned_islands=True,
+        )
         if verbose:
             print(f"Initial {actor_type} distribution (from dict): {redistributed_counts}")
         return _pack_actor_counts(
