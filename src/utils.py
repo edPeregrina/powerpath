@@ -206,20 +206,21 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
     **Spatial search strategy** (reuses :func:`create_spatial_index`):
 
     1. Build an R-tree on the Voronoi polygons using bounding-box entries.
-    2. For each secondary asset, query the R-tree with the asset's centroid to get
-       a small set of candidate Voronoi polygons (bbox filter).
-    3. Run an exact geometric ``contains`` / ``intersects`` check against each
-       candidate (fine intersection).
+    2. For each secondary asset, query the R-tree with the asset geometry bounds
+       to get a small set of candidate Voronoi polygons (bbox filter).
+    3. Run an exact geometric intersection check against each candidate (fine
+       intersection).  For polygon assets, choose the Voronoi polygon with the
+       largest overlap area.  For point assets, use ``contains`` / ``intersects``
+       on the anchor point.
 
     This two-step approach mirrors the pattern already used elsewhere in the codebase
     (e.g. ``assign_impact_metric_to_voronoi``) and keeps the function fast for large
     asset sets.
 
-    Each secondary asset is assigned to **at most one** Voronoi polygon.  Because a
-    Voronoi tessellation is a partition of space, each point falls in exactly one
-    cell; the loop breaks after the first match is found.  For asset types where
-    multiple primary assets could cover the same point (e.g. telecom towers), this
-    function can be extended to collect all matches before breaking.
+    Each secondary asset is assigned to **at most one** Voronoi polygon.
+    If no geometric match is found (e.g. edge effects after clipping), the nearest
+    Voronoi polygon to the asset anchor point is used as fallback so dependency
+    mappings are never silently dropped.
 
     Args:
         voronoi_gdf: GeoDataFrame of Voronoi polygons.  Must have an ``'asset_id'``
@@ -262,25 +263,79 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
     # voronoi_gdf has a default RangeIndex, so label == iloc position.
     voronoi_sindex = create_spatial_index(voronoi_gdf)
 
-    # Reset voronoi to a plain list for O(1) positional look-up using the R-tree hits.
-    voronoi_records = list(voronoi_gdf.itertuples(index=True, name=None))  # (idx, asset_id, geom)
+    # Reset Voronoi to a plain dict for O(1) lookups by R-tree label.
+    # record schema: label -> (asset_id, geometry)
+    voronoi_records = {
+        int(idx): (int(asset_id), geom)
+        for idx, asset_id, geom in voronoi_gdf.itertuples(index=True, name=None)
+    }
 
     service_area_map: dict = {}
 
     for sec_pos, sec_row in gdf_secondary_assets.iterrows():
         sec_geom = sec_row.geometry
-        # Use the centroid for point-in-polygon tests (works for both point and polygon assets).
+        if sec_geom is None or sec_geom.is_empty:
+            continue
+
+        # Use centroid as anchor for fallback nearest/contains checks.
         point = sec_geom.centroid if hasattr(sec_geom, 'centroid') else sec_geom
 
         # Step 1 – bounding-box candidates from R-tree.
-        candidate_labels = list(voronoi_sindex.intersection(point.bounds))
+        candidate_labels = list(voronoi_sindex.intersection(sec_geom.bounds))
 
-        # Step 2 – fine geometric intersection against each candidate.
+        best_label = None
+        best_overlap_area = -1.0
+
+        # Step 2a – polygon/geometry overlap scoring.
         for vor_label in candidate_labels:
-            vor_row = voronoi_gdf.loc[vor_label]
-            if vor_row.geometry.contains(point) or vor_row.geometry.intersects(point):
-                primary_pos = int(vor_row['asset_id'])
-                service_area_map.setdefault(primary_pos, []).append(int(sec_pos))
-                break  # Voronoi is a partition – each point belongs to exactly one cell.
+            record = voronoi_records.get(int(vor_label))
+            if record is None:
+                continue
+            _, vor_geom = record
+            if vor_geom is None or vor_geom.is_empty:
+                continue
+            if not vor_geom.intersects(sec_geom):
+                continue
+            try:
+                overlap_area = vor_geom.intersection(sec_geom).area
+            except Exception:
+                overlap_area = 0.0
+            if overlap_area > best_overlap_area:
+                best_overlap_area = overlap_area
+                best_label = int(vor_label)
+
+        # Step 2b – fallback to point-in-polygon if overlap did not resolve a match.
+        if best_label is None:
+            point_candidate_labels = list(voronoi_sindex.intersection(point.bounds))
+            for vor_label in point_candidate_labels:
+                record = voronoi_records.get(int(vor_label))
+                if record is None:
+                    continue
+                _, vor_geom = record
+                if vor_geom is None or vor_geom.is_empty:
+                    continue
+                if vor_geom.contains(point) or vor_geom.intersects(point):
+                    best_label = int(vor_label)
+                    break
+
+        # Step 2c – nearest-neighbour fallback to avoid unmatched assets.
+        if best_label is None:
+            nearest_label = None
+            nearest_distance = float("inf")
+            for label, (_, vor_geom) in voronoi_records.items():
+                if vor_geom is None or vor_geom.is_empty:
+                    continue
+                try:
+                    dist = vor_geom.distance(point)
+                except Exception:
+                    continue
+                if dist < nearest_distance:
+                    nearest_distance = dist
+                    nearest_label = label
+            best_label = nearest_label
+
+        if best_label is not None and best_label in voronoi_records:
+            primary_pos = voronoi_records[best_label][0]
+            service_area_map.setdefault(primary_pos, []).append(int(sec_pos))
 
     return service_area_map

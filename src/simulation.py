@@ -446,6 +446,96 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
     
     return available_repair_crews, repair_crews_assigned
 
+
+def _normalize_asset_type_group_key(group_key):
+    """Normalize an asset-type group key to a frozenset of strings."""
+    if isinstance(group_key, str):
+        normalized = [group_key]
+    elif isinstance(group_key, (tuple, list, set, frozenset, np.ndarray, pd.Index)):
+        normalized = [str(v) for v in group_key if v is not None]
+    else:
+        raise TypeError(
+            "repair_crews_by_asset_type keys must be a string asset type or an iterable of asset types."
+        )
+
+    normalized = [v.strip() for v in normalized if str(v).strip()]
+    if not normalized:
+        raise ValueError("Asset-type group keys cannot be empty.")
+    return frozenset(normalized)
+
+
+def _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type):
+    """Normalize repair-crew pool config to an internal grouped-pool structure.
+
+    Supported inputs:
+      - ``{'hospital': 2}`` (single-type pool)
+      - ``{('ls', 'msls'): 5, 'hospital': 2}`` (grouped + single pools)
+      - ``[({'ls', 'msls'}, 5), ('hospital', 2)]`` (list of (group, crews))
+      - ``[{'asset_types': ['ls', 'msls'], 'count': 5}, {'asset_types': ['hospital'], 'count': 2}]``
+    """
+    if not repair_crews_by_asset_type:
+        return None
+
+    if isinstance(repair_crews_by_asset_type, dict) and "pools" in repair_crews_by_asset_type:
+        # Already normalized internal state.
+        return repair_crews_by_asset_type
+
+    if isinstance(repair_crews_by_asset_type, dict):
+        raw_items = list(repair_crews_by_asset_type.items())
+    elif isinstance(repair_crews_by_asset_type, (list, tuple)):
+        raw_items = []
+        for entry in repair_crews_by_asset_type:
+            if isinstance(entry, dict):
+                if "asset_types" not in entry:
+                    raise ValueError("Pool dictionaries must contain an 'asset_types' key.")
+                if "count" in entry:
+                    crew_count = entry["count"]
+                elif "crews" in entry:
+                    crew_count = entry["crews"]
+                else:
+                    raise ValueError("Pool dictionaries must contain 'count' (or 'crews').")
+                raw_items.append((entry["asset_types"], crew_count))
+            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
+                raw_items.append((entry[0], entry[1]))
+            else:
+                raise TypeError(
+                    "List-style repair_crews_by_asset_type entries must be (asset_types, crews) pairs "
+                    "or dictionaries with asset_types/count."
+                )
+    else:
+        raise TypeError(
+            "repair_crews_by_asset_type must be a dict, list of pairs, or list of pool dictionaries."
+        )
+
+    pools = []
+    asset_type_to_pool = {}
+    for raw_key, raw_count in raw_items:
+        asset_type_group = _normalize_asset_type_group_key(raw_key)
+        crew_count = int(raw_count)
+        if crew_count < 0:
+            raise ValueError("Crew counts in repair_crews_by_asset_type must be non-negative.")
+
+        pool_index = len(pools)
+        pools.append(
+            {
+                "asset_types": asset_type_group,
+                "available": crew_count,
+            }
+        )
+
+        for atype in asset_type_group:
+            if atype in asset_type_to_pool:
+                prev_group = pools[asset_type_to_pool[atype]]["asset_types"]
+                raise ValueError(
+                    f"Asset type '{atype}' appears in multiple crew pools: {set(prev_group)} and {set(asset_type_group)}."
+                )
+            asset_type_to_pool[atype] = pool_index
+
+    return {
+        "pools": pools,
+        "asset_type_to_pool": asset_type_to_pool,
+    }
+
 _DEPTH_REDUCTION_CACHE = {}
 
 def _initialize_simulation(
@@ -665,51 +755,67 @@ def _assign_repair_crews(
     """Assign repair crews using the assignment method.
 
     When *repair_crews_by_asset_type* is provided the function runs two
-    independent crew-assignment passes:
+    integrated crew-assignment passes:
 
-    1. **Per-type pass** – for each asset type listed in
-       *repair_crews_by_asset_type* the assignment is run against only the
-       assets of that type, drawing from the dedicated type-specific crew pool.
+    1. **Grouped pass** – for each configured asset-type group in
+       *repair_crews_by_asset_type* the assignment is run only against assets
+       in that group, drawing from that group's dedicated crew pool.
     2. **Default pass** – for all remaining asset types, the existing
        *available_repair_crews* mechanism is used unchanged.
     """
     if repair_crews_by_asset_type is not None and asset_type is not None:
-        # Per-type crew pools: run a separate assignment pass for each listed type.
-        for atype, _crew_count in repair_crews_by_asset_type.items():
-            type_mask = asset_type == atype
-            if not np.any(type_mask):
-                continue
-            # Restrict candidacy to this asset type only.
-            type_accessible = accessible & type_mask
-            type_repairable = type_accessible & ~flooded_mask & (repair_time > 0) & ~repair_crews_assigned
-            if not np.any(type_repairable):
-                continue
-            available_for_type = repair_crews_by_asset_type[atype]
-            if available_for_type <= 0:
-                continue
-            indices = np.where(type_repairable)[0]
-            if len(indices) <= available_for_type:
-                repair_crews_assigned[indices] = True
-                repair_crews_by_asset_type[atype] -= len(indices)
-            else:
-                if method is None or 'random' in str(method):
-                    np.random.shuffle(indices)
-                    repair_crews_assigned[indices[:available_for_type]] = True
-                elif 'lowest repair time' in str(method):
-                    order = np.argsort(repair_time[type_repairable])
-                    repair_crews_assigned[indices[order[:available_for_type]]] = True
-                elif 'highest repair time' in str(method):
-                    order = np.argsort(-repair_time[type_repairable])
-                    repair_crews_assigned[indices[order[:available_for_type]]] = True
+        pool_state = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
+        if pool_state is not None:
+            # Grouped dedicated pools: each pool can serve one or many asset types.
+            for pool in pool_state["pools"]:
+                pool_asset_types = tuple(pool["asset_types"])
+                type_mask = np.isin(asset_type, list(pool_asset_types))
+                if not np.any(type_mask):
+                    continue
+                # Restrict candidacy to this pool's asset types only.
+                type_accessible = accessible & type_mask
+                type_repairable = type_accessible & ~flooded_mask & (repair_time > 0) & ~repair_crews_assigned
+                if not np.any(type_repairable):
+                    continue
+                available_for_pool = pool["available"]
+                if available_for_pool <= 0:
+                    continue
+                indices = np.where(type_repairable)[0]
+                if len(indices) <= available_for_pool:
+                    repair_crews_assigned[indices] = True
+                    pool["available"] -= len(indices)
                 else:
-                    np.random.shuffle(indices)
-                    repair_crews_assigned[indices[:available_for_type]] = True
-                repair_crews_by_asset_type[atype] -= available_for_type
+                    if method is None or 'random' in str(method):
+                        np.random.shuffle(indices)
+                        repair_crews_assigned[indices[:available_for_pool]] = True
+                    elif 'lowest repair time' in str(method):
+                        order = np.argsort(repair_time[type_repairable])
+                        repair_crews_assigned[indices[order[:available_for_pool]]] = True
+                    elif 'highest repair time' in str(method):
+                        order = np.argsort(-repair_time[type_repairable])
+                        repair_crews_assigned[indices[order[:available_for_pool]]] = True
+                    else:
+                        np.random.shuffle(indices)
+                        repair_crews_assigned[indices[:available_for_pool]] = True
+                    pool["available"] -= available_for_pool
 
-        # Now run the default pass, excluding asset types handled above.
-        handled_types = set(repair_crews_by_asset_type.keys())
+            # Run default pool assignment for asset types not covered by any grouped pool.
+            handled_types = set(pool_state["asset_type_to_pool"].keys())
+            if asset_type is not None and handled_types:
+                default_mask = ~np.isin(asset_type, list(handled_types))
+            else:
+                default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
+            if np.any(default_mask):
+                available_repair_crews, repair_crews_assigned = update_repair_crew_assignment_optimized(
+                    timestep, available_repair_crews, repair_crews_assigned,
+                    accessible & default_mask, flooded_mask, repair_time, island_ids,
+                    method=method, verbose=verbose, asset_impact_map=asset_impact_map,
+                )
+            return available_repair_crews, repair_crews_assigned
+
+        # fall through if config normalizes to None
         if asset_type is not None:
-            default_mask = ~np.isin(asset_type, list(handled_types))
+            default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
         else:
             default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
         if np.any(default_mask):
@@ -723,15 +829,6 @@ def _assign_repair_crews(
     return update_repair_crew_assignment_optimized(
         timestep, available_repair_crews, repair_crews_assigned, accessible, flooded_mask,
         repair_time, island_ids, method=method, verbose=verbose, asset_impact_map=asset_impact_map
-    )
-
-def _update_repair_progress(state, flooded_mask):
-    """Decrement repair_time for assets being repaired."""
-    can_repair_mask = state.accessible & ~flooded_mask & state.repair_crews_assigned
-    decrement_recovery_wait_vectors(
-        state.recovery_wait_vectors,
-        elapsed_time=1.0,
-        active_masks={"repair_time": can_repair_mask},
     )
 
 def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
@@ -751,13 +848,17 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
 
         # Return crews to the appropriate pool(s).
         if repair_crews_by_asset_type is not None and asset_type is not None:
-            # Per-type pool: return each completed asset's crew to its type pool.
+            pool_state = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
+            type_to_pool = pool_state["asset_type_to_pool"] if pool_state else {}
+            pools = pool_state["pools"] if pool_state else []
+            # Per-type (or grouped-type) pool: return each completed asset's crew to its pool.
             for asset_idx in np.where(completed_repairs)[0]:
-                atype = asset_type[asset_idx]
-                if atype in repair_crews_by_asset_type:
-                    repair_crews_by_asset_type[atype] += 1
+                atype = str(asset_type[asset_idx])
+                pool_idx = type_to_pool.get(atype)
+                if pool_idx is not None:
+                    pools[pool_idx]["available"] += 1
                     continue
-                # Fallback to the default island/global pool for types not in per-type dict.
+                # Fallback to the default island/global pool for types not in grouped pools.
                 if available_repair_crews is not None:
                     if isinstance(available_repair_crews, dict):
                         asset_island_id = state.island_ids[asset_idx]
@@ -787,6 +888,15 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
             print(f"Assets {completed_repairs_indices.tolist()} completed repair at timestep {timestep}")
 
     return available_repair_crews
+
+def _update_repair_progress(state, flooded_mask):
+    """Decrement repair_time for assets being repaired."""
+    can_repair_mask = state.accessible & ~flooded_mask & state.repair_crews_assigned
+    decrement_recovery_wait_vectors(
+        state.recovery_wait_vectors,
+        elapsed_time=1.0,
+        active_masks={"repair_time": can_repair_mask},
+    )
 
 def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None):
     """Evaluate dependency rules each timestep using current state vectors.
@@ -978,18 +1088,21 @@ def simulate_asset_damage_recovery_access_breakdown(
     Args:
         gdf_assets (GeoDataFrame): Asset geometries and types.
         hazard_maps (list[str or Path]): List of hazard map file paths (rasters).
-        number_repair_crews (int or dict): Number of available repair crews (global int or per-island dict).
+        number_repair_crews (int or dict): Default repair-crew pool (global int or per-island dict),
+            used for asset types not covered by ``repair_crews_by_asset_type``.
         repair_crew_assignment_method (str): Crew assignment strategy ('random', 'lowest repair time', 'highest repair time', 'island', etc.).
         flood_threshold (float): Hazard value threshold for flooding.
         recovery_parameters (dict, optional): Recovery model parameters (damage/repair coefficients, thresholds).
         root_dir (str or Path, optional): Root directory for data and cache storage.
         verbose (bool): If True, prints detailed simulation progress.
-        repair_crews_by_asset_type (dict, optional): Mapping of asset type string to number of
-            dedicated repair crews, e.g. ``{'hospital': 3}``.  When provided, assets of each
-            listed type are repaired exclusively by their own crew pool, separate from the
-            main *number_repair_crews* pool used for all other asset types.  Crew counts are
-            decremented and restored independently, so substation and hospital crews never
-            compete for the same slots.
+        repair_crews_by_asset_type (dict/list, optional): Dedicated grouped crew pools by
+            asset type. Supports:
+            ``{'hospital': 2}``,
+            ``{('ls', 'msls'): 5, 'hospital': 2}``,
+            or list-style entries such as
+            ``[({'ls', 'msls'}, 5), ('hospital', 2)]``.
+            Any asset types not covered by these grouped pools fall back to
+            *number_repair_crews*.
         timestep_output (bool): If True, collects detailed asset states at each timestep.
         execution_id (str, optional): Unique identifier for output file naming.
         config (dict, optional): Simulation configuration dictionary.
@@ -1097,8 +1210,8 @@ def simulate_asset_damage_recovery_access_breakdown(
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
 
-    # Make a local mutable copy of per-type crews so the caller's dict is not mutated.
-    repair_crews_by_asset_type = dict(repair_crews_by_asset_type) if repair_crews_by_asset_type else None
+    # Normalize grouped type-pool configuration to mutable internal state.
+    repair_crews_by_asset_type = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
 
     # Pre-build the knowledge graph once to avoid reconstructing it every timestep.
     _knowledge_graph = None

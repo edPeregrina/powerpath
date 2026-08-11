@@ -154,8 +154,10 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 # from the power-loss disruption above).  The placeholder fragility
                 # function (damage_recovery.hospital_fragility_function) is used
                 # automatically when 'hospital' assets are present in gdf_assets.
-                # Hospital repair crews are separate: pass
+                # Hospital repair crews can be dedicated by type/group: pass
                 #   repair_crews_by_asset_type={'hospital': N}
+                # or
+                #   repair_crews_by_asset_type={('ls', 'msls'): A, 'hospital': B}
                 # to simulate_asset_damage_recovery_access_breakdown.
                 # ----------------------------------------------------------------
                 # {
