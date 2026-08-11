@@ -12,7 +12,7 @@ from src.caching import load_accessibility_cache, load_island_cache, load_overla
 from src.island_analysis import match_island_ids_assets, match_assets_access, update_repair_crew_islands, compute_island_geodataframe_from_graph
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
-from src.dependency_evaluator import evaluate_dependencies, evaluate_dependencies_from_graph
+from src.dependency_evaluator import evaluate_dependencies, evaluate_dependencies_from_graph, restore_operational_from_graph
 from src.recovery_scheduler import (
     initialize_recovery_wait_vectors,
     decrement_recovery_wait_vectors,
@@ -709,17 +709,44 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
 
     return available_repair_crews
 
-def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold):
-    """Evaluate dependency rules each timestep using current state vectors."""
+def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None):
+    """Evaluate dependency rules each timestep using current state vectors.
+
+    When a knowledge graph is configured this function performs two passes:
+
+    1. **Restore pass** – re-enables assets whose return-to-operational
+       trigger is now satisfied (no longer flooded and repair condition met).
+    2. **Block pass** – suppresses assets that still do not meet conditions
+       (currently flooded or repair not yet complete per the rule trigger).
+
+    The two-pass design means the knowledge graph is the single authority for
+    both directions of operational-state change.  The ``state.operational``
+    array is updated in-place via assignment.
+
+    Args:
+        state: Current :class:`SimulationState`.
+        asset_type: String array of asset types.
+        flooded_mask: Boolean array; ``True`` where hazard exceeds threshold.
+        config: Simulation configuration dict.
+        repair_threshold: Repair-time value below which an asset is considered
+            not in need of formal repair (used on the legacy path only).
+        knowledge_graph: Pre-built :class:`DependencyKnowledgeGraph` instance,
+            or ``None`` to build from ``config['dependency_parameters']`` each
+            call (legacy behaviour; use the pre-built instance for performance).
+    """
     dependency_config = config.get('dependency_parameters', {})
     kg_config = dependency_config.get('knowledge_graph', None)
 
     if kg_config is not None:
         # Graph-aware path: per-pair rules from the knowledge graph.
-        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-        knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+        if knowledge_graph is None:
+            from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+            knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
         hazard_type = dependency_config.get('hazard_type', 'flooding')
         service_area_map = dependency_config.get('service_area_map', None)
+        # evaluate_dependencies_from_graph internally calls restore_operational_from_graph
+        # first (restore pass) then applies the block pass, so state.operational is
+        # updated correctly in both directions.
         state.operational = evaluate_dependencies_from_graph(
             state.operational,
             asset_type,
@@ -984,6 +1011,14 @@ def simulate_asset_damage_recovery_access_breakdown(
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
 
+    # Pre-build the knowledge graph once to avoid reconstructing it every timestep.
+    _knowledge_graph = None
+    _dep_config = _config.get('dependency_parameters', {})
+    _kg_config = _dep_config.get('knowledge_graph', None)
+    if _kg_config is not None:
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+        _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
+
     for timestep in timesteps:
         day_counter = timestep // 24
         map_counter = int(timestep / major_timestep)
@@ -1019,7 +1054,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         )
 
         # 5. Evaluate dependencies using current repair/hazard state
-        _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold)
+        _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
 
         # 6. Update unreachable assets (island method)
         if island_method_active:

@@ -225,6 +225,115 @@ def _compute_repair_blocked_mask(
     return blocked
 
 
+def _compute_restore_eligible_mask(
+    repair_time: np.ndarray,
+    flooded_mask: np.ndarray,
+    asset_mask: np.ndarray,
+    return_to_operational,
+) -> np.ndarray:
+    """Return a boolean mask of assets eligible to be restored to operational.
+
+    An asset is eligible when it is no longer flooded AND its
+    ``return_to_operational`` trigger condition is met.
+
+    Args:
+        repair_time: Per-asset remaining repair time array.
+        flooded_mask: Boolean array; ``True`` where the asset is currently flooded.
+        asset_mask: Boolean mask selecting which assets this rule applies to.
+        return_to_operational: A :class:`ReturnToOperational` instance from the
+            knowledge graph rule.
+
+    Returns:
+        Boolean array; ``True`` where an asset may be restored to operational.
+    """
+    from src.dependency_knowledge_graph import (
+        TRIGGER_IMMEDIATE,
+        TRIGGER_REPAIR_COMPLETE,
+        TRIGGER_REPAIR_BELOW,
+    )
+
+    eligible = np.zeros(len(repair_time), dtype=bool)
+    trigger = return_to_operational.trigger
+    not_flooded = asset_mask & ~flooded_mask
+
+    if trigger == TRIGGER_IMMEDIATE:
+        # Asset can return as soon as hazard clears, regardless of repair state.
+        eligible[not_flooded] = True
+    elif trigger == TRIGGER_REPAIR_COMPLETE:
+        # Repair must be fully complete (repair_time == 0).
+        eligible[not_flooded] = repair_time[not_flooded] == 0.0
+    elif trigger == TRIGGER_REPAIR_BELOW:
+        threshold = return_to_operational.threshold
+        eligible[not_flooded] = repair_time[not_flooded] < threshold
+
+    return eligible
+
+
+def restore_operational_from_graph(
+    operational: np.ndarray,
+    asset_type: np.ndarray,
+    hazard_type: str,
+    knowledge_graph,
+    *,
+    flooded_mask: Optional[np.ndarray] = None,
+    repair_time: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Restore assets to operational based on knowledge graph return-to-operational triggers.
+
+    This is the positive-restore counterpart to :func:`evaluate_dependencies_from_graph`.
+    It re-enables assets that were previously marked non-operational and now satisfy
+    both conditions:
+
+    1. The asset is no longer flooded.
+    2. The ``return_to_operational`` trigger for its asset type is satisfied
+       (e.g. ``repair_complete``: repair_time == 0; ``repair_below``: repair_time
+       < threshold; ``immediate``: always satisfied once hazard clears).
+
+    This function only enables assets — it never disables them.  Call it *before*
+    :func:`evaluate_dependencies_from_graph` so that the block pass can immediately
+    re-suppress any asset that still does not meet conditions (e.g. still flooded).
+
+    Args:
+        operational: Boolean array of current operational states (will not be mutated).
+        asset_type: String array of asset types corresponding to each index.
+        hazard_type: The active hazard type (e.g. ``"flooding"``).
+        knowledge_graph: A :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph`
+            instance.
+        flooded_mask: Boolean array; ``True`` where hazard exposure exceeds the flood threshold.
+        repair_time: Per-asset remaining repair time array.
+
+    Returns:
+        Updated operational array with eligible assets restored to ``True``.
+    """
+    num_assets = len(asset_type)
+    operational = np.asarray(operational, dtype=bool).copy()
+
+    if flooded_mask is None:
+        flooded_mask = np.zeros(num_assets, dtype=bool)
+    else:
+        flooded_mask = np.asarray(flooded_mask, dtype=bool)
+
+    if repair_time is None:
+        repair_time = np.zeros(num_assets, dtype=np.float64)
+    else:
+        repair_time = np.asarray(repair_time, dtype=np.float64)
+
+    unique_asset_types = np.unique(asset_type)
+    for a_type in unique_asset_types:
+        a_mask = asset_type == a_type
+        direct_rules = knowledge_graph.get_rules_or_default(hazard_type, a_type, asset_type_b=None)
+        for rule in direct_rules:
+            if rule.relationship != "direct":
+                continue
+            eligible = _compute_restore_eligible_mask(
+                repair_time, flooded_mask, a_mask, rule.return_to_operational
+            )
+            # Only restore assets that were previously non-operational.
+            operational |= eligible & ~operational
+
+    return operational
+
+
 def evaluate_dependencies_from_graph(
     operational: np.ndarray,
     asset_type: np.ndarray,
@@ -238,14 +347,27 @@ def evaluate_dependencies_from_graph(
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
 
+    Performs two passes for each asset type:
+
+    1. **Restore pass** (:func:`restore_operational_from_graph`): re-enables any
+       asset that is no longer flooded and whose ``return_to_operational`` trigger
+       is now satisfied.  This makes the "return to service" logic explicit and
+       driven solely by the knowledge graph — not by ad-hoc side-effects elsewhere
+       in the simulation loop.
+
+    2. **Block pass**: applies hazard blocking and repair-state blocking according
+       to the same rules, so assets that still do not meet conditions are kept or
+       returned to non-operational.
+
     For each unique ``asset_type_a`` present in *asset_type*, the matching rules
     (or the default rule) are fetched from *knowledge_graph* and applied:
 
     * **Direct rules** (``asset_type_b`` is ``None``):
 
-      1. If ``hazard_blocks_operation`` is ``True``, assets of type A that are
+      1. Restore pass: assets not flooded and meeting their trigger are restored to True.
+      2. If ``hazard_blocks_operation`` is ``True``, assets of type A that are
          currently flooded are marked as blocked.
-      2. The ``return_to_operational`` trigger is applied to determine whether
+      3. The ``return_to_operational`` trigger is applied to determine whether
          outstanding repair work also blocks the asset.
 
     * **Service-area rules** (``asset_type_b`` is set):
@@ -272,7 +394,15 @@ def evaluate_dependencies_from_graph(
         ``True``).
     """
     num_assets = len(asset_type)
-    operational = np.asarray(operational, dtype=bool)
+    # Restore pass first: re-enable assets whose return-to-operational condition is met.
+    operational = restore_operational_from_graph(
+        operational,
+        asset_type,
+        hazard_type,
+        knowledge_graph,
+        flooded_mask=flooded_mask,
+        repair_time=repair_time,
+    )
 
     if flooded_mask is None:
         flooded_mask = np.zeros(num_assets, dtype=bool)
