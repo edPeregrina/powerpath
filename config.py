@@ -148,6 +148,26 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 #         'return_to_operational': {'trigger': 'immediate'},
                 #     },
                 # },
+                # ----------------------------------------------------------------
+                # Template: hospital direct structural flood rule
+                # Hospitals may also be directly damaged by flooding (separate
+                # from the power-loss disruption above).  The placeholder fragility
+                # function (damage_recovery.hospital_fragility_function) is used
+                # automatically when 'hospital' assets are present in gdf_assets.
+                # Hospital repair crews are separate: pass
+                #   repair_crews_by_asset_type={'hospital': N}
+                # to simulate_asset_damage_recovery_access_breakdown.
+                # ----------------------------------------------------------------
+                # {
+                #     'hazard_type': 'flooding',
+                #     'asset_type_a': 'hospital',
+                #     'asset_type_b': None,
+                #     'relationship': 'direct',
+                #     'parameters': {
+                #         'hazard_blocks_operation': True,
+                #         'return_to_operational': {'trigger': 'repair_complete'},
+                #     },
+                # },
             ],
             # Optional: mapping of asset index (A) → list of asset indices (B)
             # for service_area rules. Leave as None if no service-area rules are active.

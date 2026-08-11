@@ -329,5 +329,52 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
                 },
             },
         },
+        # ------------------------------------------------------------------
+        # hospital – direct structural flood damage
+        # ------------------------------------------------------------------
+        # Hospitals can be physically damaged by flooding and require repair
+        # before resuming full operation.  The damage / repair parameters use
+        # a placeholder fragility function (see damage_recovery.hospital_fragility_function)
+        # that should be replaced once evidence-based depth-damage data is
+        # available.  Hospital repair crews are separate from substation crews
+        # (see the repair_crews_by_asset_type parameter on the simulation).
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "hospital",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": True,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        # ------------------------------------------------------------------
+        # msls → hospital  (power-dependency / service-area rule)
+        # ------------------------------------------------------------------
+        # Any hospital within the Voronoi service area of an msls substation
+        # depends on that substation for power.  The hospital is non-operational
+        # as long as all substations it depends on are non-operational.
+        # Once power is restored the hospital returns to operational immediately
+        # (no physical repair is required for the power-loss disruption itself).
+        #
+        # The "ALL must fail" logic (vs. "ANY must fail") is configured via the
+        # disruption_logic field.  For Voronoi-based association each hospital
+        # maps to exactly one substation so the distinction is moot; it becomes
+        # relevant for telecom or other asset types where one point may be covered
+        # by multiple assets.
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {
+                    "trigger": TRIGGER_IMMEDIATE,
+                },
+            },
+        },
     ]
     return DependencyKnowledgeGraph.from_config(rules)

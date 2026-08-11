@@ -52,6 +52,56 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
+def hospital_fragility_function(hazard_values, asset_type, k=None, major_timestep=24):
+    """Placeholder fragility function for structural flood damage to hospitals.
+
+    **This is a placeholder** to be replaced once evidence-based depth-damage
+    data for hospitals is available.  Currently uses a logistic fragility curve
+    identical in shape to the substation curve but with a median failure depth of
+    ``d_m = 0.5 m``.  This is an arbitrary interim value; the real curve should
+    be calibrated from empirical data or expert elicitation.
+
+    The function signature is intentionally identical to
+    :func:`default_fragility_function` so it can be swapped in without changing
+    call sites.
+
+    Args:
+        hazard_values (np.ndarray): Flood depth values for each hospital asset.
+        asset_type (np.ndarray): Asset-type labels (used for future type-specific
+            branching within this function).
+        k (float, optional): Steepness parameter of the logistic curve.  If
+            ``None``, a value is sampled uniformly from ``[5.0, 7.5]`` each call.
+        major_timestep (int): Simulation hours per hazard-map update; used to
+            scale the daily failure probability to the actual timestep.
+
+    Returns:
+        np.ndarray: Integer array of binary operational status (1 = operational,
+        0 = structurally damaged by flooding).
+    """
+    failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
+
+    if k is None:
+        k = np.random.uniform(5, 7.5)
+
+    hazard_mask = hazard_values > 0
+    # Placeholder median failure depth for hospitals (0.5 m – to be calibrated).
+    d_m = np.full_like(hazard_values, 0.5)
+
+    timesteps_per_day = 24 / major_timestep if major_timestep is not None else 1
+    if timesteps_per_day == 1:
+        failure_probability[hazard_mask] = 1 / (
+            1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask]))
+        )
+    else:
+        failure_probability[hazard_mask] = 1 - (
+            (np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
+            / (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
+        ) ** (1 / timesteps_per_day)
+
+    random_values = np.random.random(size=hazard_values.shape)
+    return (random_values >= failure_probability).astype(int)
+
+
 def default_fragility_function(hazard_values, asset_type, k=None, major_timestep=24):
     """
     Calculate binary operational status from hazard values using fragility curve.
@@ -67,7 +117,35 @@ def default_fragility_function(hazard_values, asset_type, k=None, major_timestep
     To adjust for non-daily timesteps, the failure probability is calculated as:
 
         P_f_timestep = 1 - ((exp(-k*(d - d_m))) / (1 + exp(-k*(d - d_m))))^(major_timestep/24)
+
+    For asset types not explicitly modelled (e.g. ``'hospital'``), the function
+    dispatches to the appropriate specialised fragility function so that all asset
+    types receive correct treatment without requiring changes at the call site.
     """
+
+    # Dispatch hospital assets to the dedicated placeholder function.
+    hospital_mask = asset_type == 'hospital'
+    if np.any(hospital_mask):
+        operational_status = np.ones_like(hazard_values, dtype=int)
+
+        # Non-hospital assets via the standard substation curve.
+        non_hospital_mask = ~hospital_mask
+        if np.any(non_hospital_mask):
+            operational_status[non_hospital_mask] = default_fragility_function(
+                hazard_values[non_hospital_mask],
+                asset_type[non_hospital_mask],
+                k=k,
+                major_timestep=major_timestep,
+            )
+
+        # Hospital assets via the placeholder hospital curve.
+        operational_status[hospital_mask] = hospital_fragility_function(
+            hazard_values[hospital_mask],
+            asset_type[hospital_mask],
+            k=k,
+            major_timestep=major_timestep,
+        )
+        return operational_status
 
     failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
 
