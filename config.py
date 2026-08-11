@@ -73,6 +73,85 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'max_simulation_days': None,  # None for all available days, integer to limit
             'cache_enabled': True,        # Enable/disable result caching for performance
             'performance_monitoring': False  # Enable detailed performance monitoring
+        },
+
+        # Dependency parameters – per-pair rules between hazard types and asset types.
+        #
+        # 'hazard_type'  : the active hazard (e.g. "flooding")
+        # 'asset_type_a' : primary asset type ("msls", "ms", "ls")
+        # 'asset_type_b' : downstream asset type within A's service area, or null
+        # 'relationship' : "direct" (rule on A itself) | "service_area" (A blocks B)
+        # 'parameters'   :
+        #   hazard_blocks_operation  : bool – True means the asset is non-operational
+        #                              while hazard exposure exceeds flood_threshold
+        #   return_to_operational    : what must happen before the asset is operational again
+        #     trigger : "immediate"       – returns as soon as hazard clears (no repair needed)
+        #               "repair_complete" – returns only when repair_time reaches 0
+        #               "repair_below"   – returns when repair_time < threshold
+        #     threshold : float           – used only with "repair_below"
+        #
+        # Add entries for new hazards (wind, seismic, …) or new asset types
+        # (hospitals, water-treatment, …) following the same pattern.
+        # Leave 'knowledge_graph' as an empty list to fall back to the legacy
+        # flat-flag path (enable_default_rules / require_repair_for_operational).
+        'dependency_parameters': {
+            'hazard_type': 'flooding',  # active hazard type for graph look-up
+            'knowledge_graph': [
+                # ---- msls : Medium/Low-voltage Substation ----
+                # Requires full repair before returning to service.
+                {
+                    'hazard_type': 'flooding',
+                    'asset_type_a': 'msls',
+                    'asset_type_b': None,
+                    'relationship': 'direct',
+                    'parameters': {
+                        'hazard_blocks_operation': True,
+                        'return_to_operational': {'trigger': 'repair_complete'},
+                    },
+                },
+                # ---- ms : Medium-voltage Substation ----
+                # Same as msls: requires full repair before returning to service.
+                {
+                    'hazard_type': 'flooding',
+                    'asset_type_a': 'ms',
+                    'asset_type_b': None,
+                    'relationship': 'direct',
+                    'parameters': {
+                        'hazard_blocks_operation': True,
+                        'return_to_operational': {'trigger': 'repair_complete'},
+                    },
+                },
+                # ---- ls : Low-voltage Substation ----
+                # Simpler units; can be re-energised once remaining repair work
+                # drops below 2 hours (quick inspection / dry-out sufficient).
+                {
+                    'hazard_type': 'flooding',
+                    'asset_type_a': 'ls',
+                    'asset_type_b': None,
+                    'relationship': 'direct',
+                    'parameters': {
+                        'hazard_blocks_operation': True,
+                        'return_to_operational': {'trigger': 'repair_below', 'threshold': 2.0},
+                    },
+                },
+                # ----------------------------------------------------------------
+                # Template: service-area rule (A supplies B within its service area)
+                # Uncomment and adapt when downstream asset types are added.
+                # ----------------------------------------------------------------
+                # {
+                #     'hazard_type': 'flooding',
+                #     'asset_type_a': 'msls',
+                #     'asset_type_b': 'hospital',       # example downstream asset type
+                #     'relationship': 'service_area',
+                #     'parameters': {
+                #         'hazard_blocks_operation': False,  # hospital not directly flooded
+                #         'return_to_operational': {'trigger': 'immediate'},
+                #     },
+                # },
+            ],
+            # Optional: mapping of asset index (A) → list of asset indices (B)
+            # for service_area rules. Leave as None if no service-area rules are active.
+            'service_area_map': None,
         }
     }
     

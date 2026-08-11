@@ -305,15 +305,17 @@ def evaluate_dependencies_from_graph(
             # 1. Hazard blocking
             if rule.hazard_blocks_operation:
                 hazard_blocked = a_mask & flooded_mask
+                newly_hazard_blocked = hazard_blocked & ~blocked_mask
                 blocked_mask |= hazard_blocked
-                hazard_blocked_count += int(np.sum(hazard_blocked & ~blocked_mask))
+                hazard_blocked_count += int(np.sum(newly_hazard_blocked))
 
             # 2. Repair-state blocking
             repair_blocked = _compute_repair_blocked_mask(
                 repair_time, a_mask, rule.return_to_operational
             )
+            newly_repair_blocked = repair_blocked & ~blocked_mask
             blocked_mask |= repair_blocked
-            repair_blocked_count += int(np.sum(repair_blocked & ~(blocked_mask ^ repair_blocked)))
+            repair_blocked_count += int(np.sum(newly_repair_blocked))
 
         # --- Service-area rules (A → B) -------------------------------------
         if service_area_map is None:

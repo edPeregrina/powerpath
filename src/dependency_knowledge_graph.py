@@ -240,3 +240,94 @@ class DependencyKnowledgeGraph:
 
     def __repr__(self) -> str:
         return f"DependencyKnowledgeGraph({len(self._rules)} rules)"
+
+
+# ---------------------------------------------------------------------------
+# Default knowledge graph for existing electricity infrastructure assets
+# ---------------------------------------------------------------------------
+
+def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
+    """Return the baseline knowledge graph for flooding and the known asset types.
+
+    Asset types currently in the model:
+
+    * ``"msls"`` – Medium/Low-voltage Substation (MV/LV, combined).  These are
+      the primary distribution substations.  Following NKWK the median failure
+      depth is 0.6 m; they require physical repair before returning to service.
+    * ``"ms"`` – Medium-voltage Substation (MV only).  Similar criticality to
+      msls; assumed to require repair before returning to service.
+    * ``"ls"`` – Low-voltage Substation (LV only).  Smaller and simpler;
+      assumed to return to service once repair time has been reduced below a
+      threshold (default 2 hours) rather than waiting for full completion.
+
+    All rules use ``hazard_type = "flooding"`` — the only hazard currently
+    modelled.  Add further calls to ``DependencyKnowledgeGraph.from_config``
+    (or extend this list) to introduce new hazards (wind, seismic, …) or new
+    asset types (hospitals, water-treatment, …).
+
+    The rules encoded here represent the **defaults when nothing is explicitly
+    parameterised** and serve as a living template for future extensions.
+
+    Returns:
+        A :class:`DependencyKnowledgeGraph` populated with sensible defaults.
+    """
+    rules = [
+        # ------------------------------------------------------------------
+        # msls – Medium/Low-voltage Substation
+        # ------------------------------------------------------------------
+        # While flooded the substation is non-operational.
+        # It can only return to service once full repair is complete
+        # (repair_time == 0), reflecting the higher structural complexity and
+        # safety requirements of combined MV/LV stations.
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": True,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        # ------------------------------------------------------------------
+        # ms – Medium-voltage Substation
+        # ------------------------------------------------------------------
+        # Same behaviour as msls: requires full repair before returning to
+        # service.  Medium-voltage equipment typically needs certified
+        # inspection after flood exposure.
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "ms",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": True,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        # ------------------------------------------------------------------
+        # ls – Low-voltage Substation
+        # ------------------------------------------------------------------
+        # Flooded ls stations are taken out of service, but they are simpler
+        # units that can be re-energised once the remaining repair work has
+        # dropped below 2 hours (i.e. a quick inspection / dry-out is
+        # sufficient rather than a full replacement).
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "ls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": True,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_BELOW,
+                    "threshold": 2.0,   # hours – matches global repair_threshold default
+                },
+            },
+        },
+    ]
+    return DependencyKnowledgeGraph.from_config(rules)
