@@ -15,7 +15,6 @@ from src.damage_recovery import default_damage_ratio_function, default_repair_ti
 from src.dependency_evaluator import evaluate_dependencies
 from src.recovery_scheduler import (
     initialize_recovery_wait_vectors,
-    sync_repair_time_vector,
     decrement_recovery_wait_vectors,
     all_required_waits_cleared,
 )
@@ -32,14 +31,13 @@ class SimulationState:
     def __init__(self, gdf_assets, num_assets):
         self.previous_map_counter = None
         self.damage_ratio = np.zeros(num_assets, dtype=np.float64)
-        self.repair_time = np.zeros(num_assets, dtype=np.float64)
         self.accessible = np.ones(num_assets, dtype=bool)
         self.unreachable = np.zeros(num_assets, dtype=bool)
         self.operational = np.ones(num_assets, dtype=bool)
         self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
-        self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets, repair_time=self.repair_time)
+        self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -203,15 +201,6 @@ def _update_hazard_map_states(
     # Mask of assets flooded above threshold
     flooded_mask = state.current_hazard_values > flood_threshold
 
-    state.operational = evaluate_dependencies(
-        state.operational,
-        asset_type,
-        hazard_values=state.current_hazard_values,
-        flooded_mask=flooded_mask,
-        enable_default_rules=_config.get('dependency_parameters', {}).get('enable_default_rules', False),
-        return_report=False,
-    )
-
     # Apply fragility to assets that are not currently under repair
     assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.operational
 
@@ -232,24 +221,25 @@ def _update_hazard_map_states(
         new_damage_check = dr_new > state.damage_ratio[flooded_mask]
         newly_damaged_mask[flooded_indices] = new_damage_check
         state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
-        state.repair_time[flooded_mask] = default_repair_time_function(
+        repair_time = state.recovery_wait_vectors["repair_time"]
+        repair_time[flooded_mask] = default_repair_time_function(
             state.damage_ratio[flooded_mask], repair_time_coefficients
         )
-        sync_repair_time_vector(state.recovery_wait_vectors, state.repair_time)
         if verbose:
             try:
                 damage_count = newly_damaged_mask.sum()
                 print(f"  New damage at timestep {timestep}: {damage_count} assets")
                 if damage_count > 0:
                     print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
-                    print(f"  Repair times: {state.repair_time[newly_damaged_mask].min():.1f} to {state.repair_time[newly_damaged_mask].max():.1f} hours")
+                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
             except Exception as e:
                 print(f"  Error occurred while logging damage information: {e}, {timestep}")
 
     # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
-    recalc_repair_mask = (state.repair_time > repair_threshold)
+    repair_time = state.recovery_wait_vectors["repair_time"]
+    recalc_repair_mask = (repair_time > repair_threshold)
     if np.any(recalc_repair_mask):
-        repair_times_under_repair = state.repair_time[recalc_repair_mask]
+        repair_times_under_repair = repair_time[recalc_repair_mask]
         damage_ratios_from_repair = vectorized_damage_ratio_solver(
             repair_times_under_repair, repair_time_coefficients
         )
@@ -685,10 +675,9 @@ def _update_repair_progress(state, flooded_mask):
         elapsed_time=1.0,
         active_masks={"repair_time": can_repair_mask},
     )
-    state.repair_time = state.recovery_wait_vectors["repair_time"].copy()
 
 def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
-    """Update operational status and release crews for completed repairs."""
+    """Clear completed repair states and release crews for completed repairs."""
     completed_repairs = (
         all_required_waits_cleared(
             state.recovery_wait_vectors,
@@ -697,12 +686,8 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
         & state.repair_crews_assigned
     )
     if np.any(completed_repairs):
-        non_operational_completed = completed_repairs & (~state.operational)
-        if np.any(non_operational_completed):
-            state.operational[non_operational_completed] = True
         state.damage_ratio[completed_repairs] = 0.0
-        state.repair_time[completed_repairs] = 0.0
-        sync_repair_time_vector(state.recovery_wait_vectors, state.repair_time)
+        state.recovery_wait_vectors["repair_time"][completed_repairs] = 0.0
         num_completed_repairs = completed_repairs.sum()
         if available_repair_crews is not None:
             if isinstance(available_repair_crews, dict):
@@ -722,6 +707,21 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
             print(f"Assets {completed_repairs_indices.tolist()} became operational at timestep {timestep}")
 
     return available_repair_crews
+
+def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold):
+    """Evaluate dependency rules each timestep using current state vectors."""
+    dependency_config = config.get('dependency_parameters', {})
+    state.operational = evaluate_dependencies(
+        np.ones_like(state.operational, dtype=bool),
+        asset_type,
+        hazard_values=state.current_hazard_values,
+        flooded_mask=flooded_mask,
+        repair_time=state.recovery_wait_vectors["repair_time"],
+        repair_threshold=repair_threshold,
+        enable_default_rules=dependency_config.get('enable_default_rules', False),
+        require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
+        return_report=False,
+    )
 
 def _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold):
     """Update unreachable assets for island-based assignment.
@@ -772,13 +772,14 @@ def _collect_timestep_metrics(
     damage_threshold, repair_threshold
 ):
     """Collect metrics and asset states for the current timestep."""
+    repair_time = state.recovery_wait_vectors["repair_time"]
     timestep_data = {
         'timestep': timestep,
         'map': map_counter,
         'day': day_counter,
         'asset_id': range(num_assets),
         'damage_ratio': state.damage_ratio.copy(),
-        'repair_time': state.repair_time.copy(),
+        'repair_time': repair_time.copy(),
         'operational': state.operational.astype(int).copy(),
         'accessible': state.accessible.astype(int).copy(),
         'unreachable': state.unreachable.astype(int).copy(),
@@ -788,10 +789,10 @@ def _collect_timestep_metrics(
         'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int)
     }
     damaged_assets_mask = state.damage_ratio > damage_threshold
-    repair_needed_mask = state.repair_time > repair_threshold
+    repair_needed_mask = repair_time > repair_threshold
     avg_damage_ratio = state.damage_ratio[damaged_assets_mask].mean() if np.any(damaged_assets_mask) else 0.0
-    avg_repair_time = state.repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
-    total_repair_backlog = state.repair_time.sum()
+    avg_repair_time = repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
+    total_repair_backlog = repair_time.sum()
     total_damage_ratio = state.damage_ratio.sum()
     metrics = {
         'day': day_counter,
@@ -987,7 +988,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         # 2. Repair crew assignment
         available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
             timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
-            flooded_mask, state.repair_time, state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map
+            flooded_mask, state.recovery_wait_vectors["repair_time"], state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map
         )
         
         # 3. Update repair progress
@@ -998,11 +999,14 @@ def simulate_asset_damage_recovery_access_breakdown(
             state, available_repair_crews, verbose, timestep
         )
 
-        # 5. Update unreachable assets (island method)
+        # 5. Evaluate dependencies using current repair/hazard state
+        _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold)
+
+        # 6. Update unreachable assets (island method)
         if island_method_active:
             _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold)
 
-        # 6. Collect timestep metrics
+        # 7. Collect timestep metrics
         if timestep_output:
             timestep_data, metrics = _collect_timestep_metrics(
                 state, timestep, map_counter, day_counter, num_assets, flooded_mask,
@@ -1012,11 +1016,12 @@ def simulate_asset_damage_recovery_access_breakdown(
             results.append(metrics)
         else:
             # If not collecting detailed timestep output, still need metrics
+            repair_time = state.recovery_wait_vectors["repair_time"]
             damaged_assets_mask = state.damage_ratio > damage_threshold
-            repair_needed_mask = state.repair_time > repair_threshold
+            repair_needed_mask = repair_time > repair_threshold
             avg_damage_ratio = state.damage_ratio[damaged_assets_mask].mean() if np.any(damaged_assets_mask) else 0.0
-            avg_repair_time = state.repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
-            total_repair_backlog = state.repair_time.sum()
+            avg_repair_time = repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
+            total_repair_backlog = repair_time.sum()
             total_damage_ratio = state.damage_ratio.sum()
             
             results.append({
@@ -1035,12 +1040,12 @@ def simulate_asset_damage_recovery_access_breakdown(
                 'total_damage_ratio': total_damage_ratio       
             })
 
-        # 7. Print end-of-day summary if verbose
+        # 8. Print end-of-day summary if verbose
         if timestep % 24 == 23 and verbose:
             print(f"Day {day_counter} summary: {state.operational.sum()}/{num_assets} operational, "
                   f"{state.accessible.sum()} accessible, {state.unreachable.sum()} unreachable damaged assets, {flooded_mask.sum()} flooded")
 
-    # 8. Save config (optional)
+    # 9. Save config (optional)
     #_save_config_file(output_dir, root_dir, execution_id)
 
     # Create output list format consistent with original function
@@ -1051,7 +1056,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         'operational': state.operational,
         'hazard_value': state.current_hazard_values,
         'damage_ratio': state.damage_ratio,
-        'repair_time': state.repair_time,
+        'repair_time': state.recovery_wait_vectors["repair_time"].copy(),
         'accessible': state.accessible,
         'repair_crews_assigned': state.repair_crews_assigned
     }, cache_updated

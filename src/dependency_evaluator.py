@@ -19,6 +19,8 @@ def build_dependency_context(
     asset_type: np.ndarray,
     hazard_values: Optional[np.ndarray] = None,
     flooded_mask: Optional[np.ndarray] = None,
+    repair_time: Optional[np.ndarray] = None,
+    repair_threshold: float = 0.0,
     dependency_map: Optional[Dict[Any, Iterable[Any]]] = None,
     area_dependencies: Optional[Iterable[Dict[str, Any]]] = None,
     pairwise_dependencies: Optional[Iterable[Tuple[int, int]]] = None,
@@ -33,11 +35,15 @@ def build_dependency_context(
         hazard_values = np.zeros(num_assets, dtype=np.float64)
     if flooded_mask is None:
         flooded_mask = np.zeros(num_assets, dtype=bool)
+    if repair_time is None:
+        repair_time = np.zeros(num_assets, dtype=np.float64)
 
     return {
         "asset_type": np.asarray(asset_type),
         "hazard_values": np.asarray(hazard_values),
         "flooded_mask": np.asarray(flooded_mask, dtype=bool),
+        "repair_time": np.asarray(repair_time, dtype=np.float64),
+        "repair_threshold": float(repair_threshold),
         "dependency_map": dependency_map or {},
         "area_dependencies": list(area_dependencies) if area_dependencies is not None else [],
         "pairwise_dependencies": list(pairwise_dependencies) if pairwise_dependencies is not None else [],
@@ -66,6 +72,7 @@ def evaluate_dependency_rules(
     area_blocked_mask: Optional[np.ndarray] = None,
     pairwise_blocked_mask: Optional[np.ndarray] = None,
     enable_default_rules: bool = False,
+    require_repair_for_operational: bool = False,
 ) -> np.ndarray:
     """Combine dependency rules into one blocking mask.
 
@@ -89,8 +96,10 @@ def evaluate_dependency_rules(
         road_mask = asset_type == "road"
         blocked_mask |= road_mask & flooded_mask
 
-        # Placeholder for msls-style rules that include repair gating semantics.
-        # Rule mechanics are intentionally deferred to recovery/dependency policy.
+    if require_repair_for_operational:
+        repair_time = context["repair_time"]
+        repair_threshold = context["repair_threshold"]
+        blocked_mask |= repair_time > repair_threshold
 
     return blocked_mask
 
@@ -120,10 +129,13 @@ def evaluate_dependencies(
     *,
     hazard_values: Optional[np.ndarray] = None,
     flooded_mask: Optional[np.ndarray] = None,
+    repair_time: Optional[np.ndarray] = None,
+    repair_threshold: float = 0.0,
     dependency_map: Optional[Dict[Any, Iterable[Any]]] = None,
     area_dependencies: Optional[Iterable[Dict[str, Any]]] = None,
     pairwise_dependencies: Optional[Iterable[Tuple[int, int]]] = None,
     enable_default_rules: bool = False,
+    require_repair_for_operational: bool = False,
     return_report: bool = False,
 ):
     """High-level dependency evaluation entry point.
@@ -134,6 +146,8 @@ def evaluate_dependencies(
         asset_type,
         hazard_values=hazard_values,
         flooded_mask=flooded_mask,
+        repair_time=repair_time,
+        repair_threshold=repair_threshold,
         dependency_map=dependency_map,
         area_dependencies=area_dependencies,
         pairwise_dependencies=pairwise_dependencies,
@@ -145,6 +159,7 @@ def evaluate_dependencies(
         area_blocked_mask=area_blocked_mask,
         pairwise_blocked_mask=pairwise_blocked_mask,
         enable_default_rules=enable_default_rules,
+        require_repair_for_operational=require_repair_for_operational,
     )
     updated_operational = apply_dependency_blocking(operational, blocked_mask)
 
