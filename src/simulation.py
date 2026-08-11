@@ -701,6 +701,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
                             available_repair_crews[first_island] += 1
             else:
                 available_repair_crews += num_completed_repairs
+        state.operational[completed_repairs] = True
         state.repair_crews_assigned[completed_repairs] = False
         if verbose:
             completed_repairs_indices = np.where(completed_repairs)[0]
