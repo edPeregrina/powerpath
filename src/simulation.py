@@ -12,7 +12,7 @@ from src.caching import load_accessibility_cache, load_island_cache, load_overla
 from src.island_analysis import match_island_ids_assets, match_assets_access, update_repair_crew_islands, compute_island_geodataframe_from_graph
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
-from src.dependency_evaluator import evaluate_dependencies
+from src.dependency_evaluator import evaluate_dependencies, evaluate_dependencies_from_graph
 from src.recovery_scheduler import (
     initialize_recovery_wait_vectors,
     decrement_recovery_wait_vectors,
@@ -711,17 +711,35 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
 def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold):
     """Evaluate dependency rules each timestep using current state vectors."""
     dependency_config = config.get('dependency_parameters', {})
-    state.operational = evaluate_dependencies(
-        state.operational,
-        asset_type,
-        hazard_values=state.current_hazard_values,
-        flooded_mask=flooded_mask,
-        repair_time=state.recovery_wait_vectors["repair_time"],
-        repair_threshold=repair_threshold,
-        enable_default_rules=dependency_config.get('enable_default_rules', False),
-        require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
-        return_report=False,
-    )
+    kg_config = dependency_config.get('knowledge_graph', None)
+
+    if kg_config is not None:
+        # Graph-aware path: per-pair rules from the knowledge graph.
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+        knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+        hazard_type = dependency_config.get('hazard_type', 'flooding')
+        service_area_map = dependency_config.get('service_area_map', None)
+        state.operational = evaluate_dependencies_from_graph(
+            state.operational,
+            asset_type,
+            hazard_type,
+            knowledge_graph,
+            flooded_mask=flooded_mask,
+            repair_time=state.recovery_wait_vectors["repair_time"],
+            service_area_map=service_area_map,
+        )
+    else:
+        # Legacy flat-flags path (backwards compatible).
+        state.operational = evaluate_dependencies(
+            state.operational,
+            asset_type,
+            hazard_values=state.current_hazard_values,
+            flooded_mask=flooded_mask,
+            repair_time=state.recovery_wait_vectors["repair_time"],
+            repair_threshold=repair_threshold,
+            enable_default_rules=dependency_config.get('enable_default_rules', False),
+            require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
+        )
 
 def _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold):
     """Update unreachable assets for island-based assignment.

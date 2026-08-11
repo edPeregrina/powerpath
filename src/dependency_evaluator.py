@@ -1,12 +1,20 @@
 """Dependency evaluation layer for operational-state blocking.
 
-This first-pass module keeps behavior non-breaking while establishing explicit
-function boundaries for future dependency rules.
+This module provides two evaluation paths:
+
+1. **Legacy path** – :func:`evaluate_dependencies` uses flat flags
+   (``enable_default_rules``, ``require_repair_for_operational``) to preserve
+   backwards compatibility with existing call sites.
+
+2. **Graph-aware path** – :func:`evaluate_dependencies_from_graph` consults a
+   :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph` to apply
+   per-pair rules between hazard types, primary asset types (A), and optional
+   downstream asset types (B) within A's service area.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -138,7 +146,7 @@ def evaluate_dependencies(
     require_repair_for_operational: bool = False,
     return_report: bool = False,
 ):
-    """High-level dependency evaluation entry point.
+    """High-level dependency evaluation entry point (legacy path).
 
     Returns updated operational state, plus report when requested.
     """
@@ -171,4 +179,180 @@ def evaluate_dependencies(
         area_blocked_mask=area_blocked_mask,
         pairwise_blocked_mask=pairwise_blocked_mask,
     )
+    return updated_operational, report
+
+
+# ---------------------------------------------------------------------------
+# Graph-aware evaluation path
+# ---------------------------------------------------------------------------
+
+def _compute_repair_blocked_mask(
+    repair_time: np.ndarray,
+    asset_mask: np.ndarray,
+    return_to_operational,
+) -> np.ndarray:
+    """Return a boolean mask of assets blocked due to repair status.
+
+    Args:
+        repair_time: Per-asset remaining repair time array.
+        asset_mask: Boolean mask selecting which assets this rule applies to.
+        return_to_operational: A :class:`ReturnToOperational` instance from the
+            knowledge graph rule.
+
+    Returns:
+        Boolean array; ``True`` where an asset is blocked because repair
+        requirements are not yet satisfied.
+    """
+    from src.dependency_knowledge_graph import (
+        TRIGGER_IMMEDIATE,
+        TRIGGER_REPAIR_COMPLETE,
+        TRIGGER_REPAIR_BELOW,
+    )
+
+    blocked = np.zeros(len(repair_time), dtype=bool)
+    trigger = return_to_operational.trigger
+
+    if trigger == TRIGGER_IMMEDIATE:
+        # No repair needed – asset is operational as soon as hazard clears.
+        pass
+    elif trigger == TRIGGER_REPAIR_COMPLETE:
+        # Asset must have zero remaining repair time.
+        blocked[asset_mask] = repair_time[asset_mask] > 0.0
+    elif trigger == TRIGGER_REPAIR_BELOW:
+        threshold = return_to_operational.threshold
+        blocked[asset_mask] = repair_time[asset_mask] >= threshold
+
+    return blocked
+
+
+def evaluate_dependencies_from_graph(
+    operational: np.ndarray,
+    asset_type: np.ndarray,
+    hazard_type: str,
+    knowledge_graph,
+    *,
+    flooded_mask: Optional[np.ndarray] = None,
+    repair_time: Optional[np.ndarray] = None,
+    service_area_map: Optional[Dict[int, List[int]]] = None,
+    return_report: bool = False,
+):
+    """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
+
+    For each unique ``asset_type_a`` present in *asset_type*, the matching rules
+    (or the default rule) are fetched from *knowledge_graph* and applied:
+
+    * **Direct rules** (``asset_type_b`` is ``None``):
+
+      1. If ``hazard_blocks_operation`` is ``True``, assets of type A that are
+         currently flooded are marked as blocked.
+      2. The ``return_to_operational`` trigger is applied to determine whether
+         outstanding repair work also blocks the asset.
+
+    * **Service-area rules** (``asset_type_b`` is set):
+
+      Uses *service_area_map* (``{asset_idx_a: [asset_idx_b, ...]}``) to block
+      B-type assets when their governing A-type asset is not operational.
+
+    Args:
+        operational: Boolean array of current operational states (will not be
+            mutated).
+        asset_type: String array of asset types corresponding to each index.
+        hazard_type: The active hazard type (e.g. ``"flooding"``).
+        knowledge_graph: A :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph`
+            instance.
+        flooded_mask: Boolean array; ``True`` where hazard exposure exceeds the
+            flood threshold.
+        repair_time: Per-asset remaining repair time array.
+        service_area_map: Mapping ``{asset_idx_a: [asset_idx_b, ...]}``.  Required
+            for service-area rules; ignored otherwise.
+        return_report: If ``True``, also return a report dict.
+
+    Returns:
+        Updated operational array (and report dict if *return_report* is
+        ``True``).
+    """
+    num_assets = len(asset_type)
+    operational = np.asarray(operational, dtype=bool)
+
+    if flooded_mask is None:
+        flooded_mask = np.zeros(num_assets, dtype=bool)
+    else:
+        flooded_mask = np.asarray(flooded_mask, dtype=bool)
+
+    if repair_time is None:
+        repair_time = np.zeros(num_assets, dtype=np.float64)
+    else:
+        repair_time = np.asarray(repair_time, dtype=np.float64)
+
+    blocked_mask = np.zeros(num_assets, dtype=bool)
+    hazard_blocked_count = 0
+    repair_blocked_count = 0
+    service_area_blocked_count = 0
+
+    unique_asset_types = np.unique(asset_type)
+
+    for a_type in unique_asset_types:
+        a_mask = asset_type == a_type
+
+        # --- Direct rules (rule on A itself) --------------------------------
+        direct_rules = knowledge_graph.get_rules_or_default(
+            hazard_type, a_type, asset_type_b=None
+        )
+        for rule in direct_rules:
+            if rule.relationship != "direct":
+                continue
+
+            # 1. Hazard blocking
+            if rule.hazard_blocks_operation:
+                hazard_blocked = a_mask & flooded_mask
+                blocked_mask |= hazard_blocked
+                hazard_blocked_count += int(np.sum(hazard_blocked & ~blocked_mask))
+
+            # 2. Repair-state blocking
+            repair_blocked = _compute_repair_blocked_mask(
+                repair_time, a_mask, rule.return_to_operational
+            )
+            blocked_mask |= repair_blocked
+            repair_blocked_count += int(np.sum(repair_blocked & ~(blocked_mask ^ repair_blocked)))
+
+        # --- Service-area rules (A → B) -------------------------------------
+        if service_area_map is None:
+            continue
+
+        for b_type in unique_asset_types:
+            if b_type == a_type:
+                continue
+            sa_rules = knowledge_graph.get_rules(hazard_type, a_type, asset_type_b=b_type)
+            if not sa_rules:
+                continue
+
+            b_mask = asset_type == b_type
+            for rule in sa_rules:
+                if rule.relationship != "service_area":
+                    continue
+
+                # Find A-type assets that are currently non-operational (after
+                # direct blocking above has been folded in).
+                a_non_operational = a_mask & (blocked_mask | ~operational)
+
+                # Block B-type assets whose governing A asset is non-operational.
+                for a_idx in np.where(a_non_operational)[0]:
+                    b_indices = service_area_map.get(int(a_idx), [])
+                    for b_idx in b_indices:
+                        if b_idx < num_assets and b_mask[b_idx]:
+                            if not blocked_mask[b_idx]:
+                                blocked_mask[b_idx] = True
+                                service_area_blocked_count += 1
+
+    updated_operational = apply_dependency_blocking(operational, blocked_mask)
+
+    if not return_report:
+        return updated_operational
+
+    report = {
+        "blocked_count": int(np.sum(blocked_mask)),
+        "hazard_blocked_count": hazard_blocked_count,
+        "repair_blocked_count": repair_blocked_count,
+        "service_area_blocked_count": service_area_blocked_count,
+    }
     return updated_operational, report
