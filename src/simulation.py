@@ -12,6 +12,13 @@ from src.caching import load_accessibility_cache, load_island_cache, load_overla
 from src.island_analysis import match_island_ids_assets, match_assets_access, update_repair_crew_islands, compute_island_geodataframe_from_graph
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
+from src.dependency_evaluator import evaluate_dependencies
+from src.recovery_scheduler import (
+    initialize_recovery_wait_vectors,
+    sync_repair_time_vector,
+    decrement_recovery_wait_vectors,
+    all_required_waits_cleared,
+)
 from src.caching import create_accessibility_cache_key, create_island_cache_key, get_asset_centroid_hash
 from src.adaptation import build_l1_l2_reduction_array, _build_adaptation_arrays_cached
 
@@ -32,6 +39,7 @@ class SimulationState:
         self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
+        self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets, repair_time=self.repair_time)
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -195,6 +203,15 @@ def _update_hazard_map_states(
     # Mask of assets flooded above threshold
     flooded_mask = state.current_hazard_values > flood_threshold
 
+    state.operational = evaluate_dependencies(
+        state.operational,
+        asset_type,
+        hazard_values=state.current_hazard_values,
+        flooded_mask=flooded_mask,
+        enable_default_rules=_config.get('dependency_parameters', {}).get('enable_default_rules', False),
+        return_report=False,
+    )
+
     # Apply fragility to assets that are not currently under repair
     assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.operational
 
@@ -218,6 +235,7 @@ def _update_hazard_map_states(
         state.repair_time[flooded_mask] = default_repair_time_function(
             state.damage_ratio[flooded_mask], repair_time_coefficients
         )
+        sync_repair_time_vector(state.recovery_wait_vectors, state.repair_time)
         if verbose:
             try:
                 damage_count = newly_damaged_mask.sum()
@@ -662,18 +680,29 @@ def _assign_repair_crews(
 def _update_repair_progress(state, flooded_mask):
     """Decrement repair_time for assets being repaired."""
     can_repair_mask = state.accessible & ~flooded_mask & state.repair_crews_assigned
-    state.repair_time[can_repair_mask] -= 1.0
-    state.repair_time[can_repair_mask] = np.maximum(state.repair_time[can_repair_mask], 0.0, out=state.repair_time[can_repair_mask])
+    decrement_recovery_wait_vectors(
+        state.recovery_wait_vectors,
+        elapsed_time=1.0,
+        active_masks={"repair_time": can_repair_mask},
+    )
+    state.repair_time = state.recovery_wait_vectors["repair_time"].copy()
 
 def _handle_completed_repairs(state, available_repair_crews, verbose, timestep):
     """Update operational status and release crews for completed repairs."""
-    completed_repairs = (state.repair_time == 0.0) & state.repair_crews_assigned
+    completed_repairs = (
+        all_required_waits_cleared(
+            state.recovery_wait_vectors,
+            required_vectors=("repair_time", "dependency_wait", "reset_wait"),
+        )
+        & state.repair_crews_assigned
+    )
     if np.any(completed_repairs):
         non_operational_completed = completed_repairs & (~state.operational)
         if np.any(non_operational_completed):
             state.operational[non_operational_completed] = True
         state.damage_ratio[completed_repairs] = 0.0
         state.repair_time[completed_repairs] = 0.0
+        sync_repair_time_vector(state.recovery_wait_vectors, state.repair_time)
         num_completed_repairs = completed_repairs.sum()
         if available_repair_crews is not None:
             if isinstance(available_repair_crews, dict):
@@ -1026,4 +1055,3 @@ def simulate_asset_damage_recovery_access_breakdown(
         'accessible': state.accessible,
         'repair_crews_assigned': state.repair_crews_assigned
     }, cache_updated
-
