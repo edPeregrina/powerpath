@@ -503,9 +503,16 @@ def build_service_area_map_from_rules(
                 crs="EPSG:28992",
             )
 
+        primary_asset_ids = {int(idx) for idx in primary_assets.index}
+        voronoi_asset_ids = (
+            {int(asset_id) for asset_id in voronoi_gdf["asset_id"].dropna().tolist()}
+            if not voronoi_gdf.empty and "asset_id" in voronoi_gdf.columns
+            else set()
+        )
+
         primary_map = (
             build_voronoi_service_area_map(voronoi_gdf, secondary_assets)
-            if not voronoi_gdf.empty
+            if voronoi_asset_ids == primary_asset_ids
             else {}
         )
         if not primary_map:

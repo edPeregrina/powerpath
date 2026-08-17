@@ -267,3 +267,37 @@ def test_initialize_simulation_auto_builds_service_area_map(tmp_path):
     )
 
     assert init["config"]["dependency_parameters"]["service_area_map"] == {0: [2], 1: [3]}
+
+
+def test_build_service_area_map_from_rules_falls_back_when_voronoi_is_incomplete():
+    gdf_assets = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "msls", "msls", "msls", "msls", "hospital", "hospital"],
+            "geometry": [
+                Point(0, 0),
+                Point(10, 0),
+                Point(0, 10),
+                Point(10, 10),
+                Point(5, 5),
+                box(-1, -1, 1, 1),
+                box(9, 9, 11, 11),
+            ],
+        },
+        crs=CRS,
+    )
+    rules = [
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        }
+    ]
+
+    service_area_map = build_service_area_map_from_rules(gdf_assets, rules)
+
+    assert service_area_map == {0: [5], 3: [6]}
