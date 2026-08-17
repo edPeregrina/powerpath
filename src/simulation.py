@@ -40,6 +40,7 @@ from src.recovery_scheduler import (
     decrement_recovery_wait_vectors,
     initialize_recovery_wait_vectors,
 )
+from src.utils import build_service_area_map_from_rules
 
 sys.path.append(str(Path(__file__).parent.parent))
 from shutil import copyfile
@@ -668,6 +669,14 @@ def _initialize_simulation(
     repair_threshold = recovery_parameters['repair_threshold']
     num_assets = len(gdf_assets)
     asset_type = gdf_assets['type'].values
+
+    dependency_config = _config.get('dependency_parameters', {})
+    knowledge_graph_rules = dependency_config.get('knowledge_graph', None) or []
+    if knowledge_graph_rules and dependency_config.get('service_area_map', None) is None:
+        dependency_config['service_area_map'] = build_service_area_map_from_rules(
+            gdf_assets,
+            knowledge_graph_rules,
+        )
 
     # Build L1/L2 depth reduction array (with caching)
     depth_reductions = None

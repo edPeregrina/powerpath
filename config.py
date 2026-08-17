@@ -161,7 +161,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 # },
             ],
             # Optional: mapping of asset index (A) → list of asset indices (B)
-            # for service_area rules. Leave as None if no service-area rules are active.
+            # for service_area rules. When left as None and service-area rules
+            # are configured, the simulation precomputes this from gdf_assets.
             'service_area_map': None,
         }
     }

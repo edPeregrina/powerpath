@@ -7,13 +7,15 @@ from shapely.geometry import Point, box
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from config import get_config
 from src.damage_recovery import _build_failure_probability, default_fragility_function
 from src.dependency_evaluator import (
     evaluate_dependencies,
     evaluate_dependencies_from_graph,
 )
 from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-from src.utils import build_voronoi_service_area_map
+from src.simulation import _initialize_simulation
+from src.utils import build_service_area_map_from_rules, build_voronoi_service_area_map
 
 CRS = "EPSG:28992"
 
@@ -171,3 +173,97 @@ def test_voronoi_service_area_map_can_return_diagnostics():
     assert diagnostics["resolved_by_overlap"] == 1
     assert diagnostics["resolved_by_nearest"] == 1
     assert diagnostics["unresolved"] == 0
+
+
+def test_build_service_area_map_from_rules_handles_small_primary_sets():
+    gdf_assets = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "msls", "hospital", "school"],
+            "geometry": [
+                Point(0, 0),
+                Point(10, 0),
+                box(-1, -1, 1, 1),
+                box(9, -1, 11, 1),
+            ],
+        },
+        crs=CRS,
+    )
+    rules = [
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "school",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+    ]
+
+    service_area_map = build_service_area_map_from_rules(gdf_assets, rules)
+
+    assert service_area_map == {0: [2], 1: [3]}
+
+
+def test_initialize_simulation_auto_builds_service_area_map(tmp_path):
+    gdf_assets = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "msls", "hospital", "school"],
+            "geometry": [
+                Point(0, 0),
+                Point(10, 0),
+                box(-1, -1, 1, 1),
+                box(9, -1, 11, 1),
+            ],
+        },
+        crs=CRS,
+    )
+    rules = [
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "school",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+    ]
+    config = get_config(root_dir=tmp_path)
+    config["simulation_config"]["accessibility_model"] = None
+    config["dependency_parameters"]["knowledge_graph"] = rules
+    config["dependency_parameters"]["service_area_map"] = None
+
+    init = _initialize_simulation(
+        gdf_assets,
+        hazard_maps=[],
+        recovery_parameters=None,
+        root_dir=tmp_path,
+        config=config,
+        repair_crew_assignment_method="random",
+        verbose=False,
+    )
+
+    assert init["config"]["dependency_parameters"]["service_area_map"] == {0: [2], 1: [3]}

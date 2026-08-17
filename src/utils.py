@@ -385,3 +385,140 @@ def build_voronoi_service_area_map(
     if return_diagnostics:
         return service_area_map, diagnostics
     return service_area_map
+
+
+def _build_nearest_service_area_map(
+    gdf_primary_assets: "gpd.GeoDataFrame",
+    gdf_secondary_assets: "gpd.GeoDataFrame",
+) -> dict[int, list[int]]:
+    """Fallback service-area assignment using nearest primary asset centroids."""
+    if gdf_primary_assets.empty or gdf_secondary_assets.empty:
+        return {}
+
+    primary_assets = gdf_primary_assets
+    secondary_assets = gdf_secondary_assets
+
+    if primary_assets.crs is not None and primary_assets.crs != "EPSG:28992":
+        primary_assets = primary_assets.to_crs("EPSG:28992")
+    if (
+        secondary_assets.crs is not None
+        and primary_assets.crs is not None
+        and secondary_assets.crs != primary_assets.crs
+    ):
+        secondary_assets = secondary_assets.to_crs(primary_assets.crs)
+
+    primary_points = {
+        int(idx): geom.centroid if hasattr(geom, "centroid") else geom
+        for idx, geom in primary_assets.geometry.items()
+        if geom is not None and not geom.is_empty
+    }
+
+    service_area_map: dict[int, list[int]] = {}
+    for sec_idx, sec_geom in secondary_assets.geometry.items():
+        if sec_geom is None or sec_geom.is_empty or not primary_points:
+            continue
+
+        anchor = sec_geom.centroid if hasattr(sec_geom, "centroid") else sec_geom
+        nearest_primary = min(
+            primary_points,
+            key=lambda primary_idx: primary_points[primary_idx].distance(anchor),
+        )
+        service_area_map.setdefault(int(nearest_primary), []).append(int(sec_idx))
+
+    return service_area_map
+
+
+def build_service_area_map_from_rules(
+    gdf_assets: "gpd.GeoDataFrame",
+    rule_list: list[dict],
+) -> dict[int, list[int]]:
+    """Build a global service-area map for all configured service-area rules."""
+    if gdf_assets.empty or not rule_list:
+        return {}
+    if "type" not in gdf_assets.columns:
+        raise ValueError("gdf_assets must contain a 'type' column.")
+
+    geometry_column = gdf_assets.geometry.name
+    normalized_assets = gpd.GeoDataFrame(
+        gdf_assets.copy().reset_index(drop=True),
+        geometry=geometry_column,
+        crs=gdf_assets.crs,
+    )
+
+    service_area_pairs = sorted(
+        {
+            (str(rule.get("asset_type_a")), str(rule.get("asset_type_b")))
+            for rule in rule_list
+            if rule.get("relationship", "direct") == "service_area"
+            and rule.get("asset_type_a") is not None
+            and rule.get("asset_type_b") is not None
+        }
+    )
+    if not service_area_pairs:
+        return {}
+
+    from src.impacts import create_voronoi_for_asset_type
+
+    service_area_map: dict[int, list[int]] = {}
+
+    for primary_type in sorted({asset_type_a for asset_type_a, _ in service_area_pairs}):
+        primary_assets = normalized_assets[normalized_assets["type"] == primary_type]
+        if primary_assets.empty:
+            continue
+
+        secondary_types = sorted(
+            {
+                asset_type_b
+                for asset_type_a, asset_type_b in service_area_pairs
+                if asset_type_a == primary_type
+            }
+        )
+        secondary_frames = [
+            normalized_assets[normalized_assets["type"] == secondary_type]
+            for secondary_type in secondary_types
+        ]
+        secondary_frames = [frame for frame in secondary_frames if not frame.empty]
+        if not secondary_frames:
+            continue
+
+        secondary_assets = gpd.GeoDataFrame(
+            pd.concat(secondary_frames, axis=0),
+            geometry=geometry_column,
+            crs=normalized_assets.crs,
+        )
+
+        if len(primary_assets) == 1:
+            primary_idx = int(primary_assets.index[0])
+            service_area_map.setdefault(primary_idx, []).extend(
+                int(sec_idx) for sec_idx in secondary_assets.index
+            )
+            continue
+
+        try:
+            voronoi_gdf = create_voronoi_for_asset_type(normalized_assets, primary_type)
+        except Exception:
+            voronoi_gdf = gpd.GeoDataFrame(
+                {"asset_id": [], "geometry": []},
+                geometry="geometry",
+                crs="EPSG:28992",
+            )
+
+        primary_map = (
+            build_voronoi_service_area_map(voronoi_gdf, secondary_assets)
+            if not voronoi_gdf.empty
+            else {}
+        )
+        if not primary_map:
+            primary_map = _build_nearest_service_area_map(primary_assets, secondary_assets)
+
+        for primary_idx, secondary_indices in primary_map.items():
+            service_area_map.setdefault(int(primary_idx), []).extend(
+                int(sec_idx) for sec_idx in secondary_indices
+            )
+
+    return {
+        int(primary_idx): list(
+            dict.fromkeys(int(sec_idx) for sec_idx in secondary_indices)
+        )
+        for primary_idx, secondary_indices in service_area_map.items()
+    }
