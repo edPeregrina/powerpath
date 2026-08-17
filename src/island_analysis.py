@@ -1,29 +1,41 @@
 
-from pathlib import Path
 import sys
+from pathlib import Path
+
 sys.path.append(str(Path.cwd().parent))
-from datetime import datetime
-import numpy as np
-import networkx as nx
-from shapely.geometry import LineString
-import geopandas as gpd
-import pandas as pd
 import pickle
-from pyproj import Transformer
-
-import time
-
-from src.utils import project_graph_coords, filter_hazard_graph, create_spatial_index
-from src.caching import load_island_cache, create_island_cache_key, save_island_cache, create_overlap_cache_key, save_overlap_cache, get_asset_centroid_hash
-from src.actor_island_manager import update_actor_islands
 
 # Import hazard extraction method from config
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
-from config import get_config
 
+import geopandas as gpd
+import networkx as nx
+import numpy as np
+from pyproj import Transformer
+from shapely.geometry import LineString
+
+from src.actor_island_manager import (
+    _compute_initial_distribution,
+    _compute_transition_probabilities,
+    _extract_actor_counts,
+    _pack_actor_counts,
+    _redistribute_by_transition_probabilities,
+)
+from src.caching import (
+    create_island_cache_key,
+    create_overlap_cache_key,
+    get_asset_centroid_hash,
+    save_island_cache,
+    save_overlap_cache,
+)
+from src.utils import create_spatial_index, filter_hazard_graph, project_graph_coords
+
+sys.path.append(str(Path(__file__).parent.parent))
 # #progress apply 
 from tqdm import tqdm
+
+from config import get_config
+
 tqdm.pandas()
 
 
@@ -214,7 +226,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
 
     # If not cached, compute from scratch
     try:
-        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
         
         islands_gdf = compute_island_geodataframe_from_graph(
             hazard_graph_path, 
@@ -388,7 +400,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             boundary_islands_rfids = pickle.load(f)
 
     try:
-        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
+        hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
         print(f"Loading hazard graph from {hazard_graph_path}")
         islands_gdf = compute_island_geodataframe_from_graph(
             hazard_graph_path, 
@@ -449,10 +461,7 @@ def update_repair_crew_islands(
     l1_active_timesteps=None
 ):
     """
-    Compatibility wrapper around generic actor-island redistribution.
-
-    This legacy entry point is preserved for notebook/API compatibility while
-    delegating the implementation to ``src.actor_island_manager``.
+    Distribute repair crews by island while keeping the island logic local.
     """
     try:
         return update_actor_islands(
@@ -485,4 +494,173 @@ def update_repair_crew_islands(
             return {first_island: available_repair_crews}
         else:
             return {}
-    
+
+
+def update_actor_islands(
+    available_actors,
+    previous_rfids_islands,
+    current_rfids_islands,
+    rfids_lengths,
+    *,
+    actor_type="repair_crews",
+    verbose=False,
+    overlap_cache=None,
+    current_map=None,
+    previous_map=None,
+    hazard_threshold=None,
+    hazard_dir=None,
+    _config=None,
+    cache_updated=None,
+    l1_area_geojson=None,
+    l1_active_timesteps=None,
+):
+    """Redistribute actors across the current island partition.
+
+    This public implementation stays in the island-analysis layer so the repair
+    crew workflow, cache semantics, and notebook/API behavior remain attached to
+    the original domain module.
+    """
+    actor_counts, input_shape, nested_distribution = _extract_actor_counts(
+        available_actors,
+        actor_type,
+    )
+
+    if isinstance(actor_counts, int):
+        initial_probabilities = None
+        overlap_cache_key = None
+
+        if overlap_cache is not None and current_map is not None and hazard_threshold is not None:
+            overlap_cache_key = create_overlap_cache_key(
+                "initial",
+                current_map,
+                hazard_threshold,
+                hazard_dir,
+                l1_area_geojson=l1_area_geojson,
+            )
+            if overlap_cache_key in overlap_cache:
+                if verbose:
+                    print(f"Using cached initial distribution for {overlap_cache_key}")
+                initial_probabilities = overlap_cache[overlap_cache_key]
+
+        if initial_probabilities is not None:
+            unique_islands = list(initial_probabilities.keys())
+            probabilities = np.array(
+                [initial_probabilities[i] for i in unique_islands],
+                dtype=np.float64,
+            )
+            assigned = np.random.choice(
+                unique_islands,
+                size=actor_counts,
+                p=probabilities,
+                replace=True,
+            )
+            sampled_counts = (
+                dict(zip(*np.unique(assigned, return_counts=True)))
+                if actor_counts > 0
+                else {}
+            )
+            redistributed_counts = {
+                island_id: int(sampled_counts.get(island_id, 0))
+                for island_id in unique_islands
+            }
+        else:
+            redistributed_counts, computed_probabilities = _compute_initial_distribution(
+                actor_counts,
+                current_rfids_islands,
+                rfids_lengths,
+            )
+            if overlap_cache is not None and overlap_cache_key is not None:
+                overlap_cache[overlap_cache_key] = computed_probabilities
+                if _config is not None:
+                    cache_dir = _config["interim_dir"]
+                    save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                    if verbose:
+                        print(f"Cached initial distribution for {overlap_cache_key}")
+                if cache_updated is not None:
+                    cache_updated["overlap_cache"] = overlap_cache
+
+        if verbose:
+            print(f"Initial {actor_type} distribution: {redistributed_counts}")
+
+        return _pack_actor_counts(
+            updated_actor_counts=redistributed_counts,
+            input_shape=input_shape,
+            nested_distribution=nested_distribution,
+            actor_type=actor_type,
+        )
+
+    if previous_rfids_islands is None:
+        if verbose:
+            print(f"First timestep with dict {actor_type}: redistributing from aggregate count")
+        total_count = int(sum(actor_counts.values()))
+        redistributed_counts, _ = _compute_initial_distribution(
+            total_count,
+            current_rfids_islands,
+            rfids_lengths,
+            skip_unassigned_islands=True,
+        )
+        if verbose:
+            print(f"Initial {actor_type} distribution (from dict): {redistributed_counts}")
+        return _pack_actor_counts(
+            updated_actor_counts=redistributed_counts,
+            input_shape=input_shape,
+            nested_distribution=nested_distribution,
+            actor_type=actor_type,
+        )
+
+    transition_probabilities = None
+    overlap_cache_key = None
+    if (
+        overlap_cache is not None
+        and current_map is not None
+        and previous_map is not None
+        and hazard_threshold is not None
+    ):
+        overlap_cache_key = create_overlap_cache_key(
+            previous_map,
+            current_map,
+            hazard_threshold,
+            hazard_dir,
+            l1_area_geojson=l1_area_geojson,
+            l1_active_timesteps=l1_active_timesteps,
+        )
+
+        if overlap_cache_key in overlap_cache:
+            if verbose:
+                print(f"Using cached transition probabilities for {overlap_cache_key}")
+            transition_probabilities = overlap_cache[overlap_cache_key]
+
+    if transition_probabilities is None:
+        if verbose:
+            print("Computing transition probabilities (cache miss)")
+        transition_probabilities = _compute_transition_probabilities(
+            previous_rfids_islands,
+            current_rfids_islands,
+            rfids_lengths,
+        )
+
+        if overlap_cache is not None and overlap_cache_key is not None:
+            overlap_cache[overlap_cache_key] = transition_probabilities
+            if _config is not None:
+                cache_dir = _config["interim_dir"]
+                save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                if verbose:
+                    print(f"Cached transition probabilities for {overlap_cache_key}")
+            if cache_updated is not None:
+                cache_updated["overlap_cache"] = overlap_cache
+
+    redistributed_counts = _redistribute_by_transition_probabilities(
+        actor_counts,
+        transition_probabilities,
+        verbose=verbose,
+    )
+
+    if verbose:
+        print(f"Redistributed {actor_type} distribution: {redistributed_counts}")
+
+    return _pack_actor_counts(
+        updated_actor_counts=redistributed_counts,
+        input_shape=input_shape,
+        nested_distribution=nested_distribution,
+        actor_type=actor_type,
+    )

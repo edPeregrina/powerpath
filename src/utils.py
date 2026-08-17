@@ -1,11 +1,11 @@
-import networkx as nx
-from pyproj import Transformer
-import shapely.geometry as sg
-import pandas as pd
+
 import geopandas as gpd
-from scipy.spatial import Voronoi
+import networkx as nx
+import pandas as pd
+import shapely.geometry as sg
+from pyproj import Transformer
 from rtree import index
-from typing import List
+
 
 def create_spatial_index(gdf):
     """
@@ -68,10 +68,11 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     Returns:
         Filtered graph with hazard edges removed
     """
-    import pandas as pd
-    import geopandas as gpd
-    import shapely
     from pathlib import Path
+
+    import geopandas as gpd
+    import pandas as pd
+    import shapely
     
     def is_motorway(highway):
         if isinstance(highway, str):
@@ -168,7 +169,7 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     
     return G
 
-def compile_asset_gdfs(gdf_list: List) -> "gpd.GeoDataFrame":
+def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     """Concatenate multiple per-type asset GeoDataFrames into one unified GeoDataFrame.
 
     The resulting index is a RangeIndex (0, 1, 2, …) so that each row's positional
@@ -196,8 +197,12 @@ def compile_asset_gdfs(gdf_list: List) -> "gpd.GeoDataFrame":
     return combined
 
 
-def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
-                                    gdf_secondary_assets: "gpd.GeoDataFrame") -> dict:
+def build_voronoi_service_area_map(
+    voronoi_gdf: "gpd.GeoDataFrame",
+    gdf_secondary_assets: "gpd.GeoDataFrame",
+    *,
+    return_diagnostics: bool = False,
+) -> dict:
     """Map each secondary asset to the primary asset whose Voronoi polygon contains it.
 
     The mapping is built once before the simulation starts so the O(N·M) spatial
@@ -236,10 +241,15 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
             with :func:`compile_asset_gdfs`).
 
     Returns:
-        dict: ``{primary_pos: [secondary_pos, …]}`` – maps each primary asset's
-        positional index to the list of secondary asset positional indices that
-        fall within its Voronoi polygon.  Primary assets with no secondary assets
-        in their polygon are omitted.
+        dict or tuple[dict, dict]:
+            ``{primary_pos: [secondary_pos, …]}`` – maps each primary asset's
+            positional index to the list of secondary asset positional indices that
+            fall within its Voronoi polygon.  Primary assets with no secondary assets
+            in their polygon are omitted.
+
+            When ``return_diagnostics=True``, also returns a diagnostics dict with
+            resolution counts for overlap, point-in-polygon, nearest fallback,
+            and unresolved assets.
 
     Example::
 
@@ -250,13 +260,26 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
         service_area_map = build_voronoi_service_area_map(voronoi_gdf, gdf_hospitals_proj)
         config['dependency_parameters']['service_area_map'] = service_area_map
     """
+    diagnostics = {
+        "total_secondary_assets": len(gdf_secondary_assets),
+        "resolved_by_overlap": 0,
+        "resolved_by_point_in_polygon": 0,
+        "resolved_by_nearest": 0,
+        "unresolved": 0,
+        "unresolved_asset_ids": [],
+    }
+
     if voronoi_gdf.empty or gdf_secondary_assets.empty:
-        return {}
+        diagnostics["summary"] = "0 overlap, 0 point-in-polygon, 0 nearest, 0 unresolved"
+        return ({}, diagnostics) if return_diagnostics else {}
 
     # Reproject secondary assets to match the Voronoi CRS if needed.
-    if gdf_secondary_assets.crs is not None and voronoi_gdf.crs is not None:
-        if gdf_secondary_assets.crs != voronoi_gdf.crs:
-            gdf_secondary_assets = gdf_secondary_assets.to_crs(voronoi_gdf.crs)
+    if (
+        gdf_secondary_assets.crs is not None
+        and voronoi_gdf.crs is not None
+        and gdf_secondary_assets.crs != voronoi_gdf.crs
+    ):
+        gdf_secondary_assets = gdf_secondary_assets.to_crs(voronoi_gdf.crs)
 
     # Build R-tree spatial index on Voronoi polygons.
     # create_spatial_index inserts using the iterrows() index label as the key.
@@ -285,6 +308,7 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
 
         best_label = None
         best_overlap_area = -1.0
+        resolution_method = None
 
         # Step 2a – polygon/geometry overlap scoring.
         for vor_label in candidate_labels:
@@ -303,6 +327,7 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
             if overlap_area > best_overlap_area:
                 best_overlap_area = overlap_area
                 best_label = int(vor_label)
+                resolution_method = "overlap"
 
         # Step 2b – fallback to point-in-polygon if overlap did not resolve a match.
         if best_label is None:
@@ -316,6 +341,7 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
                     continue
                 if vor_geom.contains(point) or vor_geom.intersects(point):
                     best_label = int(vor_label)
+                    resolution_method = "point_in_polygon"
                     break
 
         # Step 2c – nearest-neighbour fallback to avoid unmatched assets.
@@ -333,9 +359,29 @@ def build_voronoi_service_area_map(voronoi_gdf: "gpd.GeoDataFrame",
                     nearest_distance = dist
                     nearest_label = label
             best_label = nearest_label
+            if best_label is not None:
+                resolution_method = "nearest"
 
         if best_label is not None and best_label in voronoi_records:
             primary_pos = voronoi_records[best_label][0]
             service_area_map.setdefault(primary_pos, []).append(int(sec_pos))
+            if resolution_method == "overlap":
+                diagnostics["resolved_by_overlap"] += 1
+            elif resolution_method == "point_in_polygon":
+                diagnostics["resolved_by_point_in_polygon"] += 1
+            elif resolution_method == "nearest":
+                diagnostics["resolved_by_nearest"] += 1
+        else:
+            diagnostics["unresolved"] += 1
+            diagnostics["unresolved_asset_ids"].append(int(sec_pos))
 
+    diagnostics["summary"] = (
+        f"{diagnostics['resolved_by_overlap']}/{diagnostics['total_secondary_assets']} overlap, "
+        f"{diagnostics['resolved_by_point_in_polygon']} point-in-polygon, "
+        f"{diagnostics['resolved_by_nearest']} nearest, "
+        f"{diagnostics['unresolved']} unresolved"
+    )
+
+    if return_diagnostics:
+        return service_area_map, diagnostics
     return service_area_map

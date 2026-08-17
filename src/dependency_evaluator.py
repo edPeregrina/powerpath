@@ -1,37 +1,29 @@
 """Dependency evaluation layer for operational-state blocking.
 
-This module provides two evaluation paths:
-
-1. **Legacy path** – :func:`evaluate_dependencies` uses flat flags
-   (``enable_default_rules``, ``require_repair_for_operational``) to preserve
-   backwards compatibility with existing call sites.
-
-2. **Graph-aware path** – :func:`evaluate_dependencies_from_graph` consults a
-   :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph` to apply
-   per-pair rules between hazard types, primary asset types (A), and optional
-   downstream asset types (B) within A's service area.
+This module keeps the original flat-rule evaluation as the baseline path and
+adds an explicit graph-aware path for opt-in dependency relationships.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Any
 
 import numpy as np
 
-
-DependencyContext = Dict[str, Any]
-DependencyReport = Dict[str, Any]
+DependencyContext = dict[str, Any]
+DependencyReport = dict[str, Any]
 
 
 def build_dependency_context(
     asset_type: np.ndarray,
-    hazard_values: Optional[np.ndarray] = None,
-    flooded_mask: Optional[np.ndarray] = None,
-    repair_time: Optional[np.ndarray] = None,
+    hazard_values: np.ndarray | None = None,
+    flooded_mask: np.ndarray | None = None,
+    repair_time: np.ndarray | None = None,
     repair_threshold: float = 0.0,
-    dependency_map: Optional[Dict[Any, Iterable[Any]]] = None,
-    area_dependencies: Optional[Iterable[Dict[str, Any]]] = None,
-    pairwise_dependencies: Optional[Iterable[Tuple[int, int]]] = None,
+    dependency_map: dict[Any, Iterable[Any]] | None = None,
+    area_dependencies: Iterable[dict[str, Any]] | None = None,
+    pairwise_dependencies: Iterable[tuple[int, int]] | None = None,
 ) -> DependencyContext:
     """Build a normalized dependency context dictionary.
 
@@ -77,16 +69,17 @@ def evaluate_pairwise_dependencies(context: DependencyContext) -> np.ndarray:
 def evaluate_dependency_rules(
     context: DependencyContext,
     *,
-    area_blocked_mask: Optional[np.ndarray] = None,
-    pairwise_blocked_mask: Optional[np.ndarray] = None,
-    enable_default_rules: bool = False,
+    area_blocked_mask: np.ndarray | None = None,
+    pairwise_blocked_mask: np.ndarray | None = None,
+    enable_default_rules: bool = True,
     require_repair_for_operational: bool = False,
 ) -> np.ndarray:
     """Combine dependency rules into one blocking mask.
 
-    Default rules are disabled by default to preserve existing behavior.
-    This function boundary is where rules such as msls/road behavior can be
-    activated in future passes.
+    The baseline default rules replicate the pre-knowledge-graph behavior:
+    flooded road assets are blocked here, while substation structural damage
+    remains governed by fragility and repair completion elsewhere in the
+    simulation.
     """
     num_assets = len(context["asset_type"])
     blocked_mask = np.zeros(num_assets, dtype=bool)
@@ -122,27 +115,40 @@ def build_dependency_report(
     blocked_mask: np.ndarray,
     area_blocked_mask: np.ndarray,
     pairwise_blocked_mask: np.ndarray,
+    rules_enabled: bool,
+    require_repair_for_operational: bool,
+    warning: str | None = None,
 ) -> DependencyReport:
     """Build a concise report suitable for logging/debugging."""
-    return {
+    report = {
         "blocked_count": int(np.sum(blocked_mask)),
         "area_blocked_count": int(np.sum(area_blocked_mask)),
         "pairwise_blocked_count": int(np.sum(pairwise_blocked_mask)),
+        "rules_enabled": bool(rules_enabled),
+        "require_repair_for_operational": bool(require_repair_for_operational),
+        "active_rules": [
+            "road:flooded" if rules_enabled else None,
+            "repair_time:threshold" if require_repair_for_operational else None,
+        ],
     }
+    report["active_rules"] = [rule for rule in report["active_rules"] if rule is not None]
+    if warning is not None:
+        report["warning"] = warning
+    return report
 
 
 def evaluate_dependencies(
     operational: np.ndarray,
     asset_type: np.ndarray,
     *,
-    hazard_values: Optional[np.ndarray] = None,
-    flooded_mask: Optional[np.ndarray] = None,
-    repair_time: Optional[np.ndarray] = None,
+    hazard_values: np.ndarray | None = None,
+    flooded_mask: np.ndarray | None = None,
+    repair_time: np.ndarray | None = None,
     repair_threshold: float = 0.0,
-    dependency_map: Optional[Dict[Any, Iterable[Any]]] = None,
-    area_dependencies: Optional[Iterable[Dict[str, Any]]] = None,
-    pairwise_dependencies: Optional[Iterable[Tuple[int, int]]] = None,
-    enable_default_rules: bool = False,
+    dependency_map: dict[Any, Iterable[Any]] | None = None,
+    area_dependencies: Iterable[dict[str, Any]] | None = None,
+    pairwise_dependencies: Iterable[tuple[int, int]] | None = None,
+    enable_default_rules: bool = True,
     require_repair_for_operational: bool = False,
     return_report: bool = False,
 ):
@@ -174,10 +180,20 @@ def evaluate_dependencies(
     if not return_report:
         return updated_operational
 
+    warning = None
+    if not enable_default_rules:
+        warning = (
+            "Default dependency rules are disabled; flooded-road dependency "
+            "blocking is not being applied."
+        )
+
     report = build_dependency_report(
         blocked_mask=blocked_mask,
         area_blocked_mask=area_blocked_mask,
         pairwise_blocked_mask=pairwise_blocked_mask,
+        rules_enabled=enable_default_rules,
+        require_repair_for_operational=require_repair_for_operational,
+        warning=warning,
     )
     return updated_operational, report
 
@@ -190,6 +206,7 @@ def _compute_repair_blocked_mask(
     repair_time: np.ndarray,
     asset_mask: np.ndarray,
     return_to_operational,
+    wait_vectors: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Return a boolean mask of assets blocked due to repair status.
 
@@ -204,9 +221,10 @@ def _compute_repair_blocked_mask(
         requirements are not yet satisfied.
     """
     from src.dependency_knowledge_graph import (
+        TRIGGER_DELAYED,
         TRIGGER_IMMEDIATE,
-        TRIGGER_REPAIR_COMPLETE,
         TRIGGER_REPAIR_BELOW,
+        TRIGGER_REPAIR_COMPLETE,
     )
 
     blocked = np.zeros(len(repair_time), dtype=bool)
@@ -220,7 +238,19 @@ def _compute_repair_blocked_mask(
         blocked[asset_mask] = repair_time[asset_mask] > 0.0
     elif trigger == TRIGGER_REPAIR_BELOW:
         threshold = return_to_operational.threshold
-        blocked[asset_mask] = repair_time[asset_mask] >= threshold
+        blocked[asset_mask] = repair_time[asset_mask] > threshold
+    elif trigger == TRIGGER_DELAYED:
+        if wait_vectors is None:
+            blocked[asset_mask] = True
+        else:
+            wait_vector = np.asarray(
+                wait_vectors.get(
+                    return_to_operational.wait_vector,
+                    np.zeros(len(repair_time), dtype=np.float64),
+                ),
+                dtype=np.float64,
+            )
+            blocked[asset_mask] = wait_vector[asset_mask] > 0.0
 
     return blocked
 
@@ -230,6 +260,7 @@ def _compute_restore_eligible_mask(
     flooded_mask: np.ndarray,
     asset_mask: np.ndarray,
     return_to_operational,
+    wait_vectors: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Return a boolean mask of assets eligible to be restored to operational.
 
@@ -247,9 +278,10 @@ def _compute_restore_eligible_mask(
         Boolean array; ``True`` where an asset may be restored to operational.
     """
     from src.dependency_knowledge_graph import (
+        TRIGGER_DELAYED,
         TRIGGER_IMMEDIATE,
-        TRIGGER_REPAIR_COMPLETE,
         TRIGGER_REPAIR_BELOW,
+        TRIGGER_REPAIR_COMPLETE,
     )
 
     eligible = np.zeros(len(repair_time), dtype=bool)
@@ -264,7 +296,16 @@ def _compute_restore_eligible_mask(
         eligible[not_flooded] = repair_time[not_flooded] == 0.0
     elif trigger == TRIGGER_REPAIR_BELOW:
         threshold = return_to_operational.threshold
-        eligible[not_flooded] = repair_time[not_flooded] < threshold
+        eligible[not_flooded] = repair_time[not_flooded] <= threshold
+    elif trigger == TRIGGER_DELAYED and wait_vectors is not None:
+        wait_vector = np.asarray(
+            wait_vectors.get(
+                return_to_operational.wait_vector,
+                np.zeros(len(repair_time), dtype=np.float64),
+            ),
+            dtype=np.float64,
+        )
+        eligible[not_flooded] = wait_vector[not_flooded] <= 0.0
 
     return eligible
 
@@ -275,8 +316,9 @@ def restore_operational_from_graph(
     hazard_type: str,
     knowledge_graph,
     *,
-    flooded_mask: Optional[np.ndarray] = None,
-    repair_time: Optional[np.ndarray] = None,
+    flooded_mask: np.ndarray | None = None,
+    repair_time: np.ndarray | None = None,
+    wait_vectors: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     """Restore assets to operational based on knowledge graph return-to-operational triggers.
 
@@ -289,9 +331,10 @@ def restore_operational_from_graph(
        (e.g. ``repair_complete``: repair_time == 0; ``repair_below``: repair_time
        < threshold; ``immediate``: always satisfied once hazard clears).
 
-    This function only enables assets — it never disables them.  Call it *before*
-    :func:`evaluate_dependencies_from_graph` so that the block pass can immediately
-    re-suppress any asset that still does not meet conditions (e.g. still flooded).
+    This function only enables assets — it never disables them.  It is therefore
+    always paired with the block pass in :func:`evaluate_dependencies_from_graph`:
+    assets move up only when the trigger is satisfied, then the block pass can
+    immediately re-suppress any asset whose rule conditions are still not met.
 
     Args:
         operational: Boolean array of current operational states (will not be mutated).
@@ -326,7 +369,11 @@ def restore_operational_from_graph(
             if rule.relationship != "direct":
                 continue
             eligible = _compute_restore_eligible_mask(
-                repair_time, flooded_mask, a_mask, rule.return_to_operational
+                repair_time,
+                flooded_mask,
+                a_mask,
+                rule.return_to_operational,
+                wait_vectors=wait_vectors,
             )
             # Only restore assets that were previously non-operational.
             operational |= eligible & ~operational
@@ -340,9 +387,10 @@ def evaluate_dependencies_from_graph(
     hazard_type: str,
     knowledge_graph,
     *,
-    flooded_mask: Optional[np.ndarray] = None,
-    repair_time: Optional[np.ndarray] = None,
-    service_area_map: Optional[Dict[int, List[int]]] = None,
+    flooded_mask: np.ndarray | None = None,
+    repair_time: np.ndarray | None = None,
+    wait_vectors: dict[str, np.ndarray] | None = None,
+    service_area_map: dict[int, list[int]] | None = None,
     return_report: bool = False,
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
@@ -402,6 +450,7 @@ def evaluate_dependencies_from_graph(
         knowledge_graph,
         flooded_mask=flooded_mask,
         repair_time=repair_time,
+        wait_vectors=wait_vectors,
     )
 
     if flooded_mask is None:
@@ -418,6 +467,7 @@ def evaluate_dependencies_from_graph(
     hazard_blocked_count = 0
     repair_blocked_count = 0
     service_area_blocked_count = 0
+    active_rules: list[dict[str, Any]] = []
 
     unique_asset_types = np.unique(asset_type)
 
@@ -431,6 +481,16 @@ def evaluate_dependencies_from_graph(
         for rule in direct_rules:
             if rule.relationship != "direct":
                 continue
+            active_rules.append(
+                {
+                    "hazard_type": hazard_type,
+                    "asset_type_a": a_type,
+                    "asset_type_b": None,
+                    "relationship": "direct",
+                    "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
+                    "return_trigger": rule.return_to_operational.trigger,
+                }
+            )
 
             # 1. Hazard blocking
             if rule.hazard_blocks_operation:
@@ -441,7 +501,10 @@ def evaluate_dependencies_from_graph(
 
             # 2. Repair-state blocking
             repair_blocked = _compute_repair_blocked_mask(
-                repair_time, a_mask, rule.return_to_operational
+                repair_time,
+                a_mask,
+                rule.return_to_operational,
+                wait_vectors=wait_vectors,
             )
             newly_repair_blocked = repair_blocked & ~blocked_mask
             blocked_mask |= repair_blocked
@@ -462,6 +525,16 @@ def evaluate_dependencies_from_graph(
             for rule in sa_rules:
                 if rule.relationship != "service_area":
                     continue
+                active_rules.append(
+                    {
+                        "hazard_type": hazard_type,
+                        "asset_type_a": a_type,
+                        "asset_type_b": b_type,
+                        "relationship": "service_area",
+                        "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
+                        "return_trigger": rule.return_to_operational.trigger,
+                    }
+                )
 
                 # Find A-type assets that are currently non-operational (after
                 # direct blocking above has been folded in).
@@ -471,10 +544,9 @@ def evaluate_dependencies_from_graph(
                 for a_idx in np.where(a_non_operational)[0]:
                     b_indices = service_area_map.get(int(a_idx), [])
                     for b_idx in b_indices:
-                        if b_idx < num_assets and b_mask[b_idx]:
-                            if not blocked_mask[b_idx]:
-                                blocked_mask[b_idx] = True
-                                service_area_blocked_count += 1
+                        if b_idx < num_assets and b_mask[b_idx] and not blocked_mask[b_idx]:
+                            blocked_mask[b_idx] = True
+                            service_area_blocked_count += 1
 
     updated_operational = apply_dependency_blocking(operational, blocked_mask)
 
@@ -486,5 +558,7 @@ def evaluate_dependencies_from_graph(
         "hazard_blocked_count": hazard_blocked_count,
         "repair_blocked_count": repair_blocked_count,
         "service_area_blocked_count": service_area_blocked_count,
+        "active_rule_count": len(active_rules),
+        "active_rules": active_rules,
     }
     return updated_operational, report

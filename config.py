@@ -62,6 +62,11 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'recovery_parameters': {
             'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
+            # Optional per-asset fragility overrides:
+            #   {'hospital': {'mode': 'probability_curve',
+            #                 'intensity_values': [0.0, 0.5, 1.0],
+            #                 'failure_probabilities': [0.0, 0.4, 1.0]}}
+            'fragility_models': {},
             # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
@@ -82,6 +87,9 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #                      graph or metrics code.
         # 'population_groups': mapping of display label → CBS population column name.
         #                      Extend with any column present in the population grid.
+        #                      Reference: CBS, "Statistische gegevens per vierkant en
+        #                      postcode 2022, 2023, 2024 – Beschrijving cijfers"
+        #                      https://www.cbs.nl/nl-nl/longread/diversen/2025/statistische-gegevens-per-vierkant-en-postcode-2022-2023-2024/4-beschrijving-cijfers
         # 'reference_group'  : the population group used as the baseline when computing
         #                      equity gaps (must be a key in 'population_groups').
         'service_node_config': {
@@ -129,84 +137,26 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #               "repair_below"   – returns when repair_time < threshold
         #     threshold : float           – used only with "repair_below"
         #
-        # Add entries for new hazards (wind, seismic, …) or new asset types
-        # (hospitals, water-treatment, …) following the same pattern.
-        # Leave 'knowledge_graph' as an empty list to fall back to the legacy
-        # flat-flag path (enable_default_rules / require_repair_for_operational).
+        # Baseline behavior is the legacy flat-rule path:
+        #   - flooded roads are blocked here
+        #   - substation/hospital structural damage remains governed by fragility
+        #     and repair completion in the simulation loop
+        # Provide explicit knowledge-graph rules only when modelling additional
+        # downstream dependencies (for example msls -> hospital).
         'dependency_parameters': {
             'hazard_type': 'flooding',  # active hazard type for graph look-up
+            'enable_default_rules': True,
+            'require_repair_for_operational': False,
             'knowledge_graph': [
-                # ---- msls : Medium/Low-voltage Substation ----
-                # Requires full repair before returning to service.
-                {
-                    'hazard_type': 'flooding',
-                    'asset_type_a': 'msls',
-                    'asset_type_b': None,
-                    'relationship': 'direct',
-                    'parameters': {
-                        'hazard_blocks_operation': True,
-                        'return_to_operational': {'trigger': 'repair_complete'},
-                    },
-                },
-                # ---- ms : Medium-voltage Substation ----
-                # Same as msls: requires full repair before returning to service.
-                {
-                    'hazard_type': 'flooding',
-                    'asset_type_a': 'ms',
-                    'asset_type_b': None,
-                    'relationship': 'direct',
-                    'parameters': {
-                        'hazard_blocks_operation': True,
-                        'return_to_operational': {'trigger': 'repair_complete'},
-                    },
-                },
-                # ---- ls : Low-voltage Substation ----
-                # Simpler units; can be re-energised once remaining repair work
-                # drops below 2 hours (quick inspection / dry-out sufficient).
-                {
-                    'hazard_type': 'flooding',
-                    'asset_type_a': 'ls',
-                    'asset_type_b': None,
-                    'relationship': 'direct',
-                    'parameters': {
-                        'hazard_blocks_operation': True,
-                        'return_to_operational': {'trigger': 'repair_below', 'threshold': 2.0},
-                    },
-                },
-                # ----------------------------------------------------------------
                 # Template: service-area rule (A supplies B within its service area)
-                # Uncomment and adapt when downstream asset types are added.
-                # ----------------------------------------------------------------
                 # {
                 #     'hazard_type': 'flooding',
                 #     'asset_type_a': 'msls',
-                #     'asset_type_b': 'hospital',       # example downstream asset type
+                #     'asset_type_b': 'hospital',
                 #     'relationship': 'service_area',
                 #     'parameters': {
-                #         'hazard_blocks_operation': False,  # hospital not directly flooded
+                #         'hazard_blocks_operation': False,
                 #         'return_to_operational': {'trigger': 'immediate'},
-                #     },
-                # },
-                # ----------------------------------------------------------------
-                # Template: hospital direct structural flood rule
-                # Hospitals may also be directly damaged by flooding (separate
-                # from the power-loss disruption above).  The placeholder fragility
-                # function (damage_recovery.hospital_fragility_function) is used
-                # automatically when 'hospital' assets are present in gdf_assets.
-                # Hospital repair crews can be dedicated by type/group: pass
-                #   repair_crews_by_asset_type={'hospital': N}
-                # or
-                #   repair_crews_by_asset_type={('ls', 'msls'): A, 'hospital': B}
-                # to simulate_asset_damage_recovery_access_breakdown.
-                # ----------------------------------------------------------------
-                # {
-                #     'hazard_type': 'flooding',
-                #     'asset_type_a': 'hospital',
-                #     'asset_type_b': None,
-                #     'relationship': 'direct',
-                #     'parameters': {
-                #         'hazard_blocks_operation': True,
-                #         'return_to_operational': {'trigger': 'repair_complete'},
                 #     },
                 # },
             ],

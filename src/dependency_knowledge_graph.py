@@ -27,8 +27,8 @@ Usage example::
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Return-to-operational trigger constants
@@ -42,13 +42,21 @@ TRIGGER_REPAIR_COMPLETE = "repair_complete"
 TRIGGER_REPAIR_BELOW = "repair_below"
 """Asset returns to operational when repair_time < threshold (e.g. 2.0 hours)."""
 
-VALID_TRIGGERS = {TRIGGER_IMMEDIATE, TRIGGER_REPAIR_COMPLETE, TRIGGER_REPAIR_BELOW}
+TRIGGER_DELAYED = "delayed"
+"""Asset returns to operational after a named wait vector has counted down to 0."""
+
+VALID_TRIGGERS = {
+    TRIGGER_IMMEDIATE,
+    TRIGGER_REPAIR_COMPLETE,
+    TRIGGER_REPAIR_BELOW,
+    TRIGGER_DELAYED,
+}
 
 # ---------------------------------------------------------------------------
 # Default rule parameters (used when no matching rule is found in the graph)
 # ---------------------------------------------------------------------------
-_DEFAULT_PARAMETERS: Dict[str, Any] = {
-    "hazard_blocks_operation": True,
+_DEFAULT_PARAMETERS: dict[str, Any] = {
+    "hazard_blocks_operation": False,
     "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
 }
 
@@ -58,13 +66,18 @@ class ReturnToOperational:
     """Describes what must happen before an asset can return to operational state.
 
     Attributes:
-        trigger: One of ``"immediate"``, ``"repair_complete"``, or ``"repair_below"``.
+        trigger: One of ``"immediate"``, ``"repair_complete"``, ``"repair_below"``,
+            or ``"delayed"``.
         threshold: Only used when *trigger* is ``"repair_below"``; the asset
             becomes operational once ``repair_time < threshold``.
+        delay_steps: Only used when *trigger* is ``"delayed"``.
+        wait_vector: Wait-vector name used when *trigger* is ``"delayed"``.
     """
 
     trigger: str = TRIGGER_IMMEDIATE
     threshold: float = 0.0
+    delay_steps: float = 0.0
+    wait_vector: str = "dependency_wait"
 
     def __post_init__(self):
         if self.trigger not in VALID_TRIGGERS:
@@ -75,18 +88,27 @@ class ReturnToOperational:
             raise ValueError(
                 "threshold must be > 0 when trigger is 'repair_below'."
             )
+        if self.trigger == TRIGGER_DELAYED and self.delay_steps <= 0.0:
+            raise ValueError(
+                "delay_steps must be > 0 when trigger is 'delayed'."
+            )
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "ReturnToOperational":
+    def from_dict(cls, d: dict[str, Any]) -> ReturnToOperational:
         return cls(
             trigger=d.get("trigger", TRIGGER_IMMEDIATE),
             threshold=float(d.get("threshold", 0.0)),
+            delay_steps=float(d.get("delay_steps", 0.0)),
+            wait_vector=str(d.get("wait_vector", "dependency_wait")),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"trigger": self.trigger}
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"trigger": self.trigger}
         if self.trigger == TRIGGER_REPAIR_BELOW:
             result["threshold"] = self.threshold
+        elif self.trigger == TRIGGER_DELAYED:
+            result["delay_steps"] = self.delay_steps
+            result["wait_vector"] = self.wait_vector
         return result
 
 
@@ -107,13 +129,13 @@ class DependencyRule:
 
     hazard_type: str
     asset_type_a: str
-    asset_type_b: Optional[str]
+    asset_type_b: str | None
     relationship: str
     hazard_blocks_operation: bool
     return_to_operational: ReturnToOperational
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "DependencyRule":
+    def from_dict(cls, d: dict[str, Any]) -> DependencyRule:
         params = d.get("parameters", {})
         rto_dict = params.get("return_to_operational", {"trigger": TRIGGER_IMMEDIATE})
         return cls(
@@ -125,7 +147,7 @@ class DependencyRule:
             return_to_operational=ReturnToOperational.from_dict(rto_dict),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "hazard_type": self.hazard_type,
             "asset_type_a": self.asset_type_a,
@@ -149,21 +171,21 @@ class DependencyKnowledgeGraph:
         rules: Initial list of :class:`DependencyRule` objects.
     """
 
-    def __init__(self, rules: Optional[List[DependencyRule]] = None):
-        self._rules: List[DependencyRule] = rules or []
+    def __init__(self, rules: list[DependencyRule] | None = None):
+        self._rules: list[DependencyRule] = rules or []
 
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_config(cls, rule_list: List[Dict[str, Any]]) -> "DependencyKnowledgeGraph":
+    def from_config(cls, rule_list: list[dict[str, Any]]) -> DependencyKnowledgeGraph:
         """Build a graph from a list of rule dicts (e.g. from ``config.py``)."""
         rules = [DependencyRule.from_dict(r) for r in rule_list]
         return cls(rules)
 
     @classmethod
-    def from_json(cls, json_str: str) -> "DependencyKnowledgeGraph":
+    def from_json(cls, json_str: str) -> DependencyKnowledgeGraph:
         """Deserialise from a JSON string."""
         return cls.from_config(json.loads(json_str))
 
@@ -179,8 +201,8 @@ class DependencyKnowledgeGraph:
         self,
         hazard_type: str,
         asset_type_a: str,
-        asset_type_b: Optional[str] = None,
-    ) -> List[DependencyRule]:
+        asset_type_b: str | None = None,
+    ) -> list[DependencyRule]:
         """Return rules matching the given combination.
 
         Args:
@@ -201,13 +223,13 @@ class DependencyKnowledgeGraph:
         ]
 
     def get_default_rule(self, hazard_type: str, asset_type_a: str) -> DependencyRule:
-        """Return a safe default rule for pairs not present in the graph."""
+        """Return a no-op default rule for pairs not present in the graph."""
         return DependencyRule(
             hazard_type=hazard_type,
             asset_type_a=asset_type_a,
             asset_type_b=None,
             relationship="direct",
-            hazard_blocks_operation=True,
+            hazard_blocks_operation=False,
             return_to_operational=ReturnToOperational(trigger=TRIGGER_IMMEDIATE),
         )
 
@@ -215,8 +237,8 @@ class DependencyKnowledgeGraph:
         self,
         hazard_type: str,
         asset_type_a: str,
-        asset_type_b: Optional[str] = None,
-    ) -> List[DependencyRule]:
+        asset_type_b: str | None = None,
+    ) -> list[DependencyRule]:
         """Like :meth:`get_rules` but returns the default rule when none match."""
         matched = self.get_rules(hazard_type, asset_type_a, asset_type_b)
         if matched:
@@ -227,11 +249,11 @@ class DependencyKnowledgeGraph:
     # Inspection helpers
     # ------------------------------------------------------------------
 
-    def all_asset_types(self) -> List[str]:
+    def all_asset_types(self) -> list[str]:
         """Return the sorted unique set of all asset_type_a values."""
         return sorted({r.asset_type_a for r in self._rules})
 
-    def all_hazard_types(self) -> List[str]:
+    def all_hazard_types(self) -> list[str]:
         """Return the sorted unique set of all hazard_type values."""
         return sorted({r.hazard_type for r in self._rules})
 
@@ -249,128 +271,27 @@ class DependencyKnowledgeGraph:
 def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
     """Return the baseline knowledge graph for flooding and the known asset types.
 
-    Asset types currently in the model:
-
-    * ``"msls"`` – Medium/Low-voltage Substation (MV/LV, combined).  These are
-      the primary distribution substations.  Following NKWK the median failure
-      depth is 0.6 m; they require physical repair before returning to service.
-    * ``"ms"`` – Medium-voltage Substation (MV only).  Similar criticality to
-      msls; assumed to require repair before returning to service.
-    * ``"ls"`` – Low-voltage Substation (LV only).  Smaller and simpler;
-      assumed to return to service once repair time has been reduced below a
-      threshold (default 2 hours) rather than waiting for full completion.
-
-    All rules use ``hazard_type = "flooding"`` — the only hazard currently
-    modelled.  Add further calls to ``DependencyKnowledgeGraph.from_config``
-    (or extend this list) to introduce new hazards (wind, seismic, …) or new
-    asset types (hospitals, water-treatment, …).
-
-    The rules encoded here represent the **defaults when nothing is explicitly
-    parameterised** and serve as a living template for future extensions.
+    The default graph mirrors the pre-knowledge-graph baseline: direct
+    structural damage remains governed by fragility and repair state in the
+    simulation, while flooded road assets are the only assets that are made
+    explicitly non-operational by dependency rules.
 
     Returns:
         A :class:`DependencyKnowledgeGraph` populated with sensible defaults.
     """
     rules = [
         # ------------------------------------------------------------------
-        # msls – Medium/Low-voltage Substation
+        # road – direct flooding dependency
         # ------------------------------------------------------------------
-        # While flooded the substation is non-operational.
-        # It can only return to service once full repair is complete
-        # (repair_time == 0), reflecting the higher structural complexity and
-        # safety requirements of combined MV/LV stations.
+        # This preserves the pre-refactor semantics: roads are unavailable
+        # while flooded, and return as soon as the flood clears.
         {
             "hazard_type": "flooding",
-            "asset_type_a": "msls",
+            "asset_type_a": "road",
             "asset_type_b": None,
             "relationship": "direct",
             "parameters": {
                 "hazard_blocks_operation": True,
-                "return_to_operational": {
-                    "trigger": TRIGGER_REPAIR_COMPLETE,
-                },
-            },
-        },
-        # ------------------------------------------------------------------
-        # ms – Medium-voltage Substation
-        # ------------------------------------------------------------------
-        # Same behaviour as msls: requires full repair before returning to
-        # service.  Medium-voltage equipment typically needs certified
-        # inspection after flood exposure.
-        {
-            "hazard_type": "flooding",
-            "asset_type_a": "ms",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": True,
-                "return_to_operational": {
-                    "trigger": TRIGGER_REPAIR_COMPLETE,
-                },
-            },
-        },
-        # ------------------------------------------------------------------
-        # ls – Low-voltage Substation
-        # ------------------------------------------------------------------
-        # Flooded ls stations are taken out of service, but they are simpler
-        # units that can be re-energised once the remaining repair work has
-        # dropped below 2 hours (i.e. a quick inspection / dry-out is
-        # sufficient rather than a full replacement).
-        {
-            "hazard_type": "flooding",
-            "asset_type_a": "ls",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": True,
-                "return_to_operational": {
-                    "trigger": TRIGGER_REPAIR_BELOW,
-                    "threshold": 2.0,   # hours – matches global repair_threshold default
-                },
-            },
-        },
-        # ------------------------------------------------------------------
-        # hospital – direct structural flood damage
-        # ------------------------------------------------------------------
-        # Hospitals can be physically damaged by flooding and require repair
-        # before resuming full operation.  The damage / repair parameters use
-        # a placeholder fragility function (see damage_recovery.hospital_fragility_function)
-        # that should be replaced once evidence-based depth-damage data is
-        # available.  Hospital repair crews are separate from substation crews
-        # (see the repair_crews_by_asset_type parameter on the simulation).
-        {
-            "hazard_type": "flooding",
-            "asset_type_a": "hospital",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": True,
-                "return_to_operational": {
-                    "trigger": TRIGGER_REPAIR_COMPLETE,
-                },
-            },
-        },
-        # ------------------------------------------------------------------
-        # msls → hospital  (power-dependency / service-area rule)
-        # ------------------------------------------------------------------
-        # Any hospital within the Voronoi service area of an msls substation
-        # depends on that substation for power.  The hospital is non-operational
-        # as long as all substations it depends on are non-operational.
-        # Once power is restored the hospital returns to operational immediately
-        # (no physical repair is required for the power-loss disruption itself).
-        #
-        # The "ALL must fail" logic (vs. "ANY must fail") is configured via the
-        # disruption_logic field.  For Voronoi-based association each hospital
-        # maps to exactly one substation so the distinction is moot; it becomes
-        # relevant for telecom or other asset types where one point may be covered
-        # by multiple assets.
-        {
-            "hazard_type": "flooding",
-            "asset_type_a": "msls",
-            "asset_type_b": "hospital",
-            "relationship": "service_area",
-            "parameters": {
-                "hazard_blocks_operation": False,
                 "return_to_operational": {
                     "trigger": TRIGGER_IMMEDIATE,
                 },

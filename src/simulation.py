@@ -1,31 +1,51 @@
 """
 Functions to run the damage and recovery simulation.
 """
-import numpy as np
-import pandas as pd
-import pickle
-from pathlib import Path
-from datetime import datetime
-from tqdm import tqdm
-
-from src.caching import load_accessibility_cache, load_island_cache, load_overlap_cache, load_hazard_extraction_cache, save_accessibility_cache, save_overlap_cache, save_hazard_extraction_cache
-from src.island_analysis import match_island_ids_assets, match_assets_access, update_repair_crew_islands, compute_island_geodataframe_from_graph
-from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
-from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
-from src.dependency_evaluator import evaluate_dependencies, evaluate_dependencies_from_graph, restore_operational_from_graph
-from src.recovery_scheduler import (
-    initialize_recovery_wait_vectors,
-    decrement_recovery_wait_vectors,
-    all_required_waits_cleared,
-)
-from src.caching import create_accessibility_cache_key, create_island_cache_key, get_asset_centroid_hash
-from src.adaptation import build_l1_l2_reduction_array, _build_adaptation_arrays_cached
 
 # Import hazard extraction method from config
 import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from src.adaptation import build_l1_l2_reduction_array
+from src.caching import (
+    create_accessibility_cache_key,
+    create_island_cache_key,
+    get_asset_centroid_hash,
+    load_accessibility_cache,
+    load_hazard_extraction_cache,
+    load_island_cache,
+    load_overlap_cache,
+)
+from src.damage_recovery import (
+    default_damage_ratio_function,
+    default_fragility_function,
+    default_repair_time_function,
+    vectorized_damage_ratio_solver,
+)
+from src.dependency_evaluator import (
+    evaluate_dependencies,
+    evaluate_dependencies_from_graph,
+)
+from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
+from src.island_analysis import (
+    match_assets_access,
+    match_island_ids_assets,
+    update_repair_crew_islands,
+)
+from src.recovery_scheduler import (
+    all_selected_waits_cleared,
+    decrement_recovery_wait_vectors,
+    initialize_recovery_wait_vectors,
+)
+
 sys.path.append(str(Path(__file__).parent.parent))
-from config import get_config
 from shutil import copyfile
+
+from config import get_config
+
 
 class SimulationState:
     def __init__(self, gdf_assets, num_assets):
@@ -38,6 +58,8 @@ class SimulationState:
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
         self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
+        self.dependency_report = {}
+        self.simulation_warnings = []
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -209,7 +231,13 @@ def _update_hazard_map_states(
         fragility_operational = np.ones_like(state.operational, dtype=bool)
         hazard_subset = state.current_hazard_values[assets_to_evaluate]
         asset_type_subset = asset_type[assets_to_evaluate]
-        fragility_result = default_fragility_function(hazard_subset, asset_type_subset, k=fragility_param_k, major_timestep=major_timestep)
+        fragility_result = default_fragility_function(
+            hazard_subset,
+            asset_type_subset,
+            k=fragility_param_k,
+            major_timestep=major_timestep,
+            fragility_models=_config['recovery_parameters'].get('fragility_models'),
+        )
         fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
         state.operational = np.minimum(state.operational, fragility_operational)
 
@@ -332,7 +360,7 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                     newly_assigned_crews = repairable_assets.sum()
                     repair_crews_assigned[repairable_assets] = True
                     # Bounds checking: ensure we don't assign more crews than available
-                    newly_assigned_crews = min(newly_assigned_crews, available_repair_crews[island_id])
+                    newly_assigned_crews = min(newly_assigned_crews, crew_count)
                     available_repair_crews[island_id] -= newly_assigned_crews
                     
                     if verbose and newly_assigned_crews > 0:
@@ -835,9 +863,9 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
                               asset_type=None, repair_crews_by_asset_type=None):
     """Clear completed repair states and release crews for completed repairs."""
     completed_repairs = (
-        all_required_waits_cleared(
+        all_selected_waits_cleared(
             state.recovery_wait_vectors,
-            required_vectors=("repair_time", "dependency_wait", "reset_wait"),
+            wait_vector_names=("repair_time", "dependency_wait", "reset_wait"),
         )
         & state.repair_crews_assigned
     )
@@ -924,9 +952,10 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
             call (legacy behaviour; use the pre-built instance for performance).
     """
     dependency_config = config.get('dependency_parameters', {})
-    kg_config = dependency_config.get('knowledge_graph', None)
+    kg_config = dependency_config.get('knowledge_graph', None) or []
+    state.dependency_report = {}
 
-    if kg_config is not None:
+    if kg_config:
         # Graph-aware path: per-pair rules from the knowledge graph.
         if knowledge_graph is None:
             from src.dependency_knowledge_graph import DependencyKnowledgeGraph
@@ -936,27 +965,34 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
         # evaluate_dependencies_from_graph internally calls restore_operational_from_graph
         # first (restore pass) then applies the block pass, so state.operational is
         # updated correctly in both directions.
-        state.operational = evaluate_dependencies_from_graph(
+        state.operational, state.dependency_report = evaluate_dependencies_from_graph(
             state.operational,
             asset_type,
             hazard_type,
             knowledge_graph,
             flooded_mask=flooded_mask,
             repair_time=state.recovery_wait_vectors["repair_time"],
+            wait_vectors=state.recovery_wait_vectors,
             service_area_map=service_area_map,
+            return_report=True,
         )
     else:
         # Legacy flat-flags path (backwards compatible).
-        state.operational = evaluate_dependencies(
+        state.operational, state.dependency_report = evaluate_dependencies(
             state.operational,
             asset_type,
             hazard_values=state.current_hazard_values,
             flooded_mask=flooded_mask,
             repair_time=state.recovery_wait_vectors["repair_time"],
             repair_threshold=repair_threshold,
-            enable_default_rules=dependency_config.get('enable_default_rules', False),
+            enable_default_rules=dependency_config.get('enable_default_rules', True),
             require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
+            return_report=True,
         )
+
+    warning = state.dependency_report.get("warning")
+    if warning and warning not in state.simulation_warnings:
+        state.simulation_warnings.append(warning)
 
 def _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold):
     """Update unreachable assets for island-based assignment.
@@ -1044,6 +1080,11 @@ def _collect_timestep_metrics(
         'total_repair_backlog': total_repair_backlog,
         'total_damage_ratio': total_damage_ratio
     }
+    metrics.update({
+        'dependency_blocked_count': state.dependency_report.get('blocked_count', 0),
+        'dependency_active_rule_count': state.dependency_report.get('active_rule_count', len(state.dependency_report.get('active_rules', []))),
+        'dependency_warning': state.dependency_report.get('warning'),
+    })
     return timestep_data, metrics
 
 def _save_config_file(output_dir, root_dir, execution_id):
@@ -1216,8 +1257,8 @@ def simulate_asset_damage_recovery_access_breakdown(
     # Pre-build the knowledge graph once to avoid reconstructing it every timestep.
     _knowledge_graph = None
     _dep_config = _config.get('dependency_parameters', {})
-    _kg_config = _dep_config.get('knowledge_graph', None)
-    if _kg_config is not None:
+    _kg_config = _dep_config.get('knowledge_graph', None) or []
+    if _kg_config:
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
 
@@ -1295,7 +1336,10 @@ def simulate_asset_damage_recovery_access_breakdown(
                 'avg_damage_ratio': avg_damage_ratio,
                 'avg_repair_time': avg_repair_time,
                 'total_repair_backlog': total_repair_backlog,  
-                'total_damage_ratio': total_damage_ratio       
+                'total_damage_ratio': total_damage_ratio,
+                'dependency_blocked_count': state.dependency_report.get('blocked_count', 0),
+                'dependency_active_rule_count': state.dependency_report.get('active_rule_count', len(state.dependency_report.get('active_rules', []))),
+                'dependency_warning': state.dependency_report.get('warning'),
             })
 
         # 8. Print end-of-day summary if verbose
@@ -1307,6 +1351,8 @@ def simulate_asset_damage_recovery_access_breakdown(
     #_save_config_file(output_dir, root_dir, execution_id)
 
     # Create output list format consistent with original function
+    if results and state.simulation_warnings:
+        results[-1]['simulation_warnings'] = list(state.simulation_warnings)
     all_results = [(1, results, timestep_results)]
 
     # Return results, final state, and updated caches
@@ -1316,5 +1362,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         'damage_ratio': state.damage_ratio,
         'repair_time': state.recovery_wait_vectors["repair_time"].copy(),
         'accessible': state.accessible,
-        'repair_crews_assigned': state.repair_crews_assigned
+        'repair_crews_assigned': state.repair_crews_assigned,
+        'dependency_report': state.dependency_report,
+        'simulation_warnings': list(state.simulation_warnings),
     }, cache_updated

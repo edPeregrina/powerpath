@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import pytest
 from shapely.geometry import Point, box
@@ -20,25 +19,24 @@ from shapely.geometry import Point, box
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.societal_access import (
-    SERVICE_NODE_TAXONOMY,
     POPULATION_GROUP_COLUMNS,
-    # Layer A — graph-native
-    build_island_assignment,
-    build_destination_function_map,
-    compute_origin_access,
-    compute_access_matrix_from_origins,
+    SERVICE_NODE_TAXONOMY,
+    # Layer D — wrapper
+    analyse_societal_access,
     # Layer B — spatial helpers (also exposed via backward-compat aliases)
     assign_destinations_to_islands_spatial,
     assign_origins_to_islands_spatial,
-    compute_function_access_per_island,   # alias
-    join_population_to_islands,           # alias
+    build_destination_function_map,
+    # Layer A — graph-native
+    build_island_assignment,
     # Layer C — shared metrics
     compute_access_matrix,
+    compute_access_matrix_from_origins,
     compute_equity_gaps,
-    # Layer D — wrapper
-    analyse_societal_access,
+    compute_function_access_per_island,  # alias
+    compute_origin_access,
+    join_population_to_islands,  # alias
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -401,6 +399,31 @@ class TestAssignOriginsToIslandsSpatial:
         r2 = join_population_to_islands(population, islands, pop_columns=pop_cols)
         pd.testing.assert_frame_equal(r1, r2)
 
+    def test_multi_island_overlap_is_split_proportionally(self):
+        islands = _make_islands({
+            0: box(0, 0, 50, 100),
+            1: box(50, 0, 100, 100),
+        })
+        population = _make_population([
+            {
+                "geometry": box(25, 0, 75, 100),
+                "aantal_inwoners": 100,
+                "aantal_inwoners_65_jaar_en_ouder": 40,
+                "aantal_inwoners_0_tot_15_jaar": 20,
+                "aantal_inwoners_25_tot_45_jaar": 30,
+            },
+        ])
+        pop_cols = list(POPULATION_GROUP_COLUMNS.values())
+
+        result = assign_origins_to_islands_spatial(population, islands, pop_columns=pop_cols)
+
+        assert len(result) == 2
+        assert set(result["island_id"]) == {0, 1}
+        assert set(result["allocation_method"]) == {"proportional_overlap"}
+        assert sorted(result["allocation_fraction"].round(2).tolist()) == [0.5, 0.5]
+        assert result["aantal_inwoners"].sum() == pytest.approx(100.0)
+        assert sorted(result["aantal_inwoners"].tolist()) == [50.0, 50.0]
+
 
 # ---------------------------------------------------------------------------
 # Tests — Layer C: compute_access_matrix (spatial path)
@@ -409,7 +432,7 @@ class TestAssignOriginsToIslandsSpatial:
 class TestComputeAccessMatrix:
 
     def test_full_access_when_all_on_connected_island(self, two_island_scenario):
-        islands, service_nodes, population = two_island_scenario
+        islands, _service_nodes, population = two_island_scenario
         service_nodes2 = _make_service_nodes(
             {"hospital": [(50, 50), (250, 50)]}
         )
@@ -642,7 +665,7 @@ class TestTaxonomyConstants:
             )
 
     def test_taxonomy_values_are_non_empty_strings(self):
-        for ntype, cat in SERVICE_NODE_TAXONOMY.items():
+        for cat in SERVICE_NODE_TAXONOMY.values():
             assert isinstance(cat, str) and cat
 
     def test_population_group_columns_has_total(self):
@@ -651,4 +674,3 @@ class TestTaxonomyConstants:
     def test_population_group_column_names_are_strings(self):
         for label, col in POPULATION_GROUP_COLUMNS.items():
             assert isinstance(label, str) and isinstance(col, str)
-

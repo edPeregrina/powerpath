@@ -50,8 +50,11 @@ Layer A — **node-level** (graph-based, primary):
 
 Layer B — **spatial preprocessing** (optional helper):
     :func:`assign_origins_to_islands_spatial`
-        Spatially assign population grid cells to island ids.  Use this
-        when origin entities are geographic zones rather than graph nodes.
+        Spatially assign population grid cells to island ids. Cells that
+        intersect multiple islands are split proportionally by overlap area;
+        cells with no overlap fall back to a nearest-island assignment.
+        Use this when origin entities are geographic zones rather than graph
+        nodes.
     :func:`assign_destinations_to_islands_spatial`
         Spatially assign service-node point locations to island ids.  Use
         this when service nodes are not embedded in the graph as nodes.
@@ -69,12 +72,14 @@ Layer D — **convenience wrapper**:
 
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set
+from collections.abc import Iterable, Mapping, Sequence
+from typing import (
+    Any,
+)
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # Service node taxonomy
@@ -83,7 +88,7 @@ import pandas as pd
 #: Default mapping: node *type* string → *function category* label.
 #: Extend or override this dict to add new service types without touching
 #: the graph or metrics code.
-SERVICE_NODE_TAXONOMY: Dict[str, str] = {
+SERVICE_NODE_TAXONOMY: dict[str, str] = {
     # Health
     "hospital": "health",
     "clinic": "health",
@@ -105,9 +110,9 @@ SERVICE_NODE_TAXONOMY: Dict[str, str] = {
 }
 
 #: Default demographic columns in the CBS population grid and their
-#: human-readable group labels used in the access matrix output.
+#: display labels used in the access matrix output.
 #: Values are the CBS column names; keys are the display labels.
-POPULATION_GROUP_COLUMNS: Dict[str, str] = {
+POPULATION_GROUP_COLUMNS: dict[str, str] = {
     "total": "aantal_inwoners",
     "elderly": "aantal_inwoners_65_jaar_en_ouder",
     "children": "aantal_inwoners_0_tot_15_jaar",
@@ -119,7 +124,7 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
 # Layer A — node-level, graph-based (primary path)
 # ---------------------------------------------------------------------------
 
-def build_island_assignment(graph) -> Dict[Any, int]:
+def build_island_assignment(graph) -> dict[Any, int]:
     """Compute the island partition of a disrupted graph.
 
     Each connected component of *graph* is interpreted as an island.  Every
@@ -163,7 +168,7 @@ def build_island_assignment(graph) -> Dict[Any, int]:
     else:
         components = list(nx.connected_components(graph))
 
-    assignment: Dict[Any, int] = {}
+    assignment: dict[Any, int] = {}
     for island_id, component in enumerate(components):
         for node in component:
             assignment[node] = island_id
@@ -174,8 +179,8 @@ def build_island_assignment(graph) -> Dict[Any, int]:
 def build_destination_function_map(
     destination_nodes: Mapping[Any, str],
     node_island_assignment: Mapping[Any, int],
-    taxonomy: Optional[Dict[str, str]] = None,
-) -> Dict[int, FrozenSet[str]]:
+    taxonomy: dict[str, str] | None = None,
+) -> dict[int, frozenset[str]]:
     """Map each island to the set of societal functions it contains.
 
     Parameters
@@ -203,8 +208,8 @@ def build_destination_function_map(
     if taxonomy is None:
         taxonomy = SERVICE_NODE_TAXONOMY
 
-    island_functions: Dict[int, Set[str]] = {}
-    missing: List[Any] = []
+    island_functions: dict[int, set[str]] = {}
+    missing: list[Any] = []
 
     for node_id, node_type in destination_nodes.items():
         island_id = node_island_assignment.get(node_id)
@@ -230,8 +235,8 @@ def build_destination_function_map(
 
 def compute_origin_access(
     origin_island_ids: Mapping[Any, int],
-    island_function_map: Mapping[int, FrozenSet[str]],
-    all_functions: Optional[Iterable[str]] = None,
+    island_function_map: Mapping[int, frozenset[str]],
+    all_functions: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """Evaluate per-origin access for every societal function.
 
@@ -343,11 +348,11 @@ def compute_access_matrix_from_origins(
 def assign_destinations_to_islands_spatial(
     service_nodes_gdf: gpd.GeoDataFrame,
     islands_gdf: gpd.GeoDataFrame,
-    taxonomy: Optional[Dict[str, str]] = None,
+    taxonomy: dict[str, str] | None = None,
     node_type_column: str = "type",
     island_id_column: str = "island_id",
     buffer_m: float = 50.0,
-) -> Dict[int, FrozenSet[str]]:
+) -> dict[int, frozenset[str]]:
     """Return the set of function categories reachable within each island.
 
     This is the **spatial preprocessing** variant for use when service
@@ -405,7 +410,7 @@ def assign_destinations_to_islands_spatial(
         predicate="intersects",
     )
 
-    island_functions: Dict[int, Set[str]] = {}
+    island_functions: dict[int, set[str]] = {}
     for _, row in joined.iterrows():
         if pd.isna(row.get(island_id_column)):
             continue
@@ -425,16 +430,17 @@ compute_function_access_per_island = assign_destinations_to_islands_spatial
 def assign_origins_to_islands_spatial(
     population_gdf: gpd.GeoDataFrame,
     islands_gdf: gpd.GeoDataFrame,
-    pop_columns: Optional[Sequence[str]] = None,
+    pop_columns: Sequence[str] | None = None,
     island_id_column: str = "island_id",
 ) -> pd.DataFrame:
-    """Spatially assign each population zone to an island.
+    """Spatially assign each population zone to one or more islands.
 
     This is the **spatial preprocessing** variant for use when origin
     entities are geographic zones (e.g. CBS 100 m grid cells) rather than
-    embedded graph nodes.  Each zone is assigned the id of the nearest
-    island (within 200 m); zones further than 200 m receive island id
-    ``-1`` (isolated/disconnected).
+    embedded graph nodes.  When a zone intersects multiple islands, its
+    population is split proportionally by overlap area.  When a zone does
+    not intersect any island, the full zone is assigned to the nearest
+    island within 200 m; zones further away receive island id ``-1``.
 
     For the graph-native path, supply ``{origin_id: island_id}`` directly
     from :func:`build_island_assignment`.
@@ -455,9 +461,10 @@ def assign_origins_to_islands_spatial(
     Returns
     -------
     pd.DataFrame
-        One row per population zone; columns include ``island_id`` and all
-        *pop_columns*.  Rows with ``island_id == -1`` are not connected to
-        any road island.
+        One row per island allocation. Columns include ``source_index``,
+        ``island_id``, ``allocation_fraction``, ``allocation_method``, and all
+        *pop_columns*. Rows with ``island_id == -1`` are not connected to any
+        road island.
     """
     if pop_columns is None:
         pop_columns = list(POPULATION_GROUP_COLUMNS.values())
@@ -466,47 +473,101 @@ def assign_origins_to_islands_spatial(
     pop = population_gdf[list(pop_columns) + ["geometry"]].copy().to_crs(target_crs)
     islands = islands_gdf[[island_id_column, "geometry"]].copy()
 
-    islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
+    for col in pop_columns:
+        if col in pop.columns:
+            pop[col] = pd.to_numeric(pop[col], errors="coerce").fillna(0)
+            pop[col] = pop[col].where(pop[col] >= 0, 0)
 
-    joined = gpd.sjoin_nearest(
-        pop,
+    islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
+    pop = pop.reset_index(drop=False).rename(columns={"index": "source_index"})
+    pop["_source_area"] = pop.geometry.area
+
+    overlap_rows = []
+    unmatched_indices = set(pop["source_index"].tolist())
+    intersections = gpd.overlay(
+        pop[["source_index", "_source_area", *pop_columns, "geometry"]],
         islands_dissolved[[island_id_column, "geometry"]],
-        how="left",
-        max_distance=200,
+        how="intersection",
+        keep_geom_type=False,
     )
 
-    # If a zone matched multiple islands (boundary overlap), keep the
-    # one with the largest intersection area.
-    if joined.index.duplicated().any():
-        joined = joined.reset_index(drop=False)
-        joined["_inter_area"] = joined.apply(
-            lambda r: pop.loc[r["index"], "geometry"].intersection(
-                islands_dissolved.loc[
-                    islands_dissolved[island_id_column] == r[island_id_column],
-                    "geometry",
-                ].iloc[0]
-                if not islands_dissolved[
-                    islands_dissolved[island_id_column] == r[island_id_column]
-                ].empty
-                else pop.loc[r["index"], "geometry"]
-            ).area,
-            axis=1,
+    if not intersections.empty:
+        intersections["_intersection_area"] = intersections.geometry.area
+        intersections = intersections[intersections["_intersection_area"] > 0].copy()
+
+        for source_index, source_rows in intersections.groupby("source_index", sort=False):
+            total_fraction = 0.0
+            source_area = float(source_rows["_source_area"].iloc[0])
+            if source_area <= 0:
+                continue
+
+            raw_fractions = source_rows["_intersection_area"].to_numpy(dtype=float) / source_area
+            raw_fraction_sum = raw_fractions.sum()
+            if raw_fraction_sum > 1.0:
+                raw_fractions = raw_fractions / raw_fraction_sum
+
+            for row, fraction in zip(source_rows.itertuples(index=False), raw_fractions):
+                scaled_row = {
+                    "source_index": int(row.source_index),
+                    island_id_column: int(getattr(row, island_id_column)),
+                    "allocation_fraction": float(fraction),
+                    "allocation_method": "proportional_overlap",
+                }
+                for col in pop_columns:
+                    scaled_row[col] = float(getattr(row, col)) * float(fraction)
+                overlap_rows.append(scaled_row)
+                total_fraction += float(fraction)
+
+            leftover_fraction = max(0.0, 1.0 - total_fraction)
+            if leftover_fraction > 1e-9:
+                leftover_row = {
+                    "source_index": int(source_index),
+                    island_id_column: -1,
+                    "allocation_fraction": float(leftover_fraction),
+                    "allocation_method": "unassigned_remainder",
+                }
+                original_row = pop.loc[pop["source_index"] == source_index].iloc[0]
+                for col in pop_columns:
+                    leftover_row[col] = float(original_row[col]) * float(leftover_fraction)
+                overlap_rows.append(leftover_row)
+
+            unmatched_indices.discard(int(source_index))
+
+    fallback_rows = []
+    if unmatched_indices:
+        unmatched_pop = pop[pop["source_index"].isin(unmatched_indices)].copy()
+        nearest = gpd.sjoin_nearest(
+            unmatched_pop,
+            islands_dissolved[[island_id_column, "geometry"]],
+            how="left",
+            max_distance=200,
         )
-        joined = (
-            joined.sort_values("_inter_area", ascending=False)
-            .drop_duplicates(subset=["index"])
-            .set_index("index")
+        nearest[island_id_column] = nearest[island_id_column].fillna(-1).astype(int)
+        nearest["allocation_method"] = np.where(
+            nearest[island_id_column] == -1,
+            "unassigned",
+            "nearest_island",
         )
+        nearest["allocation_fraction"] = 1.0
 
-    joined[island_id_column] = joined[island_id_column].fillna(-1).astype(int)
+        for row in nearest.itertuples(index=False):
+            fallback_row = {
+                "source_index": int(row.source_index),
+                island_id_column: int(getattr(row, island_id_column)),
+                "allocation_fraction": float(row.allocation_fraction),
+                "allocation_method": str(row.allocation_method),
+            }
+            for col in pop_columns:
+                fallback_row[col] = float(getattr(row, col))
+            fallback_rows.append(fallback_row)
 
-    result = joined[list(pop_columns) + [island_id_column]].copy()
-    # Replace suppressed CBS values (-99997 / -99998 / -99999) with 0
-    for col in pop_columns:
-        if col in result.columns:
-            result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
-            result[col] = result[col].where(result[col] >= 0, 0)
+    result = pd.DataFrame(overlap_rows + fallback_rows)
+    if result.empty:
+        result = pd.DataFrame(columns=["source_index", island_id_column, "allocation_fraction", "allocation_method", *pop_columns])
 
+    result[island_id_column] = pd.to_numeric(result[island_id_column], errors="coerce").fillna(-1).astype(int)
+    result["allocation_fraction"] = pd.to_numeric(result["allocation_fraction"], errors="coerce").fillna(0.0)
+    result = result.sort_values(["source_index", island_id_column]).reset_index(drop=True)
     return result
 
 
@@ -519,11 +580,11 @@ join_population_to_islands = assign_origins_to_islands_spatial
 # ---------------------------------------------------------------------------
 
 def compute_access_matrix(
-    island_function_map: Dict[int, FrozenSet[str]],
+    island_function_map: dict[int, frozenset[str]],
     island_population_df: pd.DataFrame,
-    pop_columns: Optional[Dict[str, str]] = None,
+    pop_columns: dict[str, str] | None = None,
     island_id_column: str = "island_id",
-    all_functions: Optional[Iterable[str]] = None,
+    all_functions: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """Compute percentage access for every (function, population group) pair.
 
@@ -676,18 +737,18 @@ def compute_equity_gaps(
 def analyse_societal_access(
     islands_gdf: gpd.GeoDataFrame,
     population_gdf: gpd.GeoDataFrame,
-    service_nodes_gdf: Optional[gpd.GeoDataFrame] = None,
-    taxonomy: Optional[Dict[str, str]] = None,
-    pop_columns: Optional[Dict[str, str]] = None,
+    service_nodes_gdf: gpd.GeoDataFrame | None = None,
+    taxonomy: dict[str, str] | None = None,
+    pop_columns: dict[str, str] | None = None,
     node_type_column: str = "type",
     island_id_column: str = "island_id",
     reference_group: str = "total",
     # Graph-native inputs (Layer A) — take priority when provided
     graph=None,
-    destination_nodes: Optional[Mapping[Any, str]] = None,
-    origin_island_ids: Optional[Mapping[Any, int]] = None,
-    stakeholder_groups: Optional[Mapping[str, Mapping[Any, float]]] = None,
-) -> Dict[str, Any]:
+    destination_nodes: Mapping[Any, str] | None = None,
+    origin_island_ids: Mapping[Any, int] | None = None,
+    stakeholder_groups: Mapping[str, Mapping[Any, float]] | None = None,
+) -> dict[str, Any]:
     """Run the full societal access pipeline and return all result tables.
 
     Two input paths are supported:

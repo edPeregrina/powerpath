@@ -7,10 +7,9 @@ existing scalar repair-time workflow.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional
+from collections.abc import Iterable
 
 import numpy as np
-
 
 DEFAULT_WAIT_VECTORS = ("repair_time", "dependency_wait", "reset_wait")
 
@@ -18,11 +17,11 @@ DEFAULT_WAIT_VECTORS = ("repair_time", "dependency_wait", "reset_wait")
 def initialize_recovery_wait_vectors(
     num_assets: int,
     *,
-    repair_time: Optional[np.ndarray] = None,
-    dependency_wait: Optional[np.ndarray] = None,
-    reset_wait: Optional[np.ndarray] = None,
-    extra_wait_vectors: Optional[Dict[str, np.ndarray]] = None,
-) -> Dict[str, np.ndarray]:
+    repair_time: np.ndarray | None = None,
+    dependency_wait: np.ndarray | None = None,
+    reset_wait: np.ndarray | None = None,
+    extra_wait_vectors: dict[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     """Initialize vectorized wait-state storage for each asset."""
     wait_vectors = {
         "repair_time": np.zeros(num_assets, dtype=np.float64),
@@ -44,24 +43,24 @@ def initialize_recovery_wait_vectors(
     return wait_vectors
 
 
-def set_wait_vector(wait_vectors: Dict[str, np.ndarray], name: str, values: np.ndarray) -> Dict[str, np.ndarray]:
+def set_wait_vector(wait_vectors: dict[str, np.ndarray], name: str, values: np.ndarray) -> dict[str, np.ndarray]:
     """Set or replace one wait vector."""
     wait_vectors[name] = np.asarray(values, dtype=np.float64).copy()
     return wait_vectors
 
 
-def sync_repair_time_vector(wait_vectors: Dict[str, np.ndarray], repair_time: np.ndarray) -> Dict[str, np.ndarray]:
+def sync_repair_time_vector(wait_vectors: dict[str, np.ndarray], repair_time: np.ndarray) -> dict[str, np.ndarray]:
     """Synchronize the canonical repair-time vector from legacy state arrays."""
     wait_vectors["repair_time"] = np.asarray(repair_time, dtype=np.float64).copy()
     return wait_vectors
 
 
 def decrement_recovery_wait_vectors(
-    wait_vectors: Dict[str, np.ndarray],
+    wait_vectors: dict[str, np.ndarray],
     *,
     elapsed_time: float = 1.0,
-    active_masks: Optional[Dict[str, np.ndarray]] = None,
-) -> Dict[str, np.ndarray]:
+    active_masks: dict[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
     """Subtract elapsed time from all active wait vectors.
 
     If an active mask is provided for a vector, only masked assets are decremented.
@@ -81,7 +80,7 @@ def decrement_recovery_wait_vectors(
     return wait_vectors
 
 
-def get_wait_vector(wait_vectors: Dict[str, np.ndarray], name: str) -> np.ndarray:
+def get_wait_vector(wait_vectors: dict[str, np.ndarray], name: str) -> np.ndarray:
     """Get one wait vector by name, creating a zero vector if absent."""
     if name not in wait_vectors:
         if not wait_vectors:
@@ -91,29 +90,41 @@ def get_wait_vector(wait_vectors: Dict[str, np.ndarray], name: str) -> np.ndarra
     return wait_vectors[name]
 
 
-def all_required_waits_cleared(
-    wait_vectors: Dict[str, np.ndarray],
+def all_selected_waits_cleared(
+    wait_vectors: dict[str, np.ndarray],
     *,
-    required_vectors: Optional[Iterable[str]] = None,
+    wait_vector_names: Iterable[str] | None = None,
 ) -> np.ndarray:
-    """Return mask where all required wait vectors are cleared (<= 0)."""
-    if required_vectors is None:
-        required_vectors = DEFAULT_WAIT_VECTORS
+    """Return mask where all selected wait vectors are cleared (<= 0)."""
+    if wait_vector_names is None:
+        wait_vector_names = DEFAULT_WAIT_VECTORS
 
-    required_vectors = list(required_vectors)
-    if not required_vectors:
+    wait_vector_names = list(wait_vector_names)
+    if not wait_vector_names:
         if not wait_vectors:
             return np.array([], dtype=bool)
         template = next(iter(wait_vectors.values()))
         return np.ones_like(template, dtype=bool)
 
     masks = []
-    for name in required_vectors:
+    for name in wait_vector_names:
         masks.append(get_wait_vector(wait_vectors, name) <= 0.0)
 
     return np.logical_and.reduce(masks)
 
 
-def build_recovery_report(wait_vectors: Dict[str, np.ndarray]) -> Dict[str, float]:
+def all_required_waits_cleared(
+    wait_vectors: dict[str, np.ndarray],
+    *,
+    required_vectors: Iterable[str] | None = None,
+) -> np.ndarray:
+    """Compatibility wrapper for older callers."""
+    return all_selected_waits_cleared(
+        wait_vectors,
+        wait_vector_names=required_vectors,
+    )
+
+
+def build_recovery_report(wait_vectors: dict[str, np.ndarray]) -> dict[str, float]:
     """Build basic recovery scheduler metrics for reporting/debugging."""
     return {f"{name}_active_count": int(np.sum(vector > 0.0)) for name, vector in wait_vectors.items()}
