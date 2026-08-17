@@ -364,7 +364,9 @@ def restore_operational_from_graph(
     unique_asset_types = np.unique(asset_type)
     for a_type in unique_asset_types:
         a_mask = asset_type == a_type
-        direct_rules = knowledge_graph.get_rules_or_default(hazard_type, a_type, asset_type_b=None)
+        direct_rules = knowledge_graph.get_rules(
+            hazard_type, a_type, asset_type_b=None
+        )
         for rule in direct_rules:
             if rule.relationship != "direct":
                 continue
@@ -475,7 +477,7 @@ def evaluate_dependencies_from_graph(
         a_mask = asset_type == a_type
 
         # --- Direct rules (rule on A itself) --------------------------------
-        direct_rules = knowledge_graph.get_rules_or_default(
+        direct_rules = knowledge_graph.get_rules(
             hazard_type, a_type, asset_type_b=None
         )
         for rule in direct_rules:

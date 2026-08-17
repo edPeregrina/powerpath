@@ -13,7 +13,10 @@ from src.dependency_evaluator import (
     evaluate_dependencies,
     evaluate_dependencies_from_graph,
 )
-from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+from src.dependency_knowledge_graph import (
+    DependencyKnowledgeGraph,
+    build_default_knowledge_graph,
+)
 from src.simulation import _initialize_simulation
 from src.utils import build_service_area_map_from_rules, build_voronoi_service_area_map
 
@@ -115,6 +118,59 @@ def test_delayed_trigger_uses_named_wait_vector():
 
     assert still_blocked.tolist() == [False]
     assert restored.tolist() == [True]
+
+
+def test_service_area_rule_does_not_restore_disrupted_supplier():
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": "hospital",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": False,
+                    "return_to_operational": {"trigger": "immediate"},
+                },
+            }
+        ]
+    )
+
+    updated = evaluate_dependencies_from_graph(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        "flooding",
+        kg,
+        service_area_map={0: [1]},
+    )
+
+    assert updated.tolist() == [False, False]
+
+
+def test_default_graph_propagates_asset_192_failure_to_asset_246():
+    num_assets = 248
+    operational = np.ones(num_assets, dtype=bool)
+    operational[192] = False
+    asset_type = np.full(num_assets, "road", dtype=object)
+    asset_type[192] = "msls"
+    asset_type[245:248] = "hospital"
+    repair_time = np.zeros(num_assets, dtype=float)
+    repair_time[192] = 10.0
+
+    updated, report = evaluate_dependencies_from_graph(
+        operational,
+        asset_type,
+        "flooding",
+        build_default_knowledge_graph(),
+        repair_time=repair_time,
+        service_area_map={192: [245, 246], 137: [247]},
+        return_report=True,
+    )
+
+    assert not updated[192]
+    assert not updated[246]
+    assert updated[247]
+    assert report["service_area_blocked_count"] == 2
 
 
 def test_probability_curve_fragility_model_supported():

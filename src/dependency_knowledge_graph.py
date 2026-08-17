@@ -271,10 +271,9 @@ class DependencyKnowledgeGraph:
 def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
     """Return the baseline knowledge graph for flooding and the known asset types.
 
-    The default graph mirrors the pre-knowledge-graph baseline: direct
-    structural damage remains governed by fragility and repair state in the
-    simulation, while flooded road assets are the only assets that are made
-    explicitly non-operational by dependency rules.
+    Structural damage remains governed by fragility, while direct rules define
+    when damaged assets may return to operation. Service-area rules propagate
+    a non-operational ``msls`` substation state to dependent hospitals.
 
     Returns:
         A :class:`DependencyKnowledgeGraph` populated with sensible defaults.
@@ -292,6 +291,67 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "relationship": "direct",
             "parameters": {
                 "hazard_blocks_operation": True,
+                "return_to_operational": {
+                    "trigger": TRIGGER_IMMEDIATE,
+                },
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "ms",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "ls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_BELOW,
+                    "threshold": 2.0,
+                },
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "hospital",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {
+                    "trigger": TRIGGER_REPAIR_COMPLETE,
+                },
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
                 "return_to_operational": {
                     "trigger": TRIGGER_IMMEDIATE,
                 },
