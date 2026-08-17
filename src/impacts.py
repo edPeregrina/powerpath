@@ -17,7 +17,7 @@ def load_voll_data(voll_path=None):
         tuple: (bg_to_group_map, consumption_per_sqm, voll_per_sqm, lu_voll_data, lu_cat_dict, lu_consumpt_dict, lu_voll_dict)
     """
     if voll_path is None:
-        voll_path = Path("C:/repos/powerpath/data/land_use/voll_lu.csv")
+        voll_path = Path(__file__).resolve().parent.parent / "data" / "land_use" / "voll_lu.csv"
     
     # Load VOLL data from CSV
     lu_voll_data = pd.read_csv(voll_path, sep=None, engine='python')
