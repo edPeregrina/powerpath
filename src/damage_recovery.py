@@ -8,7 +8,10 @@ Movahednia, Mohadese, et al. ‘Power Grid Resilience Enhancement via Protecting
 Sánchez-Muñoz, Daniel, et al. ‘Electrical Grid Risk Assessment Against Flooding in Barcelona and Bristol Cities’. Sustainability, vol. 12, no. 4, Feb. 2020, p. 1527. Crossref, https://doi.org/10.3390/su12041527.
 
 """
+from collections.abc import Mapping
+
 import numpy as np
+
 
 # Helper functions for damage and repair calculations
 def default_damage_ratio_function(hazard_values, coefficients):
@@ -52,7 +55,121 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
-def default_fragility_function(hazard_values, asset_type, k=None, major_timestep=24):
+def _per_timestep_failure_probability(failure_probability, major_timestep):
+    """Convert daily failure probability to the active timestep probability."""
+    failure_probability = np.clip(np.asarray(failure_probability, dtype=np.float64), 0.0, 1.0)
+    timesteps_per_day = 24 / major_timestep if major_timestep not in (None, 0) else 1
+    if timesteps_per_day == 1:
+        return failure_probability
+    return 1.0 - np.power(1.0 - failure_probability, 1.0 / timesteps_per_day)
+
+
+def _resolve_fragility_exclusions(hazard_values, asset_type, fragility_exclusions=None):
+    """Return a boolean mask where fragility should be skipped."""
+    exclusion_mask = np.zeros_like(hazard_values, dtype=bool)
+    if fragility_exclusions is None:
+        return exclusion_mask
+
+    if isinstance(fragility_exclusions, np.ndarray):
+        return np.asarray(fragility_exclusions, dtype=bool)
+
+    if isinstance(fragility_exclusions, Mapping):
+        for key, value in fragility_exclusions.items():
+            key_mask = asset_type == str(key)
+            if isinstance(value, bool):
+                if value:
+                    exclusion_mask |= key_mask
+            else:
+                exclusion_mask |= key_mask & (hazard_values <= float(value))
+        return exclusion_mask
+
+    raise TypeError("fragility_exclusions must be a boolean array or a mapping of asset-type rules.")
+
+
+def _build_failure_probability(hazard_values, model, *, k=None, major_timestep=24):
+    """Build failure probabilities from an explicit fragility model."""
+    mode = model.get("mode", model.get("regime", "depth_logistic"))
+    activation_threshold = float(model.get("activation_threshold", 0.0))
+    failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
+    active_mask = hazard_values > activation_threshold
+
+    if not np.any(active_mask):
+        return failure_probability
+
+    if mode == "probability_curve":
+        intensity_values = np.asarray(model["intensity_values"], dtype=np.float64)
+        probability_values = np.asarray(model["failure_probabilities"], dtype=np.float64)
+        interpolated = np.interp(
+            hazard_values[active_mask],
+            intensity_values,
+            probability_values,
+            left=probability_values[0],
+            right=probability_values[-1],
+        )
+        failure_probability[active_mask] = interpolated
+        return _per_timestep_failure_probability(failure_probability, major_timestep)
+
+    steepness = model.get("steepness", k)
+    if steepness is None:
+        low, high = model.get("steepness_range", (5.0, 7.5))
+        steepness = np.random.uniform(low, high)
+    steepness = float(steepness)
+
+    median_failure_depth = float(model.get("median_failure_depth", 0.0))
+    failure_probability[active_mask] = 1.0 / (
+        1.0 + np.exp(-steepness * (hazard_values[active_mask] - median_failure_depth))
+    )
+    return _per_timestep_failure_probability(failure_probability, major_timestep)
+
+
+def _sample_fragility_operational_status(
+    hazard_values,
+    *,
+    model,
+    k=None,
+    major_timestep=24,
+):
+    """Sample operational status from an explicit fragility model."""
+    failure_probability = _build_failure_probability(
+        hazard_values,
+        model,
+        k=k,
+        major_timestep=major_timestep,
+    )
+    random_values = np.random.random(size=hazard_values.shape)
+    return (random_values >= failure_probability).astype(int)
+
+
+def hospital_fragility_function(
+    hazard_values,
+    asset_type,
+    k=None,
+    major_timestep=24,
+    model=None,
+):
+    """Evaluate hospital fragility using an explicit model definition."""
+    hospital_model = model or {
+        "mode": "depth_logistic",
+        "median_failure_depth": 0.5,
+        "steepness_range": (5.0, 7.5),
+        "activation_threshold": 0.0,
+    }
+    return _sample_fragility_operational_status(
+        np.asarray(hazard_values, dtype=np.float64),
+        model=hospital_model,
+        k=k,
+        major_timestep=major_timestep,
+    )
+
+
+def default_fragility_function(
+    hazard_values,
+    asset_type,
+    k=None,
+    major_timestep=24,
+    fragility_models: Mapping[str, Mapping[str, object]] | None = None,
+    fragility_exclusions=None,
+):
     """
     Calculate binary operational status from hazard values using fragility curve.
     Failure probability is determined (by default daily, major_timestep=24 hours) and sampled for each asset.
@@ -67,33 +184,55 @@ def default_fragility_function(hazard_values, asset_type, k=None, major_timestep
     To adjust for non-daily timesteps, the failure probability is calculated as:
 
         P_f_timestep = 1 - ((exp(-k*(d - d_m))) / (1 + exp(-k*(d - d_m))))^(major_timestep/24)
+
+    Explicit fragility overrides can be passed through ``fragility_models``. Each
+    asset-type entry may use either:
+
+    - ``mode="depth_logistic"`` with ``median_failure_depth`` and optional
+      ``steepness`` / ``steepness_range``
+    - ``mode="probability_curve"`` with paired ``intensity_values`` and
+      ``failure_probabilities`` arrays
+
+    ``fragility_exclusions`` can be a boolean mask or a mapping of asset types to
+    boolean/threshold exclusion rules.
     """
+    hazard_values = np.asarray(hazard_values, dtype=np.float64)
+    asset_type = np.asarray(asset_type)
+    fragility_models = dict(fragility_models or {})
+    exclusion_mask = _resolve_fragility_exclusions(
+        hazard_values,
+        asset_type,
+        fragility_exclusions=fragility_exclusions,
+    )
 
-    failure_probability = np.zeros_like(hazard_values, dtype=np.float64)
+    operational_status = np.ones_like(hazard_values, dtype=int)
+    for asset_name in np.unique(asset_type):
+        asset_mask = (asset_type == asset_name) & ~exclusion_mask
+        if not np.any(asset_mask):
+            continue
 
-    if k is None:
-        k = np.random.uniform(5, 7.5)
+        model = fragility_models.get(str(asset_name))
+        if model is None:
+            if str(asset_name) == "hospital":
+                model = {
+                    "mode": "depth_logistic",
+                    "median_failure_depth": 0.5,
+                    "steepness_range": (5.0, 7.5),
+                    "activation_threshold": 0.0,
+                }
+            else:
+                model = {
+                    "mode": "depth_logistic",
+                    "median_failure_depth": 0.3 if str(asset_name) == "ls" else 0.6 if str(asset_name) == "msls" else 0.0,
+                    "steepness_range": (5.0, 7.5),
+                    "activation_threshold": 0.0,
+                }
 
-    hazard_mask = hazard_values > 0
-    ls_mask = asset_type == 'ls'
-    msls_mask = asset_type == 'msls'
+        operational_status[asset_mask] = _sample_fragility_operational_status(
+            hazard_values[asset_mask],
+            model=model,
+            k=k,
+            major_timestep=major_timestep,
+        )
 
-    d_m = np.where(ls_mask, 0.3, np.where(msls_mask, 0.6, 0))  # Default median depth for other types
-
-    timesteps_per_day = 24 / major_timestep if major_timestep is not None else 1
-    # Calculate failure probability only for positive hazard values
-    if timesteps_per_day == 1:
-        failure_probability[hazard_mask] = 1 / (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask])))
-    
-    else:
-        failure_probability[hazard_mask] = 1 - ( (np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask]))) / 
-                                                  (1 + np.exp(-k * (hazard_values[hazard_mask] - d_m[hazard_mask]))) 
-                                                  )**(1/timesteps_per_day)
-    # Generate random values for each asset
-    random_values = np.random.random(size=hazard_values.shape)
-    
-    # Binary decision: 0 = failed, 1 = operational
-    # Asset fails if random value < failure probability
-    operational_status = (random_values >= failure_probability).astype(int)
-    
     return operational_status

@@ -62,6 +62,11 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'recovery_parameters': {
             'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
+            # Optional per-asset fragility overrides:
+            #   {'hospital': {'mode': 'probability_curve',
+            #                 'intensity_values': [0.0, 0.5, 1.0],
+            #                 'failure_probabilities': [0.0, 0.4, 1.0]}}
+            'fragility_models': {},
             # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
@@ -73,6 +78,91 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'max_simulation_days': None,  # None for all available days, integer to limit
             'cache_enabled': True,        # Enable/disable result caching for performance
             'performance_monitoring': False  # Enable detailed performance monitoring
+        },
+
+        # Service-node configuration for societal access analysis.
+        #
+        # 'taxonomy'         : mapping of node-type string → function-category label.
+        #                      Add entries for new service types without touching the
+        #                      graph or metrics code.
+        # 'population_groups': mapping of display label → CBS population column name.
+        #                      Extend with any column present in the population grid.
+        #                      Reference: CBS, "Statistische gegevens per vierkant en
+        #                      postcode 2022, 2023, 2024 – Beschrijving cijfers"
+        #                      https://www.cbs.nl/nl-nl/longread/diversen/2025/statistische-gegevens-per-vierkant-en-postcode-2022-2023-2024/4-beschrijving-cijfers
+        # 'reference_group'  : the population group used as the baseline when computing
+        #                      equity gaps (must be a key in 'population_groups').
+        'service_node_config': {
+            'taxonomy': {
+                # Health
+                'hospital': 'health',
+                'clinic': 'health',
+                'huisartsenpraktijk': 'health',
+                'apotheek': 'health',
+                # Emergency response
+                'fire_station': 'emergency_response',
+                'brandweerkazerne': 'emergency_response',
+                'emergency_operations_centre': 'emergency_response',
+                # Climate resilience
+                'cooling_centre': 'climate_resilience',
+                'water_supply_point': 'climate_resilience',
+                'drinking_water': 'climate_resilience',
+                # Social continuity
+                'school': 'education',
+                'basisonderwijs': 'education',
+                'voortgezet_onderwijs': 'education',
+                'repair_depot': 'repair_logistics',
+            },
+            'population_groups': {
+                'total':       'aantal_inwoners',
+                'elderly':     'aantal_inwoners_65_jaar_en_ouder',
+                'children':    'aantal_inwoners_0_tot_15_jaar',
+                'working_age': 'aantal_inwoners_25_tot_45_jaar',
+            },
+            'reference_group': 'total',
+        },
+
+        # Dependency parameters – per-pair rules between hazard types and asset types.
+        #
+        # 'hazard_type'  : the active hazard (e.g. "flooding")
+        # 'asset_type_a' : primary asset type ("msls", "ms", "ls")
+        # 'asset_type_b' : downstream asset type within A's service area, or null
+        # 'relationship' : "direct" (rule on A itself) | "service_area" (A blocks B)
+        # 'parameters'   :
+        #   hazard_blocks_operation  : bool – True means the asset is non-operational
+        #                              while hazard exposure exceeds flood_threshold
+        #   return_to_operational    : what must happen before the asset is operational again
+        #     trigger : "immediate"       – returns as soon as hazard clears (no repair needed)
+        #               "repair_complete" – returns only when repair_time reaches 0
+        #               "repair_below"   – returns when repair_time < threshold
+        #     threshold : float           – used only with "repair_below"
+        #
+        # Baseline behavior is the legacy flat-rule path:
+        #   - flooded roads are blocked here
+        #   - substation/hospital structural damage remains governed by fragility
+        #     and repair completion in the simulation loop
+        # Provide explicit knowledge-graph rules only when modelling additional
+        # downstream dependencies (for example msls -> hospital).
+        'dependency_parameters': {
+            'hazard_type': 'flooding',  # active hazard type for graph look-up
+            'enable_default_rules': True,
+            'require_repair_for_operational': False,
+            'knowledge_graph': [
+                # Template: service-area rule (A supplies B within its service area)
+                # {
+                #     'hazard_type': 'flooding',
+                #     'asset_type_a': 'msls',
+                #     'asset_type_b': 'hospital',
+                #     'relationship': 'service_area',
+                #     'parameters': {
+                #         'hazard_blocks_operation': False,
+                #         'return_to_operational': {'trigger': 'immediate'},
+                #     },
+                # },
+            ],
+            # Optional: mapping of asset index (A) → list of asset indices (B)
+            # for service_area rules. Leave as None if no service-area rules are active.
+            'service_area_map': None,
         }
     }
     
