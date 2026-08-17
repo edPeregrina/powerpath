@@ -75,6 +75,45 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'performance_monitoring': False  # Enable detailed performance monitoring
         },
 
+        # Service-node configuration for societal access analysis.
+        #
+        # 'taxonomy'         : mapping of node-type string → function-category label.
+        #                      Add entries for new service types without touching the
+        #                      graph or metrics code.
+        # 'population_groups': mapping of display label → CBS population column name.
+        #                      Extend with any column present in the population grid.
+        # 'reference_group'  : the population group used as the baseline when computing
+        #                      equity gaps (must be a key in 'population_groups').
+        'service_node_config': {
+            'taxonomy': {
+                # Health
+                'hospital': 'health',
+                'clinic': 'health',
+                'huisartsenpraktijk': 'health',
+                'apotheek': 'health',
+                # Emergency response
+                'fire_station': 'emergency_response',
+                'brandweerkazerne': 'emergency_response',
+                'emergency_operations_centre': 'emergency_response',
+                # Climate resilience
+                'cooling_centre': 'climate_resilience',
+                'water_supply_point': 'climate_resilience',
+                'drinking_water': 'climate_resilience',
+                # Social continuity
+                'school': 'education',
+                'basisonderwijs': 'education',
+                'voortgezet_onderwijs': 'education',
+                'repair_depot': 'repair_logistics',
+            },
+            'population_groups': {
+                'total':       'aantal_inwoners',
+                'elderly':     'aantal_inwoners_65_jaar_en_ouder',
+                'children':    'aantal_inwoners_0_tot_15_jaar',
+                'working_age': 'aantal_inwoners_25_tot_45_jaar',
+            },
+            'reference_group': 'total',
+        },
+
         # Dependency parameters – per-pair rules between hazard types and asset types.
         #
         # 'hazard_type'  : the active hazard (e.g. "flooding")
