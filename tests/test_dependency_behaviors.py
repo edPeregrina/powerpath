@@ -171,3 +171,109 @@ def test_voronoi_service_area_map_can_return_diagnostics():
     assert diagnostics["resolved_by_overlap"] == 1
     assert diagnostics["resolved_by_nearest"] == 1
     assert diagnostics["unresolved"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Service-area dependency tests
+# ---------------------------------------------------------------------------
+
+
+def _make_service_area_kg():
+    """Return a KG with one service_area rule: flooded msls blocks hospital."""
+    return DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": "hospital",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": True,
+                    "return_to_operational": {"trigger": "repair_complete"},
+                },
+            }
+        ]
+    )
+
+
+def test_service_area_blocking_propagates_to_downstream_b_assets():
+    """Non-operational upstream A (msls) must block mapped downstream B (hospital)."""
+    kg = _make_service_area_kg()
+    # Layout: index 0 = msls (flooded → non-operational), index 1 = hospital
+    service_area_map = {0: [1]}
+
+    updated, report = evaluate_dependencies_from_graph(
+        np.array([True, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        "flooding",
+        kg,
+        flooded_mask=np.array([True, False], dtype=bool),
+        repair_time=np.array([0.0, 0.0], dtype=float),
+        service_area_map=service_area_map,
+        return_report=True,
+    )
+
+    assert updated.tolist() == [False, False], "hospital should be blocked by non-operational msls"
+    assert report["service_area_blocked_count"] >= 1
+
+
+def test_service_area_no_blocking_without_map():
+    """When service_area_map is absent, no downstream B blocking should occur."""
+    kg = _make_service_area_kg()
+
+    updated = evaluate_dependencies_from_graph(
+        np.array([True, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        "flooding",
+        kg,
+        flooded_mask=np.array([True, False], dtype=bool),
+        repair_time=np.array([0.0, 0.0], dtype=float),
+        service_area_map=None,  # explicitly absent
+    )
+
+    # msls is blocked by its own hazard; hospital is unaffected without a map
+    assert updated[1] is np.bool_(True), "hospital must remain operational when map is absent"
+
+
+def test_service_area_compatible_with_direct_rules():
+    """Direct rules and service-area rules must both apply without interfering."""
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": None,
+                "relationship": "direct",
+                "parameters": {
+                    "hazard_blocks_operation": True,
+                    "return_to_operational": {"trigger": "repair_complete"},
+                },
+            },
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": "hospital",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": True,
+                    "return_to_operational": {"trigger": "repair_complete"},
+                },
+            },
+        ]
+    )
+    # index 0 = msls (flooded), index 1 = hospital (not flooded), index 2 = msls (not flooded)
+    service_area_map = {0: [1]}
+
+    updated = evaluate_dependencies_from_graph(
+        np.array([True, True, True], dtype=bool),
+        np.array(["msls", "hospital", "msls"]),
+        "flooding",
+        kg,
+        flooded_mask=np.array([True, False, False], dtype=bool),
+        repair_time=np.array([0.0, 0.0, 0.0], dtype=float),
+        service_area_map=service_area_map,
+    )
+
+    assert updated[0] is np.bool_(False), "flooded msls must be blocked by direct rule"
+    assert updated[1] is np.bool_(False), "hospital must be blocked via service-area rule"
+    assert updated[2] is np.bool_(True), "non-flooded msls must remain operational"

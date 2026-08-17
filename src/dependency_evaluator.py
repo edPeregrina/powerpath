@@ -536,6 +536,12 @@ def evaluate_dependencies_from_graph(
                     }
                 )
 
+                # If this service-area rule says the hazard blocks A, apply it
+                # directly so downstream propagation works even when no paired
+                # direct rule exists for A.
+                if rule.hazard_blocks_operation:
+                    blocked_mask |= a_mask & flooded_mask
+
                 # Find A-type assets that are currently non-operational (after
                 # direct blocking above has been folded in).
                 a_non_operational = a_mask & (blocked_mask | ~operational)
