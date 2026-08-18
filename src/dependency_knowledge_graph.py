@@ -283,28 +283,13 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
     Structural damage remains governed by fragility, while direct rules define
     when damaged assets may return to operation. Service-area rules propagate
     a non-operational ``msls`` substation state to dependent hospitals.
+    Roads are intentionally excluded because the existing road-graph exposure
+    filtering governs their availability independently.
 
     Returns:
         A :class:`DependencyKnowledgeGraph` populated with sensible defaults.
     """
     rules = [
-        # ------------------------------------------------------------------
-        # road – direct flooding dependency
-        # ------------------------------------------------------------------
-        # This preserves the pre-refactor semantics: roads are unavailable
-        # while flooded, and return as soon as the flood clears.
-        {
-            "hazard_type": "flooding",
-            "asset_type_a": "road",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": True,
-                "return_to_operational": {
-                    "trigger": TRIGGER_IMMEDIATE,
-                },
-            },
-        },
         {
             "hazard_type": "flooding",
             "asset_type_a": "msls",

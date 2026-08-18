@@ -359,11 +359,12 @@ def evaluate_dependencies(
     if previous_dependency_blocked_mask is not None:
         previous_dependency_blocked_mask = np.asarray(
             previous_dependency_blocked_mask, dtype=bool
-        )
+        ).copy()
         if previous_dependency_blocked_mask.shape != context["operational"].shape:
             raise ValueError(
                 "previous_dependency_blocked_mask must match the operational array"
             )
+        previous_dependency_blocked_mask &= context["asset_type"] != "road"
         restorable_dependency_outages = (
             previous_dependency_blocked_mask
             & ~context["flooded_mask"]
@@ -754,11 +755,12 @@ def evaluate_dependencies_from_graph(
     if previous_dependency_blocked_mask is not None:
         previous_dependency_blocked_mask = np.asarray(
             previous_dependency_blocked_mask, dtype=bool
-        )
+        ).copy()
         if previous_dependency_blocked_mask.shape != operational.shape:
             raise ValueError(
                 "previous_dependency_blocked_mask must match the operational array"
             )
+        previous_dependency_blocked_mask &= asset_type != "road"
         restorable_dependency_outages = (
             previous_dependency_blocked_mask
             & ~flooded_mask

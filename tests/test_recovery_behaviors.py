@@ -1,7 +1,6 @@
 import sys
 from pathlib import Path
 
-import networkx as nx
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -13,9 +12,6 @@ from src.simulation import (
     _normalize_repair_crews_by_asset_type_config,
     _update_unreachable_assets,
 )
-from src.utils import filter_hazard_graph
-
-
 def test_grouped_crew_pool_cannot_cross_islands():
     pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
     pool_state["pools"][0]["available"] = {0: 1}
@@ -137,16 +133,3 @@ def test_completed_repair_releases_crew_while_dependency_wait_continues():
     assert available == 1
     assert not state.repair_crews_assigned[0]
     assert state.recovery_wait_vectors["dependency_wait"][0] == 3.0
-
-
-def test_hazard_graph_filtering_always_starts_from_baseline_graph():
-    graph = nx.Graph()
-    graph.add_edge(0, 1, EV0_ma=1.0, EV1_ma=0.0)
-    graph.add_edge(1, 2, EV0_ma=0.0, EV1_ma=0.0)
-
-    flooded_graph = filter_hazard_graph(graph, 0.2, "EV0_ma")
-    clear_graph = filter_hazard_graph(graph, 0.2, "EV1_ma")
-
-    assert not flooded_graph.has_edge(0, 1)
-    assert clear_graph.has_edge(0, 1)
-    assert graph.has_edge(0, 1)

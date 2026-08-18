@@ -140,10 +140,10 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #     delay_steps : float         – used only with "delayed"
         #     wait_vector : str           – named countdown vector used with "delayed"
         #
-        # Baseline behavior is the legacy flat-rule path:
-        #   - flooded roads are blocked here
-        #   - substation/hospital structural damage remains governed by fragility
-        #     and repair completion in the simulation loop
+        # Road availability remains governed exclusively by the existing
+        # road-graph exposure filtering and is not part of this dependency model.
+        # Substation/hospital structural damage remains governed by fragility
+        # and repair completion in the simulation loop.
         # Provide explicit knowledge-graph rules only when modelling additional
         # downstream dependencies (for example msls -> hospital).
         'dependency_parameters': {

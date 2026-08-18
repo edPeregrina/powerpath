@@ -29,7 +29,7 @@ from src.utils import build_service_area_map_from_rules, build_voronoi_service_a
 CRS = "EPSG:28992"
 
 
-def test_legacy_default_rules_only_block_flooded_roads():
+def test_dependency_evaluator_does_not_control_flooded_roads():
     operational, report = evaluate_dependencies(
         np.array([True, True], dtype=bool),
         np.array(["road", "msls"]),
@@ -38,9 +38,9 @@ def test_legacy_default_rules_only_block_flooded_roads():
         return_report=True,
     )
 
-    assert operational.tolist() == [False, True]
-    assert report["blocked_count"] == 1
-    assert report["active_rules"] == ["road:flooded"]
+    assert operational.tolist() == [True, True]
+    assert report["blocked_count"] == 0
+    assert report["active_rules"] == []
 
 
 def test_legacy_disabled_rules_emit_warning():
@@ -86,7 +86,7 @@ def test_pairwise_dependency_blocks_dependent_of_failed_asset():
     assert report["pairwise_blocked_count"] == 1
 
 
-def test_area_dependency_observes_same_timestep_default_blocking():
+def test_area_dependencies_ignore_road_sources():
     operational = evaluate_dependencies(
         np.array([True, True], dtype=bool),
         np.array(["road", "hospital"]),
@@ -95,7 +95,7 @@ def test_area_dependency_observes_same_timestep_default_blocking():
         enable_default_rules=True,
     )
 
-    assert operational.tolist() == [False, False]
+    assert operational.tolist() == [True, True]
 
 
 def test_dependency_only_outage_restores_after_supplier_recovers():
@@ -158,30 +158,70 @@ def test_dependency_recovery_survives_overlapping_flood_block():
     assert not final_report["dependency_blocked_mask"].any()
 
 
-def test_dependency_recovery_tracks_simultaneous_direct_block():
+def test_dependency_recovery_tracks_simultaneous_repair_block():
     dependencies = {0: [1]}
     first_operational, first_report = evaluate_dependencies(
         np.array([False, True], dtype=bool),
-        np.array(["msls", "road"]),
-        flooded_mask=np.array([False, True]),
+        np.array(["msls", "hospital"]),
+        repair_time=np.array([0.0, 2.0]),
+        repair_threshold=0.0,
         area_dependencies=dependencies,
         enable_default_rules=True,
+        require_repair_for_operational=True,
         return_report=True,
     )
     restored, final_report = evaluate_dependencies(
         np.array([True, first_operational[1]], dtype=bool),
-        np.array(["msls", "road"]),
-        flooded_mask=np.array([False, False]),
+        np.array(["msls", "hospital"]),
+        repair_time=np.array([0.0, 0.0]),
+        repair_threshold=0.0,
         area_dependencies=dependencies,
         previous_dependency_blocked_mask=first_report[
             "dependency_blocked_mask"
         ],
         enable_default_rules=True,
+        require_repair_for_operational=True,
         return_report=True,
     )
 
     assert restored.tolist() == [True, True]
     assert not final_report["dependency_blocked_mask"].any()
+
+
+def test_knowledge_graph_ignores_explicit_road_rule():
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "road",
+                "asset_type_b": None,
+                "relationship": "direct",
+                "parameters": {
+                    "hazard_blocks_operation": True,
+                    "return_to_operational": {"trigger": "immediate"},
+                },
+            }
+        ]
+    )
+
+    updated = evaluate_dependencies_from_graph(
+        np.array([True], dtype=bool),
+        np.array(["road"]),
+        "flooding",
+        kg,
+        flooded_mask=np.array([True]),
+    )
+
+    assert updated.tolist() == [True]
+
+
+def test_default_knowledge_graph_has_no_road_rules():
+    assert (
+        build_default_knowledge_graph().get_rules(
+            "flooding", "road", asset_type_b=None
+        )
+        == []
+    )
 
 
 def test_mixed_dependency_chain_propagates_in_same_timestep():

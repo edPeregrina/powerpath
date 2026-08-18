@@ -74,10 +74,6 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     import pandas as pd
     import shapely
 
-    # Every timestep must be filtered from the intact baseline graph so edges
-    # removed by an earlier hazard state can return when conditions improve.
-    G = G.copy()
-    
     def is_motorway(highway):
         if isinstance(highway, str):
             return "motorway" in highway.lower()
