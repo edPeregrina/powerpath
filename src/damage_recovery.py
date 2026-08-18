@@ -65,7 +65,36 @@ def _per_timestep_failure_probability(failure_probability, major_timestep):
 
 
 def _resolve_fragility_exclusions(hazard_values, asset_type, fragility_exclusions=None):
-    """Return a boolean mask where fragility should be skipped."""
+    """Return a boolean mask where fragility should be skipped.
+
+    Args:
+        hazard_values: Array of hazard intensities (one value per asset).
+        asset_type: Array of asset-type labels (one string per asset).
+        fragility_exclusions: One of:
+            - ``None`` – no exclusions (all assets are subject to fragility).
+            - A boolean ``np.ndarray`` – directly used as the exclusion mask.
+            - A ``dict`` mapping asset-type strings to either a ``bool``
+              (exclude the entire asset class) or a ``float`` threshold
+              (exclude assets of that class whose hazard value is at or below
+              the threshold).
+
+    Returns:
+        np.ndarray of dtype bool; ``True`` means fragility is **skipped** for
+        that asset.
+
+    Example::
+
+        import numpy as np
+        hazard = np.array([0.1, 0.5, 0.8, 0.3])
+        atype  = np.array(["substation", "cable", "substation", "cable"])
+
+        # Exclude all substations and cables with hazard <= 0.4
+        mask = _resolve_fragility_exclusions(
+            hazard, atype,
+            fragility_exclusions={"substation": True, "cable": 0.4},
+        )
+        # mask -> [True, False, True, True]
+    """
     exclusion_mask = np.zeros_like(hazard_values, dtype=bool)
     if fragility_exclusions is None:
         return exclusion_mask

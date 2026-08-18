@@ -338,7 +338,7 @@ def evaluate_dependencies(
     require_repair_for_operational: bool = False,
     return_report: bool = False,
 ):
-    """High-level dependency evaluation entry point (legacy path).
+    """High-level dependency evaluation entry point.
 
     Returns updated operational state, plus report when requested.
     """
