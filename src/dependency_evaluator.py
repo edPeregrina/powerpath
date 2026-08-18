@@ -200,6 +200,38 @@ def _evaluate_dependency_pairs(
     return blocked
 
 
+def _evaluate_combined_dependency_pairs(
+    operational: np.ndarray,
+    area_pairs: Iterable[tuple[int, int]],
+    pairwise_pairs: Iterable[tuple[int, int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    area_blocked = np.zeros(len(operational), dtype=bool)
+    pairwise_blocked = np.zeros(len(operational), dtype=bool)
+    tagged_pairs = [
+        *((supplier, dependent, area_blocked) for supplier, dependent in area_pairs),
+        *(
+            (supplier, dependent, pairwise_blocked)
+            for supplier, dependent in pairwise_pairs
+        ),
+    ]
+    combined_blocked = np.zeros(len(operational), dtype=bool)
+    changed = True
+    while changed:
+        changed = False
+        for supplier_index, dependent_index, relationship_mask in tagged_pairs:
+            if (
+                (
+                    not operational[supplier_index]
+                    or combined_blocked[supplier_index]
+                )
+                and not combined_blocked[dependent_index]
+            ):
+                combined_blocked[dependent_index] = True
+                relationship_mask[dependent_index] = True
+                changed = True
+    return area_blocked, pairwise_blocked
+
+
 def evaluate_area_dependencies(context: DependencyContext) -> np.ndarray:
     """Block assets supplied by a non-operational service-area supplier."""
     return _evaluate_dependency_pairs(
@@ -267,6 +299,7 @@ def build_dependency_report(
     pairwise_blocked_mask: np.ndarray,
     rules_enabled: bool,
     require_repair_for_operational: bool,
+    dependency_blocked_mask: np.ndarray | None = None,
     warning: str | None = None,
 ) -> DependencyReport:
     """Build a concise report suitable for logging/debugging."""
@@ -274,6 +307,11 @@ def build_dependency_report(
         "blocked_count": int(np.sum(blocked_mask)),
         "area_blocked_count": int(np.sum(area_blocked_mask)),
         "pairwise_blocked_count": int(np.sum(pairwise_blocked_mask)),
+        "dependency_blocked_mask": (
+            np.asarray(dependency_blocked_mask, dtype=bool).copy()
+            if dependency_blocked_mask is not None
+            else np.zeros(len(blocked_mask), dtype=bool)
+        ),
         "rules_enabled": bool(rules_enabled),
         "require_repair_for_operational": bool(require_repair_for_operational),
         "active_rules": [
@@ -298,6 +336,7 @@ def evaluate_dependencies(
     dependency_map: dict[Any, Iterable[Any]] | None = None,
     area_dependencies: Iterable[dict[str, Any]] | None = None,
     pairwise_dependencies: Iterable[tuple[int, int]] | None = None,
+    previous_dependency_blocked_mask: np.ndarray | None = None,
     enable_default_rules: bool = True,
     require_repair_for_operational: bool = False,
     return_report: bool = False,
@@ -317,15 +356,34 @@ def evaluate_dependencies(
         area_dependencies=area_dependencies,
         pairwise_dependencies=pairwise_dependencies,
     )
+    if previous_dependency_blocked_mask is not None:
+        previous_dependency_blocked_mask = np.asarray(
+            previous_dependency_blocked_mask, dtype=bool
+        )
+        if previous_dependency_blocked_mask.shape != context["operational"].shape:
+            raise ValueError(
+                "previous_dependency_blocked_mask must match the operational array"
+            )
+        restorable_dependency_outages = (
+            previous_dependency_blocked_mask
+            & ~context["flooded_mask"]
+            & (context["repair_time"] <= context["repair_threshold"])
+        )
+        context["operational"][restorable_dependency_outages] = True
+
     base_blocked_mask = evaluate_dependency_rules(
         context,
         enable_default_rules=enable_default_rules,
         require_repair_for_operational=require_repair_for_operational,
     )
     context["base_blocked_mask"] = base_blocked_mask
-    area_blocked_mask = evaluate_area_dependencies(context)
-    context["base_blocked_mask"] = base_blocked_mask | area_blocked_mask
-    pairwise_blocked_mask = evaluate_pairwise_dependencies(context)
+    area_blocked_mask, pairwise_blocked_mask = (
+        _evaluate_combined_dependency_pairs(
+            _dependency_operational_state(context),
+            _area_dependency_pairs(context),
+            _pairwise_dependency_pairs(context),
+        )
+    )
     blocked_mask = evaluate_dependency_rules(
         context,
         area_blocked_mask=area_blocked_mask,
@@ -333,7 +391,13 @@ def evaluate_dependencies(
         enable_default_rules=enable_default_rules,
         require_repair_for_operational=require_repair_for_operational,
     )
-    updated_operational = apply_dependency_blocking(operational, blocked_mask)
+    updated_operational = apply_dependency_blocking(
+        context["operational"], blocked_mask
+    )
+    dependency_blocked_mask = (
+        (area_blocked_mask | pairwise_blocked_mask)
+        & _dependency_operational_state(context)
+    )
 
     if not return_report:
         return updated_operational
@@ -351,6 +415,7 @@ def evaluate_dependencies(
         pairwise_blocked_mask=pairwise_blocked_mask,
         rules_enabled=enable_default_rules,
         require_repair_for_operational=require_repair_for_operational,
+        dependency_blocked_mask=dependency_blocked_mask,
         warning=warning,
     )
     return updated_operational, report

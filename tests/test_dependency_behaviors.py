@@ -98,6 +98,42 @@ def test_area_dependency_observes_same_timestep_default_blocking():
     assert operational.tolist() == [False, False]
 
 
+def test_dependency_only_outage_restores_after_supplier_recovers():
+    dependencies = {0: [1]}
+    first_operational, first_report = evaluate_dependencies(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        area_dependencies=dependencies,
+        enable_default_rules=False,
+        return_report=True,
+    )
+    restored, second_report = evaluate_dependencies(
+        np.array([True, first_operational[1]], dtype=bool),
+        np.array(["msls", "hospital"]),
+        area_dependencies=dependencies,
+        previous_dependency_blocked_mask=first_report[
+            "dependency_blocked_mask"
+        ],
+        enable_default_rules=False,
+        return_report=True,
+    )
+
+    assert restored.tolist() == [True, True]
+    assert not second_report["dependency_blocked_mask"].any()
+
+
+def test_mixed_dependency_chain_propagates_in_same_timestep():
+    operational = evaluate_dependencies(
+        np.array([False, True, True], dtype=bool),
+        np.array(["msls", "hospital", "school"]),
+        area_dependencies={1: [2]},
+        pairwise_dependencies=[(0, 1)],
+        enable_default_rules=False,
+    )
+
+    assert operational.tolist() == [False, False, False]
+
+
 def test_repair_below_threshold_restores_at_threshold():
     kg = DependencyKnowledgeGraph.from_config(
         [

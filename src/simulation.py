@@ -62,6 +62,7 @@ class SimulationState:
         self.island_ids = np.zeros(num_assets, dtype=int)
         self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
         self.recovery_delay_active = {}
+        self.dependency_blocked_mask = np.zeros(num_assets, dtype=bool)
         self.dependency_report = {}
         self.simulation_warnings = []
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
@@ -396,6 +397,9 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                     if method is None or method == 'random' or method == 'islands':
                         np.random.shuffle(repairable_assets_indices)
                         repair_crews_assigned[repairable_assets_indices[:crew_count]] = True
+                    elif method == 'island':
+                        np.random.shuffle(repairable_assets_indices)
+                        repair_crews_assigned[repairable_assets_indices[:crew_count]] = True
                     elif 'lowest repair time' in method:
                         sorted_indices = np.argsort(repair_time[repairable_assets])
                         repair_crews_assigned[repairable_assets_indices[sorted_indices[:crew_count]]] = True
@@ -406,7 +410,9 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                         sorted_indices = np.argsort(-np.array([asset_impact_map.get(idx, 0) for idx in repairable_assets_indices]))
                         repair_crews_assigned[repairable_assets_indices[sorted_indices[:crew_count]]] = True
 
-                    newly_assigned_crews = crew_count
+                    newly_assigned_crews = int(
+                        np.sum(repair_crews_assigned[repairable_assets_indices])
+                    )
                     # Bounds checking: ensure we don't assign more crews than available
                     newly_assigned_crews = min(newly_assigned_crews, available_repair_crews[island_id])
                     available_repair_crews[island_id] -= newly_assigned_crews
@@ -1017,10 +1023,14 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
             dependency_map=dependency_config.get('dependency_map'),
             area_dependencies=dependency_config.get('area_dependencies'),
             pairwise_dependencies=dependency_config.get('pairwise_dependencies'),
+            previous_dependency_blocked_mask=state.dependency_blocked_mask,
             enable_default_rules=dependency_config.get('enable_default_rules', True),
             require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
             return_report=True,
         )
+        state.dependency_blocked_mask = state.dependency_report[
+            "dependency_blocked_mask"
+        ]
 
     warning = state.dependency_report.get("warning")
     if warning and warning not in state.simulation_warnings:
