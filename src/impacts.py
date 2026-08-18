@@ -304,6 +304,150 @@ def calculate_population_impacts(detailed_results, asset_population_map):
     population_impact_df = pd.DataFrame(timestep_results)
     return population_impact_df
 
+def prepare_population_impact_data_multigroup(
+    population_data,
+    voronoi_gdf,
+    group_columns=None,
+):
+    """
+    Build population assignment maps for multiple population groups using the
+    existing Voronoi assignment logic.
+
+    Args:
+        population_data: GeoDataFrame with population grid cells.  Must contain
+            the columns listed in *group_columns*.
+        voronoi_gdf: GeoDataFrame with Voronoi polygons and an ``asset_id``
+            column (as returned by ``create_voronoi_for_asset_type``).
+        group_columns: dict mapping group label → CBS column name, e.g.
+            ``{'total': 'aantal_inwoners', 'elderly': 'aantal_inwoners_65_jaar_en_ouder'}``.
+            Defaults to ``{'total': 'aantal_inwoners'}``.
+
+    Returns:
+        dict: ``{group_label: {asset_id: population_value}}``
+    """
+    if group_columns is None:
+        group_columns = {'total': 'aantal_inwoners'}
+
+    result = {}
+    for label, col in group_columns.items():
+        if col not in population_data.columns:
+            print(f"Warning: column '{col}' not found in population data; skipping group '{label}'")
+            continue
+        voronoi_with_impact = assign_impact_metric_to_voronoi(
+            voronoi_gdf, population_data, impact_column=col
+        )
+        result[label] = {
+            row['asset_id']: row['assigned_impact_metric']
+            for _, row in voronoi_with_impact.iterrows()
+        }
+    return result
+
+
+def calculate_societal_access_impacts(
+    detailed_results,
+    asset_group_population_maps,
+    asset_function_map,
+):
+    """
+    Aggregate per-timestep access-loss impacts by infrastructure function and
+    population group.
+
+    This generalises ``calculate_population_impacts`` so that a single call can
+    answer questions like "who loses access to electricity?" and "who loses
+    access to health services?" for the total population *and* for specific
+    demographic subgroups (e.g. >65 year olds).
+
+    Args:
+        detailed_results: list of timestep dicts as returned by the simulation
+            when ``timestep_output=True``.  Each dict must contain at minimum:
+            ``'timestep'``, ``'operational'``.  An ``'asset_id'`` key is used
+            when present; otherwise positional indices are assumed.
+        asset_group_population_maps: nested dict
+            ``{group_label: {asset_id: population_value}}``.
+            Typically the output of ``prepare_population_impact_data_multigroup``.
+            Multiple Voronoi sets (one per service function) can be merged here
+            by prefixing keys, e.g. ``{'electricity:total': {...}, 'health:total': {...}}``.
+        asset_function_map: dict ``{asset_id: function_label}`` that maps each
+            asset to its service function string (e.g. ``'electricity'``,
+            ``'health'``).  Assets absent from this map are skipped.
+
+    Returns:
+        pd.DataFrame: one row per (timestep × function × group) with columns:
+            ``timestep``, ``function``, ``group``,
+            ``affected_population``, ``served_population``,
+            ``total_population``, ``affected_ratio``.
+    """
+    # Gather distinct functions and groups from the maps
+    # Support either flat keys like 'electricity:total' or pure group keys
+    # combined with asset_function_map.
+    rows = []
+
+    # Collect all (function, group) pairs
+    # Determine if keys use 'function:group' convention
+    def _split_key(k):
+        if ':' in k:
+            parts = k.split(':', 1)
+            return parts[0], parts[1]
+        return None, k  # no function prefix → group only
+
+    # Build structured lookup: {function: {group: {asset_id: pop}}}
+    structured: dict = {}
+    for map_key, pop_map in asset_group_population_maps.items():
+        func_prefix, group_label = _split_key(map_key)
+        if func_prefix is None:
+            # No function prefix in map keys; use asset_function_map to resolve
+            # Build per-function sub-maps from this group
+            by_func: dict = {}
+            for asset_id, pop in pop_map.items():
+                func = asset_function_map.get(asset_id)
+                if func is None:
+                    continue
+                by_func.setdefault(func, {})[asset_id] = pop
+            for func, sub_map in by_func.items():
+                structured.setdefault(func, {}).setdefault(group_label, {}).update(sub_map)
+        else:
+            # Explicit function:group key — use directly
+            # Filter by matching assets in asset_function_map
+            filtered = {
+                asset_id: pop
+                for asset_id, pop in pop_map.items()
+                if asset_function_map.get(asset_id) == func_prefix
+            }
+            structured.setdefault(func_prefix, {}).setdefault(group_label, {}).update(filtered)
+
+    for timestep_dict in detailed_results:
+        timestep = timestep_dict.get('timestep', None)
+        asset_ids = list(
+            timestep_dict.get('asset_id', range(len(timestep_dict['operational'])))
+        )
+        operational = list(timestep_dict['operational'])
+
+        for func, group_maps in structured.items():
+            for group, pop_map in group_maps.items():
+                total_pop = sum(pop_map.values())
+                affected = 0.0
+                served = 0.0
+                for idx, asset_id in enumerate(asset_ids):
+                    if asset_id not in pop_map:
+                        continue
+                    pop = pop_map[asset_id]
+                    if idx < len(operational) and operational[idx]:
+                        served += pop
+                    else:
+                        affected += pop
+                rows.append({
+                    'timestep': timestep,
+                    'function': func,
+                    'group': group,
+                    'affected_population': affected,
+                    'served_population': served,
+                    'total_population': total_pop,
+                    'affected_ratio': affected / total_pop if total_pop > 0 else 0.0,
+                })
+
+    return pd.DataFrame(rows)
+
+
 def update_voll_rates(land_use_data):
     """
     Update VOLL rates and consumption values based on actual land use areas.
