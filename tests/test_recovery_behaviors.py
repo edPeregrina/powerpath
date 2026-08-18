@@ -1,11 +1,17 @@
+import sys
+from pathlib import Path
+
 import networkx as nx
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.simulation import (
     SimulationState,
     _assign_repair_crews,
     _handle_completed_repairs,
     _normalize_repair_crews_by_asset_type_config,
+    _update_unreachable_assets,
 )
 from src.utils import filter_hazard_graph
 
@@ -51,6 +57,26 @@ def test_grouped_crew_returns_to_repaired_assets_current_island():
 
     assert pool_state["pools"][0]["available"] == {0: 0, 3: 1}
     assert not state.repair_crews_assigned[0]
+
+
+def test_busy_grouped_crew_keeps_its_island_reachable():
+    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state["pools"][0]["available"] = {2: 0}
+    state = SimulationState(None, 2)
+    state.island_ids[:] = 2
+    state.damage_ratio[:] = 1.0
+    state.repair_crews_assigned[0] = True
+
+    _update_unreachable_assets(
+        state,
+        available_repair_crews={2: 0},
+        flooded_mask=np.zeros(2, dtype=bool),
+        damage_threshold=0.1,
+        asset_type=np.array(["hospital", "hospital"]),
+        repair_crews_by_asset_type=pool_state,
+    )
+
+    assert state.unreachable.tolist() == [False, False]
 
 
 def test_completed_repair_releases_crew_while_dependency_wait_continues():

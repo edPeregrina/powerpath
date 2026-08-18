@@ -1059,6 +1059,11 @@ def _update_unreachable_assets(
                     for island_id, crew_count in pool_available.items()
                     if crew_count > 0
                 ]
+                crew_islands.extend(
+                    state.island_ids[
+                        state.repair_crews_assigned & type_mask
+                    ].tolist()
+                )
                 has_available_crew |= type_mask & np.isin(
                     state.island_ids, crew_islands
                 )
@@ -1076,13 +1081,17 @@ def _update_unreachable_assets(
             for island_id, crew_count in available_repair_crews.items()
             if crew_count > 0
         ]
+        default_crew_islands.extend(
+            state.island_ids[
+                state.repair_crews_assigned & default_type_mask
+            ].tolist()
+        )
         has_available_crew |= default_type_mask & np.isin(
             state.island_ids, default_crew_islands
         )
     elif available_repair_crews is None or available_repair_crews > 0:
         has_available_crew |= default_type_mask
 
-    has_available_crew |= state.repair_crews_assigned
     state.unreachable = (
         (state.damage_ratio > damage_threshold)
         & ~flooded_mask
