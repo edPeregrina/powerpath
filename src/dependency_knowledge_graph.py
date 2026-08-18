@@ -191,7 +191,11 @@ class DependencyKnowledgeGraph:
 
     def to_json(self, indent: int = 2) -> str:
         """Serialise all rules to a JSON string."""
-        return json.dumps([r.to_dict() for r in self._rules], indent=indent)
+        return json.dumps(self.to_config(), indent=indent)
+
+    def to_config(self) -> list[dict[str, Any]]:
+        """Return rules in the configuration format accepted by the simulation."""
+        return [rule.to_dict() for rule in self._rules]
 
     # ------------------------------------------------------------------
     # Query interface
@@ -256,6 +260,11 @@ class DependencyKnowledgeGraph:
     def all_hazard_types(self) -> list[str]:
         """Return the sorted unique set of all hazard_type values."""
         return sorted({r.hazard_type for r in self._rules})
+
+    @property
+    def rules(self) -> tuple[DependencyRule, ...]:
+        """Expose the configured rules as an immutable sequence."""
+        return tuple(self._rules)
 
     def __len__(self) -> int:
         return len(self._rules)
