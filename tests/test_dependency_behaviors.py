@@ -122,6 +122,42 @@ def test_dependency_only_outage_restores_after_supplier_recovers():
     assert not second_report["dependency_blocked_mask"].any()
 
 
+def test_dependency_recovery_survives_overlapping_flood_block():
+    dependencies = {0: [1]}
+    first_operational, first_report = evaluate_dependencies(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        area_dependencies=dependencies,
+        enable_default_rules=False,
+        return_report=True,
+    )
+    flooded_operational, flooded_report = evaluate_dependencies(
+        first_operational,
+        np.array(["msls", "hospital"]),
+        flooded_mask=np.array([False, True]),
+        area_dependencies=dependencies,
+        previous_dependency_blocked_mask=first_report[
+            "dependency_blocked_mask"
+        ],
+        enable_default_rules=False,
+        return_report=True,
+    )
+    restored, final_report = evaluate_dependencies(
+        np.array([True, flooded_operational[1]], dtype=bool),
+        np.array(["msls", "hospital"]),
+        flooded_mask=np.array([False, False]),
+        area_dependencies=dependencies,
+        previous_dependency_blocked_mask=flooded_report[
+            "dependency_blocked_mask"
+        ],
+        enable_default_rules=False,
+        return_report=True,
+    )
+
+    assert restored.tolist() == [True, True]
+    assert not final_report["dependency_blocked_mask"].any()
+
+
 def test_mixed_dependency_chain_propagates_in_same_timestep():
     operational = evaluate_dependencies(
         np.array([False, True, True], dtype=bool),

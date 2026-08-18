@@ -61,6 +61,27 @@ def test_grouped_pool_assigns_for_singular_island_method():
     assert pool_state["pools"][0]["available"] == {0: 0}
 
 
+def test_grouped_scalar_fallback_assigns_for_singular_island_method():
+    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+
+    _, assigned = _assign_repair_crews(
+        timestep=0,
+        available_repair_crews=0,
+        repair_crews_assigned=np.zeros(2, dtype=bool),
+        accessible=np.ones(2, dtype=bool),
+        flooded_mask=np.zeros(2, dtype=bool),
+        repair_time=np.ones(2),
+        island_ids=np.zeros(2, dtype=int),
+        method="island",
+        verbose=False,
+        asset_type=np.array(["hospital", "hospital"]),
+        repair_crews_by_asset_type=pool_state,
+    )
+
+    assert assigned.sum() == 1
+    assert pool_state["pools"][0]["available"] == 0
+
+
 def test_grouped_crew_returns_to_repaired_assets_current_island():
     pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
     pool_state["pools"][0]["available"] = {0: 0}

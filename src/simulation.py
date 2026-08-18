@@ -441,7 +441,7 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
             
             # If there are fewer repair crews than assets needing assignment
             repairable_assets_indices = np.where(repairable_assets)[0]
-            if method is None or method == 'random':
+            if method is None or method in ('random', 'island'):
                 np.random.shuffle(repairable_assets_indices)
                 repair_crews_assigned[repairable_assets_indices[:available_repair_crews]] = True
             elif method == 'lowest repair time':
@@ -454,7 +454,9 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
                 sorted_indices = np.argsort(-np.array([asset_impact_map.get(idx, 0) for idx in repairable_assets_indices]))
                 repair_crews_assigned[repairable_assets_indices[sorted_indices[:available_repair_crews]]] = True
             
-            newly_assigned_crews = available_repair_crews
+            newly_assigned_crews = int(
+                np.sum(repair_crews_assigned[repairable_assets_indices])
+            )
             available_repair_crews -= newly_assigned_crews
                 
             if verbose:

@@ -356,6 +356,9 @@ def evaluate_dependencies(
         area_dependencies=area_dependencies,
         pairwise_dependencies=pairwise_dependencies,
     )
+    preserved_dependency_blocked_mask = np.zeros(
+        len(context["operational"]), dtype=bool
+    )
     if previous_dependency_blocked_mask is not None:
         previous_dependency_blocked_mask = np.asarray(
             previous_dependency_blocked_mask, dtype=bool
@@ -370,6 +373,10 @@ def evaluate_dependencies(
             & (context["repair_time"] <= context["repair_threshold"])
         )
         context["operational"][restorable_dependency_outages] = True
+        preserved_dependency_blocked_mask = (
+            previous_dependency_blocked_mask
+            & ~restorable_dependency_outages
+        )
 
     base_blocked_mask = evaluate_dependency_rules(
         context,
@@ -395,8 +402,11 @@ def evaluate_dependencies(
         context["operational"], blocked_mask
     )
     dependency_blocked_mask = (
-        (area_blocked_mask | pairwise_blocked_mask)
-        & _dependency_operational_state(context)
+        preserved_dependency_blocked_mask
+        | (
+            (area_blocked_mask | pairwise_blocked_mask)
+            & _dependency_operational_state(context)
+        )
     )
 
     if not return_report:
