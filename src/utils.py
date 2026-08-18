@@ -461,8 +461,6 @@ def build_service_area_map_from_rules(
     if not service_area_pairs:
         return {}
 
-    from src.impacts import create_voronoi_for_asset_type
-
     service_area_map: dict[int, list[int]] = {}
 
     for primary_type in sorted({asset_type_a for asset_type_a, _ in service_area_pairs}):
@@ -499,6 +497,8 @@ def build_service_area_map_from_rules(
             continue
 
         try:
+            from src.impacts import create_voronoi_for_asset_type
+
             voronoi_gdf = create_voronoi_for_asset_type(normalized_assets, primary_type)
         except Exception:
             voronoi_gdf = gpd.GeoDataFrame(

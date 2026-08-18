@@ -158,6 +158,32 @@ def test_dependency_recovery_survives_overlapping_flood_block():
     assert not final_report["dependency_blocked_mask"].any()
 
 
+def test_dependency_recovery_tracks_simultaneous_direct_block():
+    dependencies = {0: [1]}
+    first_operational, first_report = evaluate_dependencies(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "road"]),
+        flooded_mask=np.array([False, True]),
+        area_dependencies=dependencies,
+        enable_default_rules=True,
+        return_report=True,
+    )
+    restored, final_report = evaluate_dependencies(
+        np.array([True, first_operational[1]], dtype=bool),
+        np.array(["msls", "road"]),
+        flooded_mask=np.array([False, False]),
+        area_dependencies=dependencies,
+        previous_dependency_blocked_mask=first_report[
+            "dependency_blocked_mask"
+        ],
+        enable_default_rules=True,
+        return_report=True,
+    )
+
+    assert restored.tolist() == [True, True]
+    assert not final_report["dependency_blocked_mask"].any()
+
+
 def test_mixed_dependency_chain_propagates_in_same_timestep():
     operational = evaluate_dependencies(
         np.array([False, True, True], dtype=bool),
@@ -329,6 +355,82 @@ def test_service_area_rule_does_not_restore_disrupted_supplier():
     )
 
     assert updated.tolist() == [False, False]
+
+
+def test_service_area_only_dependent_restores_with_supplier():
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": "hospital",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": False,
+                    "return_to_operational": {"trigger": "immediate"},
+                },
+            }
+        ]
+    )
+    first_operational, first_report = evaluate_dependencies_from_graph(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        "flooding",
+        kg,
+        service_area_map={0: [1]},
+        return_report=True,
+    )
+    restored, final_report = evaluate_dependencies_from_graph(
+        np.array([True, first_operational[1]], dtype=bool),
+        np.array(["msls", "hospital"]),
+        "flooding",
+        kg,
+        service_area_map={0: [1]},
+        previous_dependency_blocked_mask=first_report[
+            "dependency_blocked_mask"
+        ],
+        return_report=True,
+    )
+
+    assert restored.tolist() == [True, True]
+    assert not final_report["dependency_blocked_mask"].any()
+
+
+def test_service_area_chain_propagates_in_same_timestep():
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "msls",
+                "asset_type_b": "hospital",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": False,
+                    "return_to_operational": {"trigger": "immediate"},
+                },
+            },
+            {
+                "hazard_type": "flooding",
+                "asset_type_a": "hospital",
+                "asset_type_b": "school",
+                "relationship": "service_area",
+                "parameters": {
+                    "hazard_blocks_operation": False,
+                    "return_to_operational": {"trigger": "immediate"},
+                },
+            },
+        ]
+    )
+
+    updated = evaluate_dependencies_from_graph(
+        np.array([False, True, True], dtype=bool),
+        np.array(["msls", "hospital", "school"]),
+        "flooding",
+        kg,
+        service_area_map={0: [1], 1: [2]},
+    )
+
+    assert updated.tolist() == [False, False, False]
 
 
 def test_default_graph_propagates_asset_192_failure_to_asset_246():

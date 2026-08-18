@@ -405,7 +405,7 @@ def evaluate_dependencies(
         preserved_dependency_blocked_mask
         | (
             (area_blocked_mask | pairwise_blocked_mask)
-            & _dependency_operational_state(context)
+            & context["operational"]
         )
     )
 
@@ -686,6 +686,7 @@ def evaluate_dependencies_from_graph(
     repair_time: np.ndarray | None = None,
     wait_vectors: dict[str, np.ndarray] | None = None,
     service_area_map: dict[int, list[int]] | None = None,
+    previous_dependency_blocked_mask: np.ndarray | None = None,
     return_report: bool = False,
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
@@ -737,6 +738,37 @@ def evaluate_dependencies_from_graph(
         ``True``).
     """
     num_assets = len(asset_type)
+    if flooded_mask is None:
+        flooded_mask = np.zeros(num_assets, dtype=bool)
+    else:
+        flooded_mask = np.asarray(flooded_mask, dtype=bool)
+
+    if repair_time is None:
+        repair_time = np.zeros(num_assets, dtype=np.float64)
+    else:
+        repair_time = np.asarray(repair_time, dtype=np.float64)
+
+    operational = np.asarray(operational, dtype=bool).copy()
+    preserved_dependency_blocked_mask = np.zeros(num_assets, dtype=bool)
+    if previous_dependency_blocked_mask is not None:
+        previous_dependency_blocked_mask = np.asarray(
+            previous_dependency_blocked_mask, dtype=bool
+        )
+        if previous_dependency_blocked_mask.shape != operational.shape:
+            raise ValueError(
+                "previous_dependency_blocked_mask must match the operational array"
+            )
+        restorable_dependency_outages = (
+            previous_dependency_blocked_mask
+            & ~flooded_mask
+            & (repair_time <= 0.0)
+        )
+        operational[restorable_dependency_outages] = True
+        preserved_dependency_blocked_mask = (
+            previous_dependency_blocked_mask
+            & ~restorable_dependency_outages
+        )
+
     # Restore pass first: re-enable assets whose return-to-operational condition is met.
     operational = restore_operational_from_graph(
         operational,
@@ -747,16 +779,7 @@ def evaluate_dependencies_from_graph(
         repair_time=repair_time,
         wait_vectors=wait_vectors,
     )
-
-    if flooded_mask is None:
-        flooded_mask = np.zeros(num_assets, dtype=bool)
-    else:
-        flooded_mask = np.asarray(flooded_mask, dtype=bool)
-
-    if repair_time is None:
-        repair_time = np.zeros(num_assets, dtype=np.float64)
-    else:
-        repair_time = np.asarray(repair_time, dtype=np.float64)
+    dependency_candidate_operational = operational.copy()
 
     blocked_mask = np.zeros(num_assets, dtype=bool)
     hazard_blocked_count = 0
@@ -805,45 +828,68 @@ def evaluate_dependencies_from_graph(
             blocked_mask |= repair_blocked
             repair_blocked_count += int(np.sum(newly_repair_blocked))
 
-        # --- Service-area rules (A → B) -------------------------------------
-        if service_area_map is None:
-            continue
-
-        for b_type in unique_asset_types:
-            if b_type == a_type:
+    # --- Service-area rules (A → B), propagated to a fixed point ------------
+    service_area_blocked_mask = np.zeros(num_assets, dtype=bool)
+    service_edges: list[tuple[int, int]] = []
+    if service_area_map is not None:
+        for rule in knowledge_graph.rules:
+            if (
+                rule.hazard_type != hazard_type
+                or rule.relationship != "service_area"
+                or rule.asset_type_b is None
+            ):
                 continue
-            sa_rules = knowledge_graph.get_rules(hazard_type, a_type, asset_type_b=b_type)
-            if not sa_rules:
-                continue
+            active_rules.append(
+                {
+                    "hazard_type": hazard_type,
+                    "asset_type_a": rule.asset_type_a,
+                    "asset_type_b": rule.asset_type_b,
+                    "relationship": "service_area",
+                    "hazard_blocks_operation": bool(
+                        rule.hazard_blocks_operation
+                    ),
+                    "return_trigger": rule.return_to_operational.trigger,
+                }
+            )
+            source_indices = np.where(asset_type == rule.asset_type_a)[0]
+            for source_index in source_indices:
+                for dependent_index in service_area_map.get(
+                    int(source_index), []
+                ):
+                    if (
+                        0 <= dependent_index < num_assets
+                        and asset_type[dependent_index] == rule.asset_type_b
+                    ):
+                        service_edges.append(
+                            (int(source_index), int(dependent_index))
+                        )
 
-            b_mask = asset_type == b_type
-            for rule in sa_rules:
-                if rule.relationship != "service_area":
-                    continue
-                active_rules.append(
-                    {
-                        "hazard_type": hazard_type,
-                        "asset_type_a": a_type,
-                        "asset_type_b": b_type,
-                        "relationship": "service_area",
-                        "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
-                        "return_trigger": rule.return_to_operational.trigger,
-                    }
-                )
+    changed = True
+    while changed:
+        changed = False
+        for source_index, dependent_index in service_edges:
+            source_unavailable = (
+                not operational[source_index]
+                or blocked_mask[source_index]
+                or service_area_blocked_mask[source_index]
+            )
+            if (
+                source_unavailable
+                and not service_area_blocked_mask[dependent_index]
+            ):
+                service_area_blocked_mask[dependent_index] = True
+                changed = True
 
-                # Find A-type assets that are currently non-operational (after
-                # direct blocking above has been folded in).
-                a_non_operational = a_mask & (blocked_mask | ~operational)
-
-                # Block B-type assets whose governing A asset is non-operational.
-                for a_idx in np.where(a_non_operational)[0]:
-                    b_indices = service_area_map.get(int(a_idx), [])
-                    for b_idx in b_indices:
-                        if b_idx < num_assets and b_mask[b_idx] and not blocked_mask[b_idx]:
-                            blocked_mask[b_idx] = True
-                            service_area_blocked_count += 1
+    service_area_blocked_count = int(
+        np.sum(service_area_blocked_mask & ~blocked_mask)
+    )
+    blocked_mask |= service_area_blocked_mask
 
     updated_operational = apply_dependency_blocking(operational, blocked_mask)
+    dependency_blocked_mask = (
+        preserved_dependency_blocked_mask
+        | (service_area_blocked_mask & dependency_candidate_operational)
+    )
 
     if not return_report:
         return updated_operational
@@ -853,6 +899,7 @@ def evaluate_dependencies_from_graph(
         "hazard_blocked_count": hazard_blocked_count,
         "repair_blocked_count": repair_blocked_count,
         "service_area_blocked_count": service_area_blocked_count,
+        "dependency_blocked_mask": dependency_blocked_mask,
         "active_rule_count": len(active_rules),
         "active_rules": active_rules,
     }

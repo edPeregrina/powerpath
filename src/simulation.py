@@ -1006,8 +1006,12 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
             repair_time=state.recovery_wait_vectors["repair_time"],
             wait_vectors=state.recovery_wait_vectors,
             service_area_map=service_area_map,
+            previous_dependency_blocked_mask=state.dependency_blocked_mask,
             return_report=True,
         )
+        state.dependency_blocked_mask = state.dependency_report[
+            "dependency_blocked_mask"
+        ]
         clear_completed_delayed_triggers(
             state.operational,
             state.recovery_wait_vectors,
