@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import get_config
 from src.damage_recovery import _build_failure_probability, default_fragility_function
 from src.dependency_evaluator import (
+    activate_delayed_trigger_waits,
     evaluate_dependencies,
     evaluate_dependencies_from_graph,
 )
@@ -17,7 +18,12 @@ from src.dependency_knowledge_graph import (
     DependencyKnowledgeGraph,
     build_default_knowledge_graph,
 )
-from src.simulation import _initialize_simulation
+from src.simulation import (
+    SimulationState,
+    _initialize_simulation,
+    _update_operational_state,
+    _update_repair_progress,
+)
 from src.utils import build_service_area_map_from_rules, build_voronoi_service_area_map
 
 CRS = "EPSG:28992"
@@ -47,6 +53,49 @@ def test_legacy_disabled_rules_emit_warning():
     )
 
     assert "warning" in report
+
+
+def test_area_dependency_blocks_assets_supplied_by_failed_asset():
+    operational, report = evaluate_dependencies(
+        np.array([False, True, True], dtype=bool),
+        np.array(["msls", "hospital", "hospital"]),
+        area_dependencies=[
+            {
+                "supplier_index": 0,
+                "dependent_indices": [1, 2],
+            }
+        ],
+        enable_default_rules=False,
+        return_report=True,
+    )
+
+    assert operational.tolist() == [False, False, False]
+    assert report["area_blocked_count"] == 2
+
+
+def test_pairwise_dependency_blocks_dependent_of_failed_asset():
+    operational, report = evaluate_dependencies(
+        np.array([False, True], dtype=bool),
+        np.array(["msls", "hospital"]),
+        pairwise_dependencies=[(0, 1)],
+        enable_default_rules=False,
+        return_report=True,
+    )
+
+    assert operational.tolist() == [False, False]
+    assert report["pairwise_blocked_count"] == 1
+
+
+def test_area_dependency_observes_same_timestep_default_blocking():
+    operational = evaluate_dependencies(
+        np.array([True, True], dtype=bool),
+        np.array(["road", "hospital"]),
+        flooded_mask=np.array([True, False], dtype=bool),
+        area_dependencies={0: [1]},
+        enable_default_rules=True,
+    )
+
+    assert operational.tolist() == [False, False]
 
 
 def test_repair_below_threshold_restores_at_threshold():
@@ -118,6 +167,69 @@ def test_delayed_trigger_uses_named_wait_vector():
 
     assert still_blocked.tolist() == [False]
     assert restored.tolist() == [True]
+
+
+def test_delayed_trigger_counts_down_without_repair_crew():
+    rule = {
+        "hazard_type": "flooding",
+        "asset_type_a": "hospital",
+        "asset_type_b": None,
+        "relationship": "direct",
+        "parameters": {
+            "hazard_blocks_operation": True,
+            "return_to_operational": {
+                "trigger": "delayed",
+                "delay_steps": 2,
+                "wait_vector": "dependency_wait",
+            },
+        },
+    }
+    kg = DependencyKnowledgeGraph.from_config([rule])
+    config = get_config()
+    config["dependency_parameters"]["knowledge_graph"] = [rule]
+    state = SimulationState(None, 1)
+    asset_type = np.array(["hospital"])
+    flooded = np.array([True])
+
+    activate_delayed_trigger_waits(
+        state.operational,
+        asset_type,
+        "flooding",
+        kg,
+        flooded_mask=flooded,
+        wait_vectors=state.recovery_wait_vectors,
+        active_masks=state.recovery_delay_active,
+    )
+    _update_repair_progress(state, flooded, elapsed_time=1.0)
+    _update_operational_state(
+        state, asset_type, flooded, config, repair_threshold=0.0, knowledge_graph=kg
+    )
+
+    assert state.recovery_wait_vectors["dependency_wait"].tolist() == [1.0]
+    assert not state.repair_crews_assigned[0]
+    assert not state.operational[0]
+
+    activate_delayed_trigger_waits(
+        state.operational,
+        asset_type,
+        "flooding",
+        kg,
+        flooded_mask=np.array([False]),
+        wait_vectors=state.recovery_wait_vectors,
+        active_masks=state.recovery_delay_active,
+    )
+    _update_repair_progress(state, np.array([False]), elapsed_time=1.0)
+    _update_operational_state(
+        state,
+        asset_type,
+        np.array([False]),
+        config,
+        repair_threshold=0.0,
+        knowledge_graph=kg,
+    )
+
+    assert state.recovery_wait_vectors["dependency_wait"].tolist() == [0.0]
+    assert state.operational[0]
 
 
 def test_service_area_rule_does_not_restore_disrupted_supplier():
