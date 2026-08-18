@@ -141,7 +141,11 @@ def _area_dependency_pairs(context: DependencyContext) -> list[tuple[int, int]]:
             dependent_index = _validate_dependency_index(
                 dependent, num_assets, "area dependency dependent"
             )
-            pairs.append((supplier_index, dependent_index))
+            if (
+                context["asset_type"][supplier_index] != "road"
+                and context["asset_type"][dependent_index] != "road"
+            ):
+                pairs.append((supplier_index, dependent_index))
     return pairs
 
 
@@ -168,16 +172,17 @@ def _pairwise_dependency_pairs(context: DependencyContext) -> list[tuple[int, in
             raise ValueError(
                 "Pairwise dependencies require supplier/source and dependent/target indices"
             )
-        pairs.append(
-            (
-                _validate_dependency_index(
-                    supplier, num_assets, "pairwise dependency supplier"
-                ),
-                _validate_dependency_index(
-                    dependent, num_assets, "pairwise dependency dependent"
-                ),
-            )
+        supplier_index = _validate_dependency_index(
+            supplier, num_assets, "pairwise dependency supplier"
         )
+        dependent_index = _validate_dependency_index(
+            dependent, num_assets, "pairwise dependency dependent"
+        )
+        if (
+            context["asset_type"][supplier_index] != "road"
+            and context["asset_type"][dependent_index] != "road"
+        ):
+            pairs.append((supplier_index, dependent_index))
     return pairs
 
 
@@ -258,10 +263,8 @@ def evaluate_dependency_rules(
 ) -> np.ndarray:
     """Combine dependency rules into one blocking mask.
 
-    The baseline default rules replicate the pre-knowledge-graph behavior:
-    flooded road assets are blocked here, while substation structural damage
-    remains governed by fragility and repair completion elsewhere in the
-    simulation.
+    Road availability is intentionally handled by the simulation's distinct
+    exposure-only path and is never changed here.
     """
     num_assets = len(context["asset_type"])
     blocked_mask = np.zeros(num_assets, dtype=bool)
@@ -271,18 +274,13 @@ def evaluate_dependency_rules(
     if pairwise_blocked_mask is not None:
         blocked_mask |= np.asarray(pairwise_blocked_mask, dtype=bool)
 
-    if enable_default_rules:
-        asset_type = context["asset_type"]
-        flooded_mask = context["flooded_mask"]
-
-        # Future-compatible baseline rule: roads are non-operational while flooded.
-        road_mask = asset_type == "road"
-        blocked_mask |= road_mask & flooded_mask
-
     if require_repair_for_operational:
         repair_time = context["repair_time"]
         repair_threshold = context["repair_threshold"]
-        blocked_mask |= repair_time > repair_threshold
+        blocked_mask |= (
+            (repair_time > repair_threshold)
+            & (context["asset_type"] != "road")
+        )
 
     return blocked_mask
 
@@ -315,7 +313,6 @@ def build_dependency_report(
         "rules_enabled": bool(rules_enabled),
         "require_repair_for_operational": bool(require_repair_for_operational),
         "active_rules": [
-            "road:flooded" if rules_enabled else None,
             "repair_time:threshold" if require_repair_for_operational else None,
         ],
     }
@@ -415,8 +412,8 @@ def evaluate_dependencies(
     warning = None
     if not enable_default_rules:
         warning = (
-            "Default dependency rules are disabled; flooded-road dependency "
-            "blocking is not being applied."
+            "Default dependency rules are disabled; only explicitly configured "
+            "area and pairwise dependencies are being applied."
         )
 
     report = build_dependency_report(
@@ -452,6 +449,8 @@ def activate_delayed_trigger_waits(
     num_assets = len(asset_type)
 
     for a_type in np.unique(asset_type):
+        if a_type == "road":
+            continue
         asset_mask = asset_type == a_type
         for rule in knowledge_graph.get_rules(
             hazard_type, a_type, asset_type_b=None
@@ -656,6 +655,8 @@ def restore_operational_from_graph(
 
     unique_asset_types = np.unique(asset_type)
     for a_type in unique_asset_types:
+        if a_type == "road":
+            continue
         a_mask = asset_type == a_type
         direct_rules = knowledge_graph.get_rules(
             hazard_type, a_type, asset_type_b=None
@@ -790,6 +791,8 @@ def evaluate_dependencies_from_graph(
     unique_asset_types = np.unique(asset_type)
 
     for a_type in unique_asset_types:
+        if a_type == "road":
+            continue
         a_mask = asset_type == a_type
 
         # --- Direct rules (rule on A itself) --------------------------------
@@ -837,6 +840,8 @@ def evaluate_dependencies_from_graph(
                 rule.hazard_type != hazard_type
                 or rule.relationship != "service_area"
                 or rule.asset_type_b is None
+                or rule.asset_type_a == "road"
+                or rule.asset_type_b == "road"
             ):
                 continue
             active_rules.append(
