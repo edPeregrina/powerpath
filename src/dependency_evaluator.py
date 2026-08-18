@@ -7,6 +7,7 @@ adds an explicit graph-aware path for opt-in dependency relationships.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -612,6 +613,7 @@ def restore_operational_from_graph(
     flooded_mask: np.ndarray | None = None,
     repair_time: np.ndarray | None = None,
     wait_vectors: dict[str, np.ndarray] | None = None,
+    profiler=None,
 ) -> np.ndarray:
     """Restore assets to operational based on knowledge graph return-to-operational triggers.
 
@@ -655,25 +657,49 @@ def restore_operational_from_graph(
         repair_time = np.asarray(repair_time, dtype=np.float64)
 
     unique_asset_types = np.unique(asset_type)
-    for a_type in unique_asset_types:
-        if a_type == "road":
-            continue
-        a_mask = asset_type == a_type
-        direct_rules = knowledge_graph.get_rules(
-            hazard_type, a_type, asset_type_b=None
-        )
-        for rule in direct_rules:
-            if rule.relationship != "direct":
+    if profiler is None:
+        for a_type in unique_asset_types:
+            if a_type == "road":
                 continue
-            eligible = _compute_restore_eligible_mask(
-                repair_time,
-                flooded_mask,
-                a_mask,
-                rule.return_to_operational,
-                wait_vectors=wait_vectors,
+            a_mask = asset_type == a_type
+            direct_rules = knowledge_graph.get_rules(
+                hazard_type, a_type, asset_type_b=None
             )
-            # Only restore assets that were previously non-operational.
-            operational |= eligible & ~operational
+            for rule in direct_rules:
+                if rule.relationship != "direct":
+                    continue
+                eligible = _compute_restore_eligible_mask(
+                    repair_time,
+                    flooded_mask,
+                    a_mask,
+                    rule.return_to_operational,
+                    wait_vectors=wait_vectors,
+                )
+                # Only restore assets that were previously non-operational.
+                operational |= eligible & ~operational
+    else:
+        with profiler.section(
+            "dependency.restore_rule_evaluation", include_in_timestep=True
+        ):
+            for a_type in unique_asset_types:
+                if a_type == "road":
+                    continue
+                a_mask = asset_type == a_type
+                direct_rules = knowledge_graph.get_rules(
+                    hazard_type, a_type, asset_type_b=None
+                )
+                for rule in direct_rules:
+                    if rule.relationship != "direct":
+                        continue
+                    eligible = _compute_restore_eligible_mask(
+                        repair_time,
+                        flooded_mask,
+                        a_mask,
+                        rule.return_to_operational,
+                        wait_vectors=wait_vectors,
+                    )
+                    # Only restore assets that were previously non-operational.
+                    operational |= eligible & ~operational
 
     return operational
 
@@ -690,6 +716,7 @@ def evaluate_dependencies_from_graph(
     service_area_map: dict[int, list[int]] | None = None,
     previous_dependency_blocked_mask: np.ndarray | None = None,
     return_report: bool = False,
+    profiler=None,
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
 
@@ -734,6 +761,7 @@ def evaluate_dependencies_from_graph(
         service_area_map: Mapping ``{asset_idx_a: [asset_idx_b, ...]}``.  Required
             for service-area rules; ignored otherwise.
         return_report: If ``True``, also return a report dict.
+        profiler: Optional timing profiler supporting ``section`` context manager.
 
     Returns:
         Updated operational array (and report dict if *return_report* is
@@ -773,15 +801,28 @@ def evaluate_dependencies_from_graph(
         )
 
     # Restore pass first: re-enable assets whose return-to-operational condition is met.
-    operational = restore_operational_from_graph(
-        operational,
-        asset_type,
-        hazard_type,
-        knowledge_graph,
-        flooded_mask=flooded_mask,
-        repair_time=repair_time,
-        wait_vectors=wait_vectors,
-    )
+    if profiler is None:
+        operational = restore_operational_from_graph(
+            operational,
+            asset_type,
+            hazard_type,
+            knowledge_graph,
+            flooded_mask=flooded_mask,
+            repair_time=repair_time,
+            wait_vectors=wait_vectors,
+        )
+    else:
+        with profiler.section("dependency.restore_pass", include_in_timestep=True):
+            operational = restore_operational_from_graph(
+                operational,
+                asset_type,
+                hazard_type,
+                knowledge_graph,
+                flooded_mask=flooded_mask,
+                repair_time=repair_time,
+                wait_vectors=wait_vectors,
+                profiler=profiler,
+            )
     dependency_candidate_operational = operational.copy()
 
     blocked_mask = np.zeros(num_assets, dtype=bool)
@@ -792,100 +833,122 @@ def evaluate_dependencies_from_graph(
 
     unique_asset_types = np.unique(asset_type)
 
-    for a_type in unique_asset_types:
-        if a_type == "road":
-            continue
-        a_mask = asset_type == a_type
-
-        # --- Direct rules (rule on A itself) --------------------------------
-        direct_rules = knowledge_graph.get_rules(
-            hazard_type, a_type, asset_type_b=None
-        )
-        for rule in direct_rules:
-            if rule.relationship != "direct":
+    direct_rules_cm = (
+        profiler.section("dependency.direct_rule_blocking", include_in_timestep=True)
+        if profiler is not None
+        else nullcontext()
+    )
+    with direct_rules_cm:
+        for a_type in unique_asset_types:
+            if a_type == "road":
                 continue
-            active_rules.append(
-                {
-                    "hazard_type": hazard_type,
-                    "asset_type_a": a_type,
-                    "asset_type_b": None,
-                    "relationship": "direct",
-                    "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
-                    "return_trigger": rule.return_to_operational.trigger,
-                }
-            )
+            a_mask = asset_type == a_type
 
-            # 1. Hazard blocking
-            if rule.hazard_blocks_operation:
-                hazard_blocked = a_mask & flooded_mask
-                newly_hazard_blocked = hazard_blocked & ~blocked_mask
-                blocked_mask |= hazard_blocked
-                hazard_blocked_count += int(np.sum(newly_hazard_blocked))
-
-            # 2. Repair-state blocking
-            repair_blocked = _compute_repair_blocked_mask(
-                repair_time,
-                a_mask,
-                rule.return_to_operational,
-                wait_vectors=wait_vectors,
+            # --- Direct rules (rule on A itself) --------------------------------
+            direct_rules = knowledge_graph.get_rules(
+                hazard_type, a_type, asset_type_b=None
             )
-            newly_repair_blocked = repair_blocked & ~blocked_mask
-            blocked_mask |= repair_blocked
-            repair_blocked_count += int(np.sum(newly_repair_blocked))
+            for rule in direct_rules:
+                if rule.relationship != "direct":
+                    continue
+                active_rules.append(
+                    {
+                        "hazard_type": hazard_type,
+                        "asset_type_a": a_type,
+                        "asset_type_b": None,
+                        "relationship": "direct",
+                        "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
+                        "return_trigger": rule.return_to_operational.trigger,
+                    }
+                )
+
+                # 1. Hazard blocking
+                if rule.hazard_blocks_operation:
+                    hazard_blocked = a_mask & flooded_mask
+                    newly_hazard_blocked = hazard_blocked & ~blocked_mask
+                    blocked_mask |= hazard_blocked
+                    hazard_blocked_count += int(np.sum(newly_hazard_blocked))
+
+                # 2. Repair-state blocking
+                repair_blocked = _compute_repair_blocked_mask(
+                    repair_time,
+                    a_mask,
+                    rule.return_to_operational,
+                    wait_vectors=wait_vectors,
+                )
+                newly_repair_blocked = repair_blocked & ~blocked_mask
+                blocked_mask |= repair_blocked
+                repair_blocked_count += int(np.sum(newly_repair_blocked))
 
     # --- Service-area rules (A → B), propagated to a fixed point ------------
     service_area_blocked_mask = np.zeros(num_assets, dtype=bool)
     service_edges: list[tuple[int, int]] = []
-    if service_area_map is not None:
-        for rule in knowledge_graph.rules:
-            if (
-                rule.hazard_type != hazard_type
-                or rule.relationship != "service_area"
-                or rule.asset_type_b is None
-                or rule.asset_type_a == "road"
-                or rule.asset_type_b == "road"
-            ):
-                continue
-            active_rules.append(
-                {
-                    "hazard_type": hazard_type,
-                    "asset_type_a": rule.asset_type_a,
-                    "asset_type_b": rule.asset_type_b,
-                    "relationship": "service_area",
-                    "hazard_blocks_operation": bool(
-                        rule.hazard_blocks_operation
-                    ),
-                    "return_trigger": rule.return_to_operational.trigger,
-                }
-            )
-            source_indices = np.where(asset_type == rule.asset_type_a)[0]
-            for source_index in source_indices:
-                for dependent_index in service_area_map.get(
-                    int(source_index), []
+    edge_build_cm = (
+        profiler.section(
+            "dependency.service_area_edge_build", include_in_timestep=True
+        )
+        if profiler is not None
+        else nullcontext()
+    )
+    with edge_build_cm:
+        if service_area_map is not None:
+            for rule in knowledge_graph.rules:
+                if (
+                    rule.hazard_type != hazard_type
+                    or rule.relationship != "service_area"
+                    or rule.asset_type_b is None
+                    or rule.asset_type_a == "road"
+                    or rule.asset_type_b == "road"
                 ):
-                    if (
-                        0 <= dependent_index < num_assets
-                        and asset_type[dependent_index] == rule.asset_type_b
+                    continue
+                active_rules.append(
+                    {
+                        "hazard_type": hazard_type,
+                        "asset_type_a": rule.asset_type_a,
+                        "asset_type_b": rule.asset_type_b,
+                        "relationship": "service_area",
+                        "hazard_blocks_operation": bool(
+                            rule.hazard_blocks_operation
+                        ),
+                        "return_trigger": rule.return_to_operational.trigger,
+                    }
+                )
+                source_indices = np.where(asset_type == rule.asset_type_a)[0]
+                for source_index in source_indices:
+                    for dependent_index in service_area_map.get(
+                        int(source_index), []
                     ):
-                        service_edges.append(
-                            (int(source_index), int(dependent_index))
-                        )
+                        if (
+                            0 <= dependent_index < num_assets
+                            and asset_type[dependent_index] == rule.asset_type_b
+                        ):
+                            service_edges.append(
+                                (int(source_index), int(dependent_index))
+                            )
 
-    changed = True
-    while changed:
-        changed = False
-        for source_index, dependent_index in service_edges:
-            source_unavailable = (
-                not operational[source_index]
-                or blocked_mask[source_index]
-                or service_area_blocked_mask[source_index]
-            )
-            if (
-                source_unavailable
-                and not service_area_blocked_mask[dependent_index]
-            ):
-                service_area_blocked_mask[dependent_index] = True
-                changed = True
+    propagation_cm = (
+        profiler.section(
+            "dependency.service_area_propagation", include_in_timestep=True
+        )
+        if profiler is not None
+        else nullcontext()
+    )
+    with propagation_cm:
+        changed = True
+        while changed:
+            changed = False
+            for source_index, dependent_index in service_edges:
+                source_unavailable = (
+                    not operational[source_index]
+                    or blocked_mask[source_index]
+                    or service_area_blocked_mask[source_index]
+                )
+                if (
+                    source_unavailable
+                    and not service_area_blocked_mask[dependent_index]
+                ):
+                    service_area_blocked_mask[dependent_index] = True
+                    changed = True
 
     service_area_blocked_count = int(
         np.sum(service_area_blocked_mask & ~blocked_mask)

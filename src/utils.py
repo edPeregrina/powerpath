@@ -431,29 +431,58 @@ def _build_nearest_service_area_map(
 def build_service_area_map_from_rules(
     gdf_assets: "gpd.GeoDataFrame",
     rule_list: list[dict],
+    profiler=None,
 ) -> dict[int, list[int]]:
-    """Build a global service-area map for all configured service-area rules."""
+    """Build a global service-area map for all configured service-area rules.
+
+    When *profiler* is provided, key construction phases are timed.
+    """
     if gdf_assets.empty or not rule_list:
         return {}
     if "type" not in gdf_assets.columns:
         raise ValueError("gdf_assets must contain a 'type' column.")
 
-    geometry_column = gdf_assets.geometry.name
-    normalized_assets = gpd.GeoDataFrame(
-        gdf_assets.copy().reset_index(drop=True),
-        geometry=geometry_column,
-        crs=gdf_assets.crs,
-    )
+    if profiler is not None:
+        with profiler.section(
+            "service_area_map.normalize_assets", include_in_timestep=False
+        ):
+            geometry_column = gdf_assets.geometry.name
+            normalized_assets = gpd.GeoDataFrame(
+                gdf_assets.copy().reset_index(drop=True),
+                geometry=geometry_column,
+                crs=gdf_assets.crs,
+            )
+    else:
+        geometry_column = gdf_assets.geometry.name
+        normalized_assets = gpd.GeoDataFrame(
+            gdf_assets.copy().reset_index(drop=True),
+            geometry=geometry_column,
+            crs=gdf_assets.crs,
+        )
 
-    service_area_pairs = sorted(
-        {
-            (str(rule.get("asset_type_a")), str(rule.get("asset_type_b")))
-            for rule in rule_list
-            if rule.get("relationship", "direct") == "service_area"
-            and rule.get("asset_type_a") is not None
-            and rule.get("asset_type_b") is not None
-        }
-    )
+    if profiler is not None:
+        with profiler.section(
+            "service_area_map.identify_pairs", include_in_timestep=False
+        ):
+            service_area_pairs = sorted(
+                {
+                    (str(rule.get("asset_type_a")), str(rule.get("asset_type_b")))
+                    for rule in rule_list
+                    if rule.get("relationship", "direct") == "service_area"
+                    and rule.get("asset_type_a") is not None
+                    and rule.get("asset_type_b") is not None
+                }
+            )
+    else:
+        service_area_pairs = sorted(
+            {
+                (str(rule.get("asset_type_a")), str(rule.get("asset_type_b")))
+                for rule in rule_list
+                if rule.get("relationship", "direct") == "service_area"
+                and rule.get("asset_type_a") is not None
+                and rule.get("asset_type_b") is not None
+            }
+        )
     if not service_area_pairs:
         return {}
 
@@ -492,16 +521,33 @@ def build_service_area_map_from_rules(
             )
             continue
 
-        try:
-            from src.impacts import create_voronoi_for_asset_type
+        if profiler is not None:
+            with profiler.section(
+                "service_area_map.voronoi_build", include_in_timestep=False
+            ):
+                try:
+                    from src.impacts import create_voronoi_for_asset_type
 
-            voronoi_gdf = create_voronoi_for_asset_type(normalized_assets, primary_type)
-        except Exception:
-            voronoi_gdf = gpd.GeoDataFrame(
-                {"asset_id": [], "geometry": []},
-                geometry="geometry",
-                crs="EPSG:28992",
-            )
+                    voronoi_gdf = create_voronoi_for_asset_type(
+                        normalized_assets, primary_type
+                    )
+                except Exception:
+                    voronoi_gdf = gpd.GeoDataFrame(
+                        {"asset_id": [], "geometry": []},
+                        geometry="geometry",
+                        crs="EPSG:28992",
+                    )
+        else:
+            try:
+                from src.impacts import create_voronoi_for_asset_type
+
+                voronoi_gdf = create_voronoi_for_asset_type(normalized_assets, primary_type)
+            except Exception:
+                voronoi_gdf = gpd.GeoDataFrame(
+                    {"asset_id": [], "geometry": []},
+                    geometry="geometry",
+                    crs="EPSG:28992",
+                )
 
         primary_asset_ids = {int(idx) for idx in primary_assets.index}
         voronoi_asset_ids = (
@@ -510,13 +556,27 @@ def build_service_area_map_from_rules(
             else set()
         )
 
-        primary_map = (
-            build_voronoi_service_area_map(voronoi_gdf, secondary_assets)
-            if voronoi_asset_ids == primary_asset_ids
-            else {}
-        )
-        if not primary_map:
-            primary_map = _build_nearest_service_area_map(primary_assets, secondary_assets)
+        if profiler is not None:
+            with profiler.section(
+                "service_area_map.assignment_build", include_in_timestep=False
+            ):
+                primary_map = (
+                    build_voronoi_service_area_map(voronoi_gdf, secondary_assets)
+                    if voronoi_asset_ids == primary_asset_ids
+                    else {}
+                )
+                if not primary_map:
+                    primary_map = _build_nearest_service_area_map(
+                        primary_assets, secondary_assets
+                    )
+        else:
+            primary_map = (
+                build_voronoi_service_area_map(voronoi_gdf, secondary_assets)
+                if voronoi_asset_ids == primary_asset_ids
+                else {}
+            )
+            if not primary_map:
+                primary_map = _build_nearest_service_area_map(primary_assets, secondary_assets)
 
         for primary_idx, secondary_indices in primary_map.items():
             service_area_map.setdefault(int(primary_idx), []).extend(
