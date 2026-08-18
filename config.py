@@ -135,7 +135,10 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #     trigger : "immediate"       – returns as soon as hazard clears (no repair needed)
         #               "repair_complete" – returns only when repair_time reaches 0
         #               "repair_below"   – returns when repair_time < threshold
+        #               "delayed"        – returns after a crew-independent countdown
         #     threshold : float           – used only with "repair_below"
+        #     delay_steps : float         – used only with "delayed"
+        #     wait_vector : str           – named countdown vector used with "delayed"
         #
         # Baseline behavior is the legacy flat-rule path:
         #   - flooded roads are blocked here
@@ -147,6 +150,11 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'hazard_type': 'flooding',  # active hazard type for graph look-up
             'enable_default_rules': True,
             'require_repair_for_operational': False,
+            # Legacy flat dependency inputs. Area entries map one supplier to
+            # multiple dependents; pairwise entries are (supplier, dependent).
+            'dependency_map': {},
+            'area_dependencies': [],
+            'pairwise_dependencies': [],
             'knowledge_graph': [
                 # Template: service-area rule (A supplies B within its service area)
                 # {

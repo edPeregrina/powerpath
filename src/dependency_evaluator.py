@@ -6,7 +6,7 @@ adds an explicit graph-aware path for opt-in dependency relationships.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -17,6 +17,7 @@ DependencyReport = dict[str, Any]
 
 def build_dependency_context(
     asset_type: np.ndarray,
+    operational: np.ndarray | None = None,
     hazard_values: np.ndarray | None = None,
     flooded_mask: np.ndarray | None = None,
     repair_time: np.ndarray | None = None,
@@ -37,33 +38,182 @@ def build_dependency_context(
         flooded_mask = np.zeros(num_assets, dtype=bool)
     if repair_time is None:
         repair_time = np.zeros(num_assets, dtype=np.float64)
+    if operational is None:
+        operational = np.ones(num_assets, dtype=bool)
+
+    if isinstance(area_dependencies, Mapping):
+        normalized_area_dependencies = [
+            {
+                "supplier_index": supplier_index,
+                "dependent_indices": dependent_indices,
+            }
+            for supplier_index, dependent_indices in area_dependencies.items()
+        ]
+    else:
+        normalized_area_dependencies = (
+            list(area_dependencies) if area_dependencies is not None else []
+        )
 
     return {
         "asset_type": np.asarray(asset_type),
+        "operational": np.asarray(operational, dtype=bool),
         "hazard_values": np.asarray(hazard_values),
         "flooded_mask": np.asarray(flooded_mask, dtype=bool),
         "repair_time": np.asarray(repair_time, dtype=np.float64),
         "repair_threshold": float(repair_threshold),
         "dependency_map": dependency_map or {},
-        "area_dependencies": list(area_dependencies) if area_dependencies is not None else [],
+        "area_dependencies": normalized_area_dependencies,
         "pairwise_dependencies": list(pairwise_dependencies) if pairwise_dependencies is not None else [],
     }
 
 
-def evaluate_area_dependencies(context: DependencyContext) -> np.ndarray:
-    """Evaluate area-based dependency constraints.
+def _dependency_operational_state(context: DependencyContext) -> np.ndarray:
+    operational = np.asarray(context["operational"], dtype=bool).copy()
+    base_blocked_mask = context.get("base_blocked_mask")
+    if base_blocked_mask is not None:
+        operational &= ~np.asarray(base_blocked_mask, dtype=bool)
+    return operational
 
-    Placeholder implementation returns no additional blocking for now.
-    """
-    return np.zeros(len(context["asset_type"]), dtype=bool)
+
+def _validate_dependency_index(index: Any, num_assets: int, field_name: str) -> int:
+    try:
+        normalized = int(index)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must contain integer asset indices") from exc
+    if normalized < 0 or normalized >= num_assets:
+        raise IndexError(
+            f"{field_name} index {normalized} is outside the asset range 0..{num_assets - 1}"
+        )
+    return normalized
+
+
+def _area_dependency_pairs(context: DependencyContext) -> list[tuple[int, int]]:
+    num_assets = len(context["asset_type"])
+    dependencies = list(context.get("area_dependencies", []))
+    dependencies.extend(
+        {
+            "supplier_index": supplier_index,
+            "dependent_indices": dependent_indices,
+        }
+        for supplier_index, dependent_indices in context.get("dependency_map", {}).items()
+    )
+
+    pairs: list[tuple[int, int]] = []
+    supplier_fields = (
+        "supplier_index",
+        "source_index",
+        "asset_index_a",
+        "supplier",
+        "source",
+    )
+    dependent_fields = (
+        "dependent_indices",
+        "target_indices",
+        "asset_indices_b",
+        "dependents",
+        "targets",
+    )
+    for dependency in dependencies:
+        if isinstance(dependency, (tuple, list)) and len(dependency) == 2:
+            supplier, dependents = dependency
+        elif isinstance(dependency, Mapping):
+            supplier = next(
+                (dependency[name] for name in supplier_fields if name in dependency),
+                None,
+            )
+            dependents = next(
+                (dependency[name] for name in dependent_fields if name in dependency),
+                None,
+            )
+            if supplier is None or dependents is None:
+                raise ValueError(
+                    "Area dependencies require a supplier/source index and dependent/target indices"
+                )
+        else:
+            raise TypeError("Area dependencies must be mappings or (supplier, dependents) pairs")
+
+        supplier_index = _validate_dependency_index(
+            supplier, num_assets, "area dependency supplier"
+        )
+        if np.isscalar(dependents):
+            dependents = [dependents]
+        for dependent in dependents:
+            dependent_index = _validate_dependency_index(
+                dependent, num_assets, "area dependency dependent"
+            )
+            pairs.append((supplier_index, dependent_index))
+    return pairs
+
+
+def _pairwise_dependency_pairs(context: DependencyContext) -> list[tuple[int, int]]:
+    num_assets = len(context["asset_type"])
+    pairs: list[tuple[int, int]] = []
+    for dependency in context.get("pairwise_dependencies", []):
+        if isinstance(dependency, Mapping):
+            supplier = dependency.get(
+                "supplier_index",
+                dependency.get("source_index", dependency.get("source")),
+            )
+            dependent = dependency.get(
+                "dependent_index",
+                dependency.get("target_index", dependency.get("target")),
+            )
+        elif isinstance(dependency, (tuple, list)) and len(dependency) == 2:
+            supplier, dependent = dependency
+        else:
+            raise TypeError(
+                "Pairwise dependencies must be mappings or (supplier, dependent) pairs"
+            )
+        if supplier is None or dependent is None:
+            raise ValueError(
+                "Pairwise dependencies require supplier/source and dependent/target indices"
+            )
+        pairs.append(
+            (
+                _validate_dependency_index(
+                    supplier, num_assets, "pairwise dependency supplier"
+                ),
+                _validate_dependency_index(
+                    dependent, num_assets, "pairwise dependency dependent"
+                ),
+            )
+        )
+    return pairs
+
+
+def _evaluate_dependency_pairs(
+    operational: np.ndarray,
+    pairs: Iterable[tuple[int, int]],
+) -> np.ndarray:
+    blocked = np.zeros(len(operational), dtype=bool)
+    pairs = list(pairs)
+    changed = True
+    while changed:
+        changed = False
+        for supplier_index, dependent_index in pairs:
+            if (
+                (not operational[supplier_index] or blocked[supplier_index])
+                and not blocked[dependent_index]
+            ):
+                blocked[dependent_index] = True
+                changed = True
+    return blocked
+
+
+def evaluate_area_dependencies(context: DependencyContext) -> np.ndarray:
+    """Block assets supplied by a non-operational service-area supplier."""
+    return _evaluate_dependency_pairs(
+        _dependency_operational_state(context),
+        _area_dependency_pairs(context),
+    )
 
 
 def evaluate_pairwise_dependencies(context: DependencyContext) -> np.ndarray:
-    """Evaluate pairwise dependency constraints.
-
-    Placeholder implementation returns no additional blocking for now.
-    """
-    return np.zeros(len(context["asset_type"]), dtype=bool)
+    """Block pairwise dependents when their supplier is non-operational."""
+    return _evaluate_dependency_pairs(
+        _dependency_operational_state(context),
+        _pairwise_dependency_pairs(context),
+    )
 
 
 def evaluate_dependency_rules(
@@ -158,6 +308,7 @@ def evaluate_dependencies(
     """
     context = build_dependency_context(
         asset_type,
+        operational=operational,
         hazard_values=hazard_values,
         flooded_mask=flooded_mask,
         repair_time=repair_time,
@@ -166,7 +317,14 @@ def evaluate_dependencies(
         area_dependencies=area_dependencies,
         pairwise_dependencies=pairwise_dependencies,
     )
+    base_blocked_mask = evaluate_dependency_rules(
+        context,
+        enable_default_rules=enable_default_rules,
+        require_repair_for_operational=require_repair_for_operational,
+    )
+    context["base_blocked_mask"] = base_blocked_mask
     area_blocked_mask = evaluate_area_dependencies(context)
+    context["base_blocked_mask"] = base_blocked_mask | area_blocked_mask
     pairwise_blocked_mask = evaluate_pairwise_dependencies(context)
     blocked_mask = evaluate_dependency_rules(
         context,
@@ -201,6 +359,66 @@ def evaluate_dependencies(
 # ---------------------------------------------------------------------------
 # Graph-aware evaluation path
 # ---------------------------------------------------------------------------
+def activate_delayed_trigger_waits(
+    operational: np.ndarray,
+    asset_type: np.ndarray,
+    hazard_type: str,
+    knowledge_graph,
+    *,
+    flooded_mask: np.ndarray,
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+) -> None:
+    """Start direct delayed-trigger countdowns when an asset becomes affected."""
+    from src.dependency_knowledge_graph import TRIGGER_DELAYED
+
+    operational = np.asarray(operational, dtype=bool)
+    flooded_mask = np.asarray(flooded_mask, dtype=bool)
+    num_assets = len(asset_type)
+
+    for a_type in np.unique(asset_type):
+        asset_mask = asset_type == a_type
+        for rule in knowledge_graph.get_rules(
+            hazard_type, a_type, asset_type_b=None
+        ):
+            if (
+                rule.relationship != "direct"
+                or rule.return_to_operational.trigger != TRIGGER_DELAYED
+            ):
+                continue
+
+            wait_vector_name = rule.return_to_operational.wait_vector
+            wait_vector = wait_vectors.setdefault(
+                wait_vector_name, np.zeros(num_assets, dtype=np.float64)
+            )
+            active = active_masks.setdefault(
+                wait_vector_name, np.zeros(num_assets, dtype=bool)
+            )
+            affected = asset_mask & ~operational
+            if rule.hazard_blocks_operation:
+                affected |= asset_mask & flooded_mask
+            newly_affected = affected & ~active
+            if np.any(newly_affected):
+                wait_vector[newly_affected] = np.maximum(
+                    wait_vector[newly_affected],
+                    rule.return_to_operational.delay_steps,
+                )
+                active[newly_affected] = True
+
+
+def clear_completed_delayed_triggers(
+    operational: np.ndarray,
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+) -> None:
+    """Allow a later disruption to start a fresh delayed-trigger countdown."""
+    operational = np.asarray(operational, dtype=bool)
+    for wait_vector_name, active in active_masks.items():
+        wait_vector = wait_vectors.get(wait_vector_name)
+        if wait_vector is None:
+            continue
+        active[operational & (wait_vector <= 0.0)] = False
+
 
 def _compute_repair_blocked_mask(
     repair_time: np.ndarray,

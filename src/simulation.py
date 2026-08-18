@@ -26,6 +26,8 @@ from src.damage_recovery import (
     vectorized_damage_ratio_solver,
 )
 from src.dependency_evaluator import (
+    activate_delayed_trigger_waits,
+    clear_completed_delayed_triggers,
     evaluate_dependencies,
     evaluate_dependencies_from_graph,
 )
@@ -59,6 +61,7 @@ class SimulationState:
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
         self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
+        self.recovery_delay_active = {}
         self.dependency_report = {}
         self.simulation_warnings = []
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
@@ -69,7 +72,8 @@ def _update_hazard_map_states(
     hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
-    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
+    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
+    repair_crews_by_asset_type=None,
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -213,6 +217,24 @@ def _update_hazard_map_states(
                 l1_area_geojson=l1_area_geojson,
                 l1_active_timesteps=l1_active_timesteps
             )
+            if repair_crews_by_asset_type is not None:
+                for pool in repair_crews_by_asset_type["pools"]:
+                    pool["available"] = update_repair_crew_islands(
+                        pool["available"],
+                        previous_rfids_islands,
+                        rfids_islands,
+                        rfids_lengths,
+                        verbose=verbose,
+                        overlap_cache=overlap_cache,
+                        current_map=current_map_str,
+                        previous_map=previous_map_str,
+                        hazard_threshold=flood_threshold,
+                        hazard_dir=hazard_dir,
+                        _config=_config,
+                        cache_updated=cache_updated,
+                        l1_area_geojson=l1_area_geojson,
+                        l1_active_timesteps=l1_active_timesteps,
+                    )
 
             previous_map_counter = map_counter
             previous_rfids_islands = rfids_islands.copy()
@@ -762,7 +784,8 @@ def _process_timestep(
     boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
     available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
-    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
+    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
+    repair_crews_by_asset_type=None,
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -776,7 +799,8 @@ def _process_timestep(
             fragility_param_k=fragility_param_k, 
             depth_reductions=depth_reductions,  
             l1_area_geojson=l1_area_geojson, 
-            l1_active_timesteps=l1_active_timesteps
+            l1_active_timesteps=l1_active_timesteps,
+            repair_crews_by_asset_type=repair_crews_by_asset_type,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -803,38 +827,27 @@ def _assign_repair_crews(
     if repair_crews_by_asset_type is not None and asset_type is not None:
         pool_state = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
         if pool_state is not None:
-            # Grouped dedicated pools: each pool can serve one or many asset types.
+            # Grouped dedicated pools retain the same island-aware availability
+            # representation as the default pool.
             for pool in pool_state["pools"]:
                 pool_asset_types = tuple(pool["asset_types"])
                 type_mask = np.isin(asset_type, list(pool_asset_types))
                 if not np.any(type_mask):
                     continue
-                # Restrict candidacy to this pool's asset types only.
-                type_accessible = accessible & type_mask
-                type_repairable = type_accessible & ~flooded_mask & (repair_time > 0) & ~repair_crews_assigned
-                if not np.any(type_repairable):
-                    continue
-                available_for_pool = pool["available"]
-                if available_for_pool <= 0:
-                    continue
-                indices = np.where(type_repairable)[0]
-                if len(indices) <= available_for_pool:
-                    repair_crews_assigned[indices] = True
-                    pool["available"] -= len(indices)
-                else:
-                    if method is None or 'random' in str(method):
-                        np.random.shuffle(indices)
-                        repair_crews_assigned[indices[:available_for_pool]] = True
-                    elif 'lowest repair time' in str(method):
-                        order = np.argsort(repair_time[type_repairable])
-                        repair_crews_assigned[indices[order[:available_for_pool]]] = True
-                    elif 'highest repair time' in str(method):
-                        order = np.argsort(-repair_time[type_repairable])
-                        repair_crews_assigned[indices[order[:available_for_pool]]] = True
-                    else:
-                        np.random.shuffle(indices)
-                        repair_crews_assigned[indices[:available_for_pool]] = True
-                    pool["available"] -= available_for_pool
+                pool["available"], repair_crews_assigned = (
+                    update_repair_crew_assignment_optimized(
+                        timestep,
+                        pool["available"],
+                        repair_crews_assigned,
+                        accessible & type_mask,
+                        flooded_mask,
+                        repair_time,
+                        island_ids,
+                        method=method,
+                        verbose=verbose,
+                        asset_impact_map=asset_impact_map,
+                    )
+                )
 
             # Run default pool assignment for asset types not covered by any grouped pool.
             handled_types = set(pool_state["asset_type_to_pool"].keys())
@@ -874,7 +887,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
     completed_repairs = (
         all_selected_waits_cleared(
             state.recovery_wait_vectors,
-            wait_vector_names=("repair_time", "dependency_wait", "reset_wait"),
+            wait_vector_names=("repair_time",),
         )
         & state.repair_crews_assigned
     )
@@ -893,29 +906,31 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
                 atype = str(asset_type[asset_idx])
                 pool_idx = type_to_pool.get(atype)
                 if pool_idx is not None:
-                    pools[pool_idx]["available"] += 1
+                    pool_available = pools[pool_idx]["available"]
+                    if isinstance(pool_available, dict):
+                        asset_island_id = int(state.island_ids[asset_idx])
+                        pool_available[asset_island_id] = (
+                            pool_available.get(asset_island_id, 0) + 1
+                        )
+                    else:
+                        pools[pool_idx]["available"] += 1
                     continue
                 # Fallback to the default island/global pool for types not in grouped pools.
                 if available_repair_crews is not None:
                     if isinstance(available_repair_crews, dict):
-                        asset_island_id = state.island_ids[asset_idx]
-                        if asset_island_id in available_repair_crews:
-                            available_repair_crews[asset_island_id] += 1
-                        elif available_repair_crews:
-                            first_island = list(available_repair_crews.keys())[0]
-                            available_repair_crews[first_island] += 1
+                        asset_island_id = int(state.island_ids[asset_idx])
+                        available_repair_crews[asset_island_id] = (
+                            available_repair_crews.get(asset_island_id, 0) + 1
+                        )
                     else:
                         available_repair_crews += 1
         elif available_repair_crews is not None:
             if isinstance(available_repair_crews, dict):
                 for asset_idx in np.where(completed_repairs)[0]:
-                    asset_island_id = state.island_ids[asset_idx]
-                    if asset_island_id in available_repair_crews:
-                        available_repair_crews[asset_island_id] += 1
-                    else:
-                        if available_repair_crews:
-                            first_island = list(available_repair_crews.keys())[0]
-                            available_repair_crews[first_island] += 1
+                    asset_island_id = int(state.island_ids[asset_idx])
+                    available_repair_crews[asset_island_id] = (
+                        available_repair_crews.get(asset_island_id, 0) + 1
+                    )
             else:
                 available_repair_crews += num_completed_repairs
         state.operational[completed_repairs] = True
@@ -926,12 +941,12 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
 
     return available_repair_crews
 
-def _update_repair_progress(state, flooded_mask):
-    """Decrement repair_time for assets being repaired."""
+def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
+    """Advance crew-based repair and crew-independent recovery countdowns."""
     can_repair_mask = state.accessible & ~flooded_mask & state.repair_crews_assigned
     decrement_recovery_wait_vectors(
         state.recovery_wait_vectors,
-        elapsed_time=1.0,
+        elapsed_time=elapsed_time,
         active_masks={"repair_time": can_repair_mask},
     )
 
@@ -985,6 +1000,11 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
             service_area_map=service_area_map,
             return_report=True,
         )
+        clear_completed_delayed_triggers(
+            state.operational,
+            state.recovery_wait_vectors,
+            state.recovery_delay_active,
+        )
     else:
         # Legacy flat-flags path (backwards compatible).
         state.operational, state.dependency_report = evaluate_dependencies(
@@ -994,6 +1014,9 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
             flooded_mask=flooded_mask,
             repair_time=state.recovery_wait_vectors["repair_time"],
             repair_threshold=repair_threshold,
+            dependency_map=dependency_config.get('dependency_map'),
+            area_dependencies=dependency_config.get('area_dependencies'),
+            pairwise_dependencies=dependency_config.get('pairwise_dependencies'),
             enable_default_rules=dependency_config.get('enable_default_rules', True),
             require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
             return_report=True,
@@ -1003,7 +1026,15 @@ def _update_operational_state(state, asset_type, flooded_mask, config, repair_th
     if warning and warning not in state.simulation_warnings:
         state.simulation_warnings.append(warning)
 
-def _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold):
+def _update_unreachable_assets(
+    state,
+    available_repair_crews,
+    flooded_mask,
+    damage_threshold,
+    *,
+    asset_type=None,
+    repair_crews_by_asset_type=None,
+):
     """Update unreachable assets for island-based assignment.
     
     Assets are marked unreachable if they are:
@@ -1011,40 +1042,51 @@ def _update_unreachable_assets(state, available_repair_crews, flooded_mask, dama
     2. NOT flooded (flooded assets can't be repaired anyway), AND
     3. Either on island_id = -1 OR in an island without crews
     """
-    all_island_ids = np.unique(state.island_ids)
-    
-    # Convert dictionary keys to numpy array
-    idle_crew_islands = np.array([island_id for island_id, crew_count in available_repair_crews.items()
-                                 if crew_count > 0], dtype=state.island_ids.dtype)
-    
-    # Get assigned crew islands as numpy array
-    if np.any(state.repair_crews_assigned):
-        assigned_crew_islands = np.unique(state.island_ids[state.repair_crews_assigned])
-    else:
-        assigned_crew_islands = np.array([], dtype=state.island_ids.dtype)
-    
-    # Combine arrays using numpy operations
-    if len(idle_crew_islands) > 0 and len(assigned_crew_islands) > 0:
-        islands_with_crews = np.unique(np.concatenate([idle_crew_islands, assigned_crew_islands]))
-    elif len(idle_crew_islands) > 0:
-        islands_with_crews = idle_crew_islands
-    elif len(assigned_crew_islands) > 0:
-        islands_with_crews = assigned_crew_islands
-    else:
-        islands_with_crews = np.array([], dtype=state.island_ids.dtype)
-    
-    # Find islands without crews using numpy's set difference
-    islands_without_crews = np.setdiff1d(all_island_ids, islands_with_crews)
-    
-    in_islands_without_crews = np.isin(state.island_ids, islands_without_crews)
-    
-    # - It's damaged AND not flooded AND (either on island -1 OR in an island without crews)
-    island_minus_one_mask = (state.island_ids == -1)
-    
+    has_available_crew = np.zeros(len(state.island_ids), dtype=bool)
+    grouped_types = set()
+
+    if repair_crews_by_asset_type is not None and asset_type is not None:
+        pool_state = _normalize_repair_crews_by_asset_type_config(
+            repair_crews_by_asset_type
+        )
+        grouped_types = set(pool_state["asset_type_to_pool"])
+        for pool in pool_state["pools"]:
+            type_mask = np.isin(asset_type, list(pool["asset_types"]))
+            pool_available = pool["available"]
+            if isinstance(pool_available, dict):
+                crew_islands = [
+                    island_id
+                    for island_id, crew_count in pool_available.items()
+                    if crew_count > 0
+                ]
+                has_available_crew |= type_mask & np.isin(
+                    state.island_ids, crew_islands
+                )
+            elif pool_available > 0:
+                has_available_crew |= type_mask
+
+    default_type_mask = (
+        ~np.isin(asset_type, list(grouped_types))
+        if asset_type is not None and grouped_types
+        else np.ones(len(state.island_ids), dtype=bool)
+    )
+    if isinstance(available_repair_crews, dict):
+        default_crew_islands = [
+            island_id
+            for island_id, crew_count in available_repair_crews.items()
+            if crew_count > 0
+        ]
+        has_available_crew |= default_type_mask & np.isin(
+            state.island_ids, default_crew_islands
+        )
+    elif available_repair_crews is None or available_repair_crews > 0:
+        has_available_crew |= default_type_mask
+
+    has_available_crew |= state.repair_crews_assigned
     state.unreachable = (
-        (state.damage_ratio > damage_threshold) &
-        (~flooded_mask) &
-        (island_minus_one_mask | in_islands_without_crews)  # Either -1 OR no crews on island
+        (state.damage_ratio > damage_threshold)
+        & ~flooded_mask
+        & ((state.island_ids == -1) | ~has_available_crew)
     )
 
 def _collect_timestep_metrics(
@@ -1284,12 +1326,24 @@ def simulate_asset_damage_recovery_access_breakdown(
             num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
             depth_reductions=depth_reductions,
             l1_area_geojson=l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps
+            l1_active_timesteps=l1_active_timesteps,
+            repair_crews_by_asset_type=repair_crews_by_asset_type,
         )
         
         # Merge cache updates
         for cache_name, cache_content in timestep_cache_updated.items():
             cache_updated[cache_name] = cache_content
+
+        if _knowledge_graph is not None:
+            activate_delayed_trigger_waits(
+                state.operational,
+                asset_type,
+                _dep_config.get('hazard_type', 'flooding'),
+                _knowledge_graph,
+                flooded_mask=flooded_mask,
+                wait_vectors=state.recovery_wait_vectors,
+                active_masks=state.recovery_delay_active,
+            )
 
         # 2. Repair crew assignment
         available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
@@ -1299,7 +1353,13 @@ def simulate_asset_damage_recovery_access_breakdown(
         )
         
         # 3. Update repair progress
-        _update_repair_progress(state, flooded_mask)
+        _update_repair_progress(
+            state,
+            flooded_mask,
+            elapsed_time=_config['recovery_parameters'].get(
+                'time_step_hours', 1.0
+            ),
+        )
         
         # 4. Handle completed repairs
         available_repair_crews = _handle_completed_repairs(
@@ -1312,7 +1372,14 @@ def simulate_asset_damage_recovery_access_breakdown(
 
         # 6. Update unreachable assets (island method)
         if island_method_active:
-            _update_unreachable_assets(state, available_repair_crews, flooded_mask, damage_threshold)
+            _update_unreachable_assets(
+                state,
+                available_repair_crews,
+                flooded_mask,
+                damage_threshold,
+                asset_type=asset_type,
+                repair_crews_by_asset_type=repair_crews_by_asset_type,
+            )
 
         # 7. Collect timestep metrics
         if timestep_output:
@@ -1370,6 +1437,10 @@ def simulate_asset_damage_recovery_access_breakdown(
         'hazard_value': state.current_hazard_values,
         'damage_ratio': state.damage_ratio,
         'repair_time': state.recovery_wait_vectors["repair_time"].copy(),
+        'recovery_wait_vectors': {
+            name: values.copy()
+            for name, values in state.recovery_wait_vectors.items()
+        },
         'accessible': state.accessible,
         'repair_crews_assigned': state.repair_crews_assigned,
         'dependency_report': state.dependency_report,
