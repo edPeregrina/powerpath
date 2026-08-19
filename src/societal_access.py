@@ -68,6 +68,8 @@ SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     "basisonderwijs": "education",
     "voortgezet_onderwijs": "education",
     "repair_depot": "repair_logistics",
+    # Electricity
+    "msls": "electricity",
 }
 
 #: Default demographic columns in the CBS population grid.
@@ -81,6 +83,9 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
 #: Current version of the allocation algorithm — increment when the
 #: spatial logic changes so cached allocations are automatically invalidated.
 ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
+SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
+    "electricity": frozenset({"msls"}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +723,152 @@ def get_or_build_allocation(
     return allocation_df, cache_key, True
 
 
+def _find_allocation_cache_entry(
+    allocation_cache: Dict[str, pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    road_state_key: str,
+    nearest_max_distance: float,
+) -> Tuple[Optional[str], Optional[pd.DataFrame]]:
+    """Return the unique cache entry matching the expected allocation metadata."""
+    expected_metadata = {
+        "population_grid_hash": _geometry_hash(pop_grid_gdf),
+        "cell_id_column": cell_id_column,
+        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
+        "nearest_max_distance": nearest_max_distance,
+        "road_state_key": road_state_key,
+        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+    }
+    matching = [
+        (cache_key, df)
+        for cache_key, df in allocation_cache.items()
+        if all(df.attrs.get(k) == v for k, v in expected_metadata.items())
+    ]
+    if len(matching) != 1:
+        return None, None
+    return matching[0]
+
+
+def _build_service_area_population_maps(
+    gdf_assets: gpd.GeoDataFrame,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    pop_group_columns: Dict[str, str],
+    asset_type_column: str = "type",
+) -> Dict[str, Dict[str, Dict[Any, float]]]:
+    """Pre-compute provider→population service-area assignments for special functions."""
+    from src.impacts import create_voronoi_for_asset_type
+    from src.utils import build_voronoi_service_area_map
+
+    if gdf_assets.empty or pop_grid_gdf.empty:
+        return {}
+
+    working_assets = gdf_assets[[asset_type_column, "geometry"]].copy()
+    if asset_type_column != "type":
+        working_assets = working_assets.rename(columns={asset_type_column: "type"})
+    working_assets = gpd.GeoDataFrame(
+        working_assets,
+        geometry="geometry",
+        crs=gdf_assets.crs,
+    )
+
+    available_cols = [col for col in pop_group_columns.values() if col in pop_grid_gdf.columns]
+    pop_values = pop_grid_gdf[available_cols].copy()
+    for col in available_cols:
+        pop_values[col] = pd.to_numeric(pop_values[col], errors="coerce").fillna(0)
+        pop_values[col] = pop_values[col].where(pop_values[col] >= 0, 0)
+    pop_assets = gpd.GeoDataFrame(pop_values, geometry=pop_grid_gdf.geometry, crs=pop_grid_gdf.crs)
+
+    function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
+    for function_name, provider_types in SERVICE_AREA_FUNCTION_PROVIDER_TYPES.items():
+        group_maps: Dict[str, Dict[Any, float]] = {label: {} for label in pop_group_columns}
+        has_provider = False
+
+        for provider_type in sorted(provider_types):
+            providers = working_assets[working_assets["type"].astype(str) == str(provider_type)]
+            if providers.empty:
+                continue
+            has_provider = True
+
+            if len(providers) == 1:
+                provider_map = {providers.index[0]: list(pop_assets.index)}
+            else:
+                voronoi_gdf = create_voronoi_for_asset_type(working_assets, provider_type)
+                provider_map = build_voronoi_service_area_map(
+                    voronoi_gdf,
+                    pop_assets[["geometry"]].copy(),
+                )
+
+            for provider_id, pop_indices in provider_map.items():
+                for label, column_name in pop_group_columns.items():
+                    if column_name not in pop_assets.columns:
+                        continue
+                    group_maps[label][provider_id] = group_maps[label].get(provider_id, 0.0) + float(
+                        pop_assets.loc[list(pop_indices), column_name].sum()
+                    )
+
+        if has_provider:
+            function_maps[function_name] = group_maps
+
+    return function_maps
+
+
+def _apply_service_area_societal_scalars(
+    fields: Dict[str, float],
+    operational_asset_ids_by_function: Dict[str, Set[Any]],
+    service_area_population_maps: Dict[str, Dict[str, Dict[Any, float]]],
+    pop_group_columns: Dict[str, str],
+    reference_group: str,
+) -> Dict[str, float]:
+    """Override function metrics for service-area-based services such as electricity."""
+    if not service_area_population_maps:
+        return fields
+
+    derived_totals: Dict[str, float] = {}
+    for function_name, group_maps in service_area_population_maps.items():
+        operational_ids = operational_asset_ids_by_function.get(function_name, set())
+        for label in pop_group_columns:
+            provider_population = group_maps.get(label, {})
+            total = float(sum(provider_population.values()))
+            with_access = float(
+                sum(
+                    population
+                    for provider_id, population in provider_population.items()
+                    if provider_id in operational_ids
+                )
+            )
+            without_access = total - with_access
+            pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
+
+            fields[f"societal_access_pct__{function_name}__{label}"] = pct
+            fields[f"societal_access_population__{function_name}__{label}"] = with_access
+            fields[f"societal_no_access_population__{function_name}__{label}"] = without_access
+            derived_totals[label] = total
+
+        ref_pct = fields.get(
+            f"societal_access_pct__{function_name}__{reference_group}",
+            float("nan"),
+        )
+        for label in pop_group_columns:
+            if label == reference_group:
+                continue
+            grp_pct = fields.get(f"societal_access_pct__{function_name}__{label}", float("nan"))
+            if np.isnan(ref_pct) or np.isnan(grp_pct):
+                abs_gap = float("nan")
+                rel_gap = float("nan")
+            else:
+                abs_gap = round(ref_pct - grp_pct, 2)
+                rel_gap = round(grp_pct / ref_pct, 4) if ref_pct > 0 else float("nan")
+            fields[f"societal_equity_absolute_gap__{function_name}__{label}"] = abs_gap
+            fields[f"societal_equity_relative_gap__{function_name}__{label}"] = rel_gap
+
+    for label, total in derived_totals.items():
+        total_key = f"societal_total_population__{label}"
+        if np.isnan(fields.get(total_key, float("nan"))):
+            fields[total_key] = total
+
+    return fields
+
+
 def postprocess_societal_access_results(
     summary_results: List[Dict[str, Any]],
     detailed_results: List[Dict[str, Any]],
@@ -734,6 +885,7 @@ def postprocess_societal_access_results(
     reference_group: str = "total",
     nearest_max_distance: float = 200.0,
     islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
+    fail_on_missing_allocation: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -816,6 +968,15 @@ def postprocess_societal_access_results(
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
 
+    service_area_assets = gdf_assets.copy()
+    service_area_assets.index = stable_asset_ids
+    service_area_population_maps = _build_service_area_population_maps(
+        gdf_assets=service_area_assets,
+        pop_grid_gdf=pop_grid_gdf,
+        pop_group_columns=pop_group_columns,
+        asset_type_column=asset_type_column,
+    )
+
     # Determine which functions to always emit
     if all_functions is None:
         all_functions = sorted(set(taxonomy.values()))
@@ -846,12 +1007,12 @@ def postprocess_societal_access_results(
 
         # Build island → functions map from operational providers
         island_function_map: Dict[int, Set[str]] = {}
+        operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
         for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
-            if not is_op:
-                continue
             atype = asset_types[i] if i < len(asset_types) else "unknown"
             func_cat = taxonomy.get(str(atype))
-            if func_cat is not None:
+            if func_cat is not None and is_op:
+                operational_asset_ids_by_function.setdefault(func_cat, set()).add(stable_asset_ids[i])
                 isl_id_int = int(isl_id)
                 island_function_map.setdefault(isl_id_int, set()).add(func_cat)
 
@@ -876,19 +1037,24 @@ def postprocess_societal_access_results(
 
         # Resolve allocation_df — deterministic path when islands_gdf_cache is
         # available, legacy metadata-scan path otherwise (backward compat).
+        allocation_cache_key = None
         if islands_gdf_cache is not None:
             islands_gdf = islands_gdf_cache.get(road_state_key)
             if islands_gdf is None:
-                warnings.warn(
+                message = (
                     f"Timestep {ts}: no islands_gdf found for road_state_key "
-                    f"'{road_state_key}'; emitting NaN societal metrics. "
-                    "Ensure island_cache entries include islands_gdf.",
+                    f"'{road_state_key}'; no societal allocation can be built."
+                )
+                if fail_on_missing_allocation:
+                    raise RuntimeError(message)
+                warnings.warn(
+                    f"{message} Emitting NaN societal metrics.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                 continue
-            allocation_df, _, _ = get_or_build_allocation(
+            allocation_df, allocation_cache_key, _ = get_or_build_allocation(
                 allocation_cache,
                 pop_grid_gdf,
                 cell_id_column,
@@ -898,13 +1064,40 @@ def postprocess_societal_access_results(
                 road_state_key=road_state_key,
             )
         else:
-            allocation_df = _find_allocation_in_cache(
+            allocation_cache_key, allocation_df = _find_allocation_cache_entry(
                 allocation_cache,
                 pop_grid_gdf,
                 cell_id_column,
                 road_state_key,
                 nearest_max_distance,
             )
+
+        if allocation_df is None and fail_on_missing_allocation:
+            available_road_state_keys = sorted(
+                {
+                    str(df.attrs.get("road_state_key"))
+                    for df in allocation_cache.values()
+                    if df.attrs.get("road_state_key") is not None
+                }
+            )
+            raise RuntimeError(
+                f"Timestep {ts}: no societal allocation found for road_state_key "
+                f"'{road_state_key}'. Available cached road_state_keys="
+                f"{available_road_state_keys[:10]}"
+            )
+
+        if allocation_df is not None:
+            allocation_road_state_key = str(allocation_df.attrs.get("road_state_key"))
+            if allocation_road_state_key != road_state_key:
+                message = (
+                    f"Timestep {ts}: allocation road_state_key '{allocation_road_state_key}' "
+                    f"does not match detailed_results road_state_key '{road_state_key}'."
+                )
+                if fail_on_missing_allocation:
+                    raise RuntimeError(message)
+                warnings.warn(message, RuntimeWarning, stacklevel=2)
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
 
         societal_fields = _compute_societal_scalars(
             frozen_island_function_map=frozen_island_function_map,
@@ -915,8 +1108,17 @@ def postprocess_societal_access_results(
             all_functions=all_functions,
             reference_group=reference_group,
         )
+        societal_fields = _apply_service_area_societal_scalars(
+            societal_fields,
+            operational_asset_ids_by_function=operational_asset_ids_by_function,
+            service_area_population_maps=service_area_population_maps,
+            pop_group_columns=pop_group_columns,
+            reference_group=reference_group,
+        )
 
         ts_summary.update(societal_fields)
+        ts_summary["societal_allocation_cache_key"] = allocation_cache_key
+        ts_summary["societal_allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
 
@@ -935,19 +1137,14 @@ def _find_allocation_in_cache(
     :func:`postprocess_societal_access_results`.  Returns ``None`` when no
     unique matching entry is found.
     """
-    expected_metadata = {
-        "population_grid_hash": _geometry_hash(pop_grid_gdf),
-        "cell_id_column": cell_id_column,
-        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
-        "nearest_max_distance": nearest_max_distance,
-        "road_state_key": road_state_key,
-        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
-    }
-    matching = [
-        df for df in allocation_cache.values()
-        if all(df.attrs.get(k) == v for k, v in expected_metadata.items())
-    ]
-    return matching[0] if len(matching) == 1 else None
+    _, allocation_df = _find_allocation_cache_entry(
+        allocation_cache,
+        pop_grid_gdf,
+        cell_id_column,
+        road_state_key,
+        nearest_max_distance,
+    )
+    return allocation_df
 
 
 def _compute_societal_scalars(

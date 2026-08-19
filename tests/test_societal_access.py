@@ -5,12 +5,18 @@ import numpy as np
 import pandas as pd
 import pytest
 from shapely.geometry import LineString, Point, Polygon, box
+from config import get_config
 
+import src.island_analysis as island_analysis
+import src.simulation as simulation_module
+from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
 from src.caching import (
     create_island_cache_key,
+    get_asset_centroid_hash,
     load_simulation_caches,
     save_simulation_caches,
 )
+from src.simulation import simulate_asset_damage_recovery_access_breakdown
 from src.societal_access import (
     analyse_societal_access,
     apply_population_to_allocations,
@@ -354,6 +360,60 @@ def test_societal_allocation_cache_uses_simulation_cache_pickle(tmp_path):
     )
 
 
+def test_island_cache_remains_lightweight_without_islands_gdf(tmp_path, monkeypatch):
+    config = get_config(
+        root_dir=tmp_path,
+        hazard_dir_override=tmp_path / "hazard_case",
+    )
+    config["simulation_config"]["verbose"] = False
+
+    temp_gdf = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "hospital"],
+            "access_rfid": [10, 10],
+        },
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs="EPSG:28992",
+    )
+
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {
+                "rfid": [10],
+                "island_id": [1],
+                "length_m": [100.0],
+            },
+            geometry=[LineString([(0, 0), (10, 0)])],
+            crs="EPSG:28992",
+        ),
+    )
+
+    island_cache = {}
+    asset_island_ids, rfids_islands = island_analysis.match_island_ids_assets(
+        temp_gdf,
+        boundary_asset_indices=[],
+        boundary_islands_rfids=[],
+        hazard_threshold=0.2,
+        hazard_column="EV0_ma",
+        config=config,
+        island_cache=island_cache,
+        cache_dir=config["interim_dir"],
+        hazard_dir=config["hazard_dir"],
+    )
+
+    cache_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        get_asset_centroid_hash(temp_gdf),
+    )
+    assert asset_island_ids.tolist() == [1, 1]
+    assert rfids_islands == {10: 1}
+    assert set(island_cache[cache_key].keys()) == {"island_ids", "rfids_islands"}
+    assert "islands_gdf" not in island_cache[cache_key]
+
+
 def test_postprocess_societal_access_results_uses_cached_allocations():
     islands = _make_islands_gdf()
     pop = _make_population_gdf().iloc[:2].copy()
@@ -627,6 +687,57 @@ def test_failed_msls_assets_remove_electricity_access():
     assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(0.0)
 
 
+def test_electricity_access_uses_voronoi_service_areas_not_road_islands():
+    islands = gpd.GeoDataFrame(
+        {"island_id": [1]},
+        geometry=[box(-10, -10, 210, 10)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["west", "east"],
+            "aantal_inwoners": [100, 100],
+            "aantal_inwoners_65_jaar_en_ouder": [20, 20],
+            "aantal_inwoners_0_tot_15_jaar": [15, 15],
+            "aantal_inwoners_25_tot_45_jaar": [40, 40],
+        },
+        geometry=[box(-5, -5, 5, 5), box(195, -5, 205, 5)],
+        crs="EPSG:28992",
+    )
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls", "msls"]},
+        geometry=[Point(0, 0), Point(200, 0)],
+        crs="EPSG:28992",
+    )
+    allocation_cache = {}
+    get_or_build_allocation(
+        allocation_cache,
+        pop,
+        "cell_id",
+        islands,
+        road_state_key="roads_connected",
+    )
+
+    updated, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_connected",
+            "operational": np.array([True, False]),
+            "island_id": np.array([1, 1]),
+        }],
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"msls": "electricity"},
+        all_functions=["electricity"],
+    )
+
+    assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
+
+
 def test_electricity_metric_present_when_all_msls_providers_fail():
     """The 'electricity' key must be present even when every MSLS provider is down."""
     islands = _make_islands_gdf()
@@ -842,7 +953,7 @@ def test_postprocess_missing_islands_gdf_in_cache_emits_nan_and_warns():
 # Hospital failure-mode test (first required regression test)
 # ---------------------------------------------------------------------------
 
-def test_hospital_not_flooded_disrupted_msls():
+def test_hospital_not_flooded_disrupted_voronoi():
     """First failure-mode regression test: fake hospital Hospital_not_flooded_disrupted_voronoi.
 
     Scenario
@@ -986,3 +1097,144 @@ def test_hospital_not_flooded_disrupted_msls():
     assert hospital_access_after == pytest.approx(0.0), (
         "No population should have hospital access after MSLS failure"
     )
+
+
+def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkeypatch, tmp_path):
+    hazard_dir = tmp_path / "hazard_case"
+    hazard_dir.mkdir(parents=True, exist_ok=True)
+    config = get_config(root_dir=tmp_path, hazard_dir_override=hazard_dir)
+    config["simulation_config"]["verbose"] = False
+    config["simulation_config"]["accessibility_model"] = None
+    config["dependency_parameters"]["knowledge_graph"] = [
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "repair_complete"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "hospital",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "repair_complete"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+    ]
+    config["dependency_parameters"]["service_area_map"] = None
+
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["msls", "hospital"]},
+        geometry=[Point(0, 0), Point(5, 0)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["pop_cell"],
+            "aantal_inwoners": [100],
+            "aantal_inwoners_65_jaar_en_ouder": [20],
+            "aantal_inwoners_0_tot_15_jaar": [15],
+            "aantal_inwoners_25_tot_45_jaar": [40],
+        },
+        geometry=[box(-2, -2, 8, 2)],
+        crs="EPSG:28992",
+    )
+
+    monkeypatch.setattr(
+        simulation_module,
+        "find_hazard_value_at_points_optimized",
+        lambda hazard_map, temp_gdf, map_counter, **kwargs: temp_gdf.assign(
+            **{f"EV{map_counter}_ma": 0.0}
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_module,
+        "match_assets_access",
+        lambda *args, **kwargs: (
+            np.array([10, 10]),
+            [],
+            [],
+            {10: 100.0},
+        ),
+    )
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {
+                "rfid": [10],
+                "island_id": [1],
+                "length_m": [100.0],
+            },
+            geometry=[LineString([(0, 0), (10, 0)])],
+            crs="EPSG:28992",
+        ),
+    )
+
+    societal_access_config = {
+        "pop_grid_gdf": pop,
+        "cell_id_column": "cell_id",
+        "taxonomy": {"hospital": "hospital", "msls": "electricity"},
+        "all_functions": ["hospital"],
+        "allocation_cache": {},
+        "fail_on_missing_allocation": True,
+    }
+    hazard_maps = [hazard_dir / "hazard_0.tif"]
+
+    all_results, _, cache_updated = simulate_asset_damage_recovery_access_breakdown(
+        gdf_assets=gdf_assets.copy(),
+        hazard_maps=hazard_maps,
+        number_repair_crews=1,
+        repair_crew_assignment_method="island",
+        flood_threshold=0.2,
+        root_dir=tmp_path,
+        config=config,
+        major_timestep=1,
+        timestep_output=True,
+        societal_access_config=societal_access_config,
+        verbose=False,
+    )
+
+    summary_row = all_results[0][1][0]
+    detail_row = all_results[0][2][0]
+    assert summary_row["societal_allocation_road_state_key"] == detail_row["road_state_key"]
+    assert summary_row["societal_allocation_cache_key"] in cache_updated["societal_allocation_cache"]
+    assert math.isfinite(summary_row["societal_access_pct__hospital__total"])
+    assert summary_row["societal_access_pct__hospital__total"] == pytest.approx(100.0)
+    assert all("islands_gdf" not in entry for entry in cache_updated["island_cache"].values())
+
+    ema_result = simulate_asset_damage_recovery_access_breakdown_ema(
+        gdf_assets=gdf_assets.copy(),
+        hazard_maps=hazard_maps,
+        number_repair_crews=1,
+        repair_crew_assignment_method="island",
+        flood_threshold=0.2,
+        root_dir=tmp_path,
+        config=config,
+        major_timestep=1,
+        timestep_output=True,
+        societal_access_config={
+            **societal_access_config,
+            "allocation_cache": cache_updated["societal_allocation_cache"],
+        },
+        verbose=False,
+    )
+
+    assert math.isfinite(float(ema_result["societal_access_pct__hospital__total"][0]))
+    assert float(ema_result["societal_access_pct__hospital__total"][0]) == pytest.approx(100.0)

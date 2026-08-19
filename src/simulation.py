@@ -82,7 +82,6 @@ class SimulationState:
         self.dependency_report = {}
         self.simulation_warnings = []
         self.road_state_key = None
-        self.islands_gdf_cache: dict = {}
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -92,7 +91,8 @@ def _update_hazard_map_states(
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
     fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
-    repair_crews_by_asset_type=None, l2_asset_geojson=None, l2_active_timesteps=None
+    repair_crews_by_asset_type=None, l2_asset_geojson=None, l2_active_timesteps=None,
+    societal_access_config=None,
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -192,51 +192,53 @@ def _update_hazard_map_states(
             l2_active_timesteps=l2_active_timesteps,
         )
         state.road_state_key = cache_key
-        if cache_key in island_cache:
-            island_data = island_cache[cache_key]
-            state.island_ids = island_data['island_ids']
-            rfids_islands = island_data['rfids_islands']
-            if 'islands_gdf' in island_data:
-                state.islands_gdf_cache[cache_key] = island_data['islands_gdf']
-            if verbose:
-                print(f"Using cached islands for {cache_key}")
-        else:
-            print(f"Cache miss for {cache_key}, computing islands on the fly...")
-            try:
-                temp_gdf_for_islands = temp_gdf
-                
-                asset_island_ids, rfids_islands = match_island_ids_assets(
-                    temp_gdf_for_islands, 
-                    boundary_asset_indices=boundary_asset_indices, 
-                    boundary_islands_rfids=boundary_islands_rfids, 
-                    hazard_threshold=flood_threshold, 
-                    hazard_column=haz_col_str, 
-                    config=_config,
-                    island_cache=island_cache,
-                    cache_dir=interim_dir,
-                    hazard_dir=hazard_dir,
-                    l1_area_geojson=active_l1_area_geojson,
-                    l1_active_timesteps=l1_active_timesteps,
-                    l2_asset_geojson=active_l2_asset_geojson,
-                    l2_active_timesteps=l2_active_timesteps,
-                )
-                if asset_island_ids is None or rfids_islands is None:
-                    raise RuntimeError("Island assignment returned no road state")
-                state.island_ids = asset_island_ids
-                # Assign island for each asset for the current state
-                cache_updated['island_cache'] = island_cache
-                # Propagate islands_gdf if it was stored in the cache
-                if island_cache is not None and cache_key in island_cache:
-                    _cached = island_cache[cache_key]
-                    if 'islands_gdf' in _cached:
-                        state.islands_gdf_cache[cache_key] = _cached['islands_gdf']
-                print(f"Successfully computed and cached islands for {cache_key}")
-            except Exception as e:
-                print(f"Error computing islands for {cache_key}: {e}")
-                print("Falling back to simple island assignment")
-                state.island_ids = np.ones(num_assets, dtype=int)
-                state.road_state_key = None
-                rfids_islands = None
+        try:
+            temp_gdf_for_islands = temp_gdf
+            allocation_cache = None
+            pop_grid_gdf = None
+            cell_id_column = "cell_id"
+            island_id_column = "island_id"
+            nearest_max_distance = 200.0
+            if societal_access_config is not None:
+                allocation_cache = societal_access_config.get("allocation_cache")
+                pop_grid_gdf = societal_access_config.get("pop_grid_gdf")
+                cell_id_column = societal_access_config.get("cell_id_column", "cell_id")
+                island_id_column = societal_access_config.get("island_id_column", "island_id")
+                nearest_max_distance = societal_access_config.get("nearest_max_distance", 200.0)
+
+            asset_island_ids, rfids_islands = match_island_ids_assets(
+                temp_gdf_for_islands,
+                boundary_asset_indices=boundary_asset_indices,
+                boundary_islands_rfids=boundary_islands_rfids,
+                hazard_threshold=flood_threshold,
+                hazard_column=haz_col_str,
+                config=_config,
+                island_cache=island_cache,
+                cache_dir=interim_dir,
+                hazard_dir=hazard_dir,
+                l1_area_geojson=active_l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
+                l2_asset_geojson=active_l2_asset_geojson,
+                l2_active_timesteps=l2_active_timesteps,
+                societal_allocation_cache=allocation_cache,
+                pop_grid_gdf=pop_grid_gdf,
+                cell_id_column=cell_id_column,
+                island_id_column=island_id_column,
+                nearest_max_distance=nearest_max_distance,
+            )
+            if asset_island_ids is None or rfids_islands is None:
+                raise RuntimeError("Island assignment returned no road state")
+            state.island_ids = asset_island_ids
+            cache_updated['island_cache'] = island_cache
+            if allocation_cache is not None:
+                cache_updated['societal_allocation_cache'] = allocation_cache
+            print(f"Successfully resolved islands for {cache_key}")
+        except Exception as e:
+            print(f"Error computing islands for {cache_key}: {e}")
+            print("Falling back to simple island assignment")
+            state.island_ids = np.ones(num_assets, dtype=int)
+            state.road_state_key = None
+            rfids_islands = None
        
         if rfids_islands is not None:
             # Call with all caching parameters
@@ -834,7 +836,8 @@ def _process_timestep(
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
     depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
     repair_crews_by_asset_type=None,
-    l2_asset_geojson=None, l2_active_timesteps=None
+    l2_asset_geojson=None, l2_active_timesteps=None,
+    societal_access_config=None,
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -852,6 +855,7 @@ def _process_timestep(
             repair_crews_by_asset_type=repair_crews_by_asset_type,
             l2_asset_geojson=l2_asset_geojson,
             l2_active_timesteps=l2_active_timesteps,
+            societal_access_config=societal_access_config,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -1328,6 +1332,12 @@ def simulate_asset_damage_recovery_access_breakdown(
     overlap_cache = init['overlap_cache']
     island_cache = init['island_cache']
 
+    if societal_access_config is not None:
+        allocation_cache = societal_access_config.get("allocation_cache")
+        if allocation_cache is None:
+            allocation_cache = load_societal_allocation_cache(interim_dir, hazard_dir)
+            societal_access_config["allocation_cache"] = allocation_cache
+
     # Results tracking for this simulation
     results = []
     timestep_results = []    
@@ -1412,6 +1422,7 @@ def simulate_asset_damage_recovery_access_breakdown(
             repair_crews_by_asset_type=repair_crews_by_asset_type,
             l2_asset_geojson=l2_asset_geojson,
             l2_active_timesteps=l2_active_timesteps,
+            societal_access_config=societal_access_config,
         )
         
         # Merge cache updates
@@ -1520,6 +1531,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 allocation_cache = load_societal_allocation_cache(
                     interim_dir, hazard_dir
                 )
+                _sa_cfg["allocation_cache"] = allocation_cache
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
@@ -1534,7 +1546,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
-                islands_gdf_cache=_sa_cfg.get("islands_gdf_cache") or state.islands_gdf_cache,
+                fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:

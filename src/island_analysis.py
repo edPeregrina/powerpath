@@ -515,7 +515,10 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                             hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
                             island_cache=None, cache_dir=None, hazard_dir=None,
                             l1_area_geojson=None, l1_active_timesteps=None,
-                            l2_asset_geojson=None, l2_active_timesteps=None):
+                            l2_asset_geojson=None, l2_active_timesteps=None,
+                            societal_allocation_cache=None, pop_grid_gdf=None,
+                            cell_id_column='cell_id', island_id_column='island_id',
+                            nearest_max_distance=200.0):
        
     """
     Match assets to island IDs based on spatial intersection with road network islands.
@@ -537,15 +540,13 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         l2_active_timesteps=l2_active_timesteps,
     )
 
-    # Check if this computation is already cached
-    if (
+    cache_hit = (
         island_cache is not None
         and cache_dir is not None
         and cache_key in island_cache
-    ):
-        if verbose:
-            print(f"Using cached island assignment for {cache_key}")
-        return island_cache[cache_key]['island_ids'], island_cache[cache_key]['rfids_islands']
+    )
+    if cache_hit and verbose:
+        print(f"Using cached island assignment for {cache_key}")
 
     if boundary_asset_indices is None or boundary_islands_rfids is None: 
         boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
@@ -564,6 +565,19 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             return None, None
         boundary_islands_rfids = boundary_islands_dict[cache_key]
 
+    asset_island_ids = None
+    rfids_islands = None
+    if cache_hit:
+        asset_island_ids = island_cache[cache_key]['island_ids']
+        rfids_islands = island_cache[cache_key]['rfids_islands']
+
+    needs_transient_islands = (
+        societal_allocation_cache is not None
+        and pop_grid_gdf is not None
+    )
+    if cache_hit and not needs_transient_islands:
+        return asset_island_ids, rfids_islands
+
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
         print(f"Loading hazard graph from {hazard_graph_path}")
@@ -581,14 +595,14 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
         main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
 
-        # Map assets to island ids
-        rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
-        asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in temp_gdf['access_rfid']]
-        asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
-                            for i in range(len(asset_island_ids))]
-        asset_island_ids = np.array(asset_island_ids, dtype=int)
-
-        rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+        if asset_island_ids is None or rfids_islands is None:
+            # Map assets to island ids
+            rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+            asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in temp_gdf['access_rfid']]
+            asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
+                                for i in range(len(asset_island_ids))]
+            asset_island_ids = np.array(asset_island_ids, dtype=int)
+            rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
 
         # Cache the results
         if island_cache is not None and cache_dir is not None:
@@ -596,7 +610,6 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             island_cache[cache_key] = {
                 'island_ids': asset_island_ids,
                 'rfids_islands': rfids_islands,
-                'islands_gdf': islands_gdf,
             }
             
             # Save the updated cache using the standardized function
@@ -605,9 +618,22 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             if verbose:
                 print(f"Saved island assignment to cache with key {cache_key}")
 
+        if needs_transient_islands:
+            from src.societal_access import get_or_build_allocation
+
+            get_or_build_allocation(
+                societal_allocation_cache,
+                pop_grid_gdf,
+                cell_id_column,
+                islands_gdf,
+                island_id_column=island_id_column,
+                nearest_max_distance=nearest_max_distance,
+                road_state_key=cache_key,
+            )
+
     except Exception as e:
         print(f"Error in computing islands from graph: {e}")
-        return None
+        return None, None
 
     return asset_island_ids, rfids_islands
 
