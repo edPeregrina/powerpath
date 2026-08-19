@@ -4,6 +4,7 @@ The cached operations include:
 - Grid accessibility calculations
 - Hazard extraction
 - Island creation
+- Societal-access population allocation
 - Island overlap calculations
 For each operation, a unique cache key is generated based on input parameters.
 The cache is saved as pickle files for efficient loading and saving.
@@ -249,10 +250,18 @@ def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
         print(f"No hazard extraction cache found at {cache_file}")
         return {}
 
-def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1_area_geojson=None, l1_active_timesteps=None):
+def create_island_cache_key(
+    hazard_column,
+    hazard_threshold,
+    asset_hash=None,
+    l1_area_geojson=None,
+    l1_active_timesteps=None,
+    l2_asset_geojson=None,
+    l2_active_timesteps=None,
+):
     """
     Create a standardized cache key for island assignment, including asset count and bounds.
-    L1 adaptation hash (including timesteps) is appended ONLY if L1 is active (backward compatible).
+    Adaptation hashes (including timesteps) are appended only when active.
     
     Args:
         hazard_column (str): The hazard column name (e.g., 'EV1_ma')
@@ -260,6 +269,8 @@ def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1
         asset_hash (str, optional): Hash of the asset geodataframe for uniqueness
         l1_area_geojson (str/Path/GeoDataFrame, optional): L1 adaptation for cache invalidation
         l1_active_timesteps (list of int, optional): Timesteps when L1 is active (None = all)
+        l2_asset_geojson (str/Path/GeoDataFrame, optional): L2 adaptation for cache invalidation
+        l2_active_timesteps (list of int, optional): Timesteps when L2 is active (None = all)
         
     Returns:
         str: Standardized cache key
@@ -273,38 +284,43 @@ def create_island_cache_key(hazard_column, hazard_threshold, asset_hash=None, l1
     if l1_area_geojson is not None:
         l1_hash = _compute_l1_hash(l1_area_geojson, l1_active_timesteps)
         key = f"{key}_L1{l1_hash}"
+
+    if l2_asset_geojson is not None:
+        l2_hash = _compute_l1_hash(l2_asset_geojson, l2_active_timesteps)
+        key = f"{key}_L2{l2_hash}"
     
     return key
 
 
 def _compute_l1_hash(l1_area_geojson, l1_active_timesteps=None):
-    """Helper function to compute L1 hash for cache key, including timesteps."""    
-    # Build timestep component
+    """Hash adaptation geometry, depth reductions, and active timesteps."""
     if l1_active_timesteps is None:
         ts_str = "all"
     else:
-        ts_str = str(sorted(l1_active_timesteps))  # Ensure consistent ordering
-    
-    # Build geometry component
+        ts_str = str(sorted(l1_active_timesteps))
+
+    digest = hashlib.sha256()
+    digest.update(f"timesteps:{ts_str}".encode())
+
     if isinstance(l1_area_geojson, (str, Path)):
         l1_path = Path(l1_area_geojson)
+        digest.update(str(l1_path.resolve()).encode())
         if l1_path.exists():
-            l1_mtime = l1_path.stat().st_mtime
-            geom_str = f"{l1_path.name}_{l1_mtime}"
-        else:
-            geom_str = str(l1_path)
+            stat = l1_path.stat()
+            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+    elif isinstance(l1_area_geojson, gpd.GeoDataFrame):
+        digest.update(str(l1_area_geojson.crs).encode())
+        digest.update(str(len(l1_area_geojson)).encode())
+        has_depth_reduction = 'depth_red' in l1_area_geojson.columns
+        for position, geom in enumerate(l1_area_geojson.geometry):
+            digest.update(geom.wkb if geom is not None else b"null")
+            if has_depth_reduction:
+                depth_reduction = l1_area_geojson['depth_red'].iloc[position]
+                digest.update(repr(depth_reduction).encode())
     else:
-        if isinstance(l1_area_geojson, gpd.GeoDataFrame):
-            bounds_str = str(l1_area_geojson.total_bounds)
-            depth_str = str(l1_area_geojson['depth_red'].sum()) if 'depth_red' in l1_area_geojson.columns else ''
-            geom_str = bounds_str + depth_str
-        else:
-            geom_str = str(id(l1_area_geojson))
-    
-    # Combine geometry and timesteps for final hash
-    combined_str = geom_str + ts_str
-    l1_hash = hashlib.md5(combined_str.encode()).hexdigest()[:8]
-    return l1_hash
+        digest.update(repr(l1_area_geojson).encode())
+
+    return digest.hexdigest()[:16]
 
 def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
     """
@@ -357,6 +373,45 @@ def load_island_cache(cache_dir, hazard_dir=None):
     else:
         print(f"No island cache found at {cache_file}")
         return {}
+
+
+def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None):
+    """Save societal-access population allocations to an interim pickle."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"societal_allocation_cache_{hazard_dir_name}.pkl"
+
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_dict, f)
+        print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        print(f"ERROR: Failed to save societal allocation cache: {e}")
+        raise
+
+
+def load_societal_allocation_cache(cache_dir, hazard_dir=None):
+    """Load societal-access population allocations from an interim pickle."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    hazard_dir_name = _get_hazard_dir_name(hazard_dir)
+    cache_file = cache_dir / f"societal_allocation_cache_{hazard_dir_name}.pkl"
+
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'rb') as f:
+                cache_dict = pickle.load(f)
+            print(f"Loaded societal allocation cache: {len(cache_dict)} entries from {cache_file}")
+            return cache_dict
+        except Exception as e:
+            print(f"Error loading societal allocation cache: {e}")
+            return {}
+
+    print(f"No societal allocation cache found at {cache_file}")
+    return {}
 
 def create_overlap_cache_key(previous_map, current_map, hazard_threshold, hazard_dir, l1_area_geojson=None, l1_active_timesteps=None):
     """
@@ -449,6 +504,7 @@ def load_simulation_caches(cache_dir, hazard_dir=None):
             'hazard_extraction_cache': Loaded hazard extraction cache or None  
             'overlap_cache': Loaded overlap cache or None
             'island_cache': Loaded island cache or None
+            'societal_allocation_cache': Loaded societal allocation cache or None
     """
     # Convert to Path objects
     cache_dir = Path(cache_dir)
@@ -461,7 +517,8 @@ def load_simulation_caches(cache_dir, hazard_dir=None):
         'accessibility_cache': None,
         'hazard_extraction_cache': None,
         'overlap_cache': None,
-        'island_cache': None
+        'island_cache': None,
+        'societal_allocation_cache': None
     }
     
     print("Loading simulation caches...")
@@ -489,6 +546,11 @@ def load_simulation_caches(cache_dir, hazard_dir=None):
         caches['island_cache'] = load_island_cache(cache_dir, hazard_dir)
     except Exception as e:
         print(f"Note: Could not load island cache: {e}")
+
+    try:
+        caches['societal_allocation_cache'] = load_societal_allocation_cache(cache_dir, hazard_dir)
+    except Exception as e:
+        print(f"Note: Could not load societal allocation cache: {e}")
     
     return caches
 
@@ -570,5 +632,22 @@ def save_simulation_caches(cache_updated, cache_dir, hazard_dir=None):
             print(f"Saved island cache with {len(island_cache)} entries")
         except Exception as e:
             print(f"Warning: Could not save island cache: {e}")
+
+    if 'societal_allocation_cache' in cache_updated:
+        try:
+            societal_allocation_cache = cache_updated['societal_allocation_cache']
+            save_societal_allocation_cache(
+                societal_allocation_cache, cache_dir, hazard_dir
+            )
+            saved_stats['societal_allocation_cache'] = {
+                'count': len(societal_allocation_cache),
+                'path': str(cache_dir / f"societal_allocation_cache_{hazard_dir_name}.pkl")
+            }
+            print(
+                "Saved societal allocation cache with "
+                f"{len(societal_allocation_cache)} entries"
+            )
+        except Exception as e:
+            print(f"Warning: Could not save societal allocation cache: {e}")
     
     return saved_stats

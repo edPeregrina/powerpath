@@ -5,6 +5,7 @@ import pandas as pd
 import shapely.geometry as sg
 from pyproj import Transformer
 from rtree import index
+from scipy.spatial import Voronoi
 
 
 def create_spatial_index(gdf):
@@ -17,6 +18,8 @@ def create_spatial_index(gdf):
     Returns:
     - R-tree spatial index
     """
+    from rtree import index
+
     idx = index.Index()
     
     # Insert each geometry's bounding box into the index
@@ -53,16 +56,18 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
     return G
 
 def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
-                        l1_area_geojson=None, verbose=False) -> nx.Graph:
+                        l1_area_geojson=None, l2_asset_geojson=None,
+                        verbose=False) -> nx.Graph:
     """
     Filter graph edges based on hazard values, excluding protected infrastructure.
-    Applies L1 depth reductions by adjusting threshold per edge (not modifying graph).
+    Applies active L1/L2 depth reductions by adjusting each edge threshold.
     
     Args:
         G: NetworkX graph with hazard values on edges
         threshold: Base hazard value threshold for edge removal
         hazard_column: Name of edge attribute containing hazard values
         l1_area_geojson: Optional path/GeoDataFrame for L1 depth reductions
+        l2_asset_geojson: Optional path/GeoDataFrame for L2 depth reductions
         verbose: Print progress messages
     
     Returns:
@@ -101,56 +106,73 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
 
         return check_attribute(d.get("bridge")) or check_attribute(d.get("tunnel")) or check_attribute(d.get("protected"))
 
-    # Get L1 depth reductions per edge (if applicable)
     edge_depth_reductions = {}
-    
-    if l1_area_geojson is not None:
-        l1_gdf = (gpd.read_file(l1_area_geojson) 
-                  if isinstance(l1_area_geojson, (str, Path)) 
-                  else l1_area_geojson)
-        
-        if "depth_red" not in l1_gdf.columns:
-            l1_gdf['depth_red'] = 0.3
+
+    def iter_edges_with_keys():
+        if G.is_multigraph():
+            return G.edges(keys=True, data=True)
+        return ((u, v, None, data) for u, v, data in G.edges(data=True))
+
+    def add_adaptation_depth_reductions(adaptation, label, default_reduction):
+        if adaptation is None:
+            return
+
+        adaptation_gdf = (
+            gpd.read_file(adaptation)
+            if isinstance(adaptation, (str, Path))
+            else adaptation.copy()
+        )
+        if "depth_red" not in adaptation_gdf.columns:
+            adaptation_gdf['depth_red'] = default_reduction
             if verbose:
-                print("Warning: L1 GeoJSON missing 'depth_red' column, using default 0.3m")
-        
+                print(
+                    f"Warning: {label} GeoJSON missing 'depth_red' column, "
+                    f"using default {default_reduction}m"
+                )
+
         # Ensure correct CRS (graph is in EPSG:4326)
-        if l1_gdf.crs != "EPSG:4326":
-            l1_gdf = l1_gdf.to_crs("EPSG:4326")
-        
-        # Build STRtree from L1 polygons
-        l1_tree = shapely.STRtree(l1_gdf.geometry.values)
-        
-        # For each edge, check if it intersects any L1 polygon
-        for u, v, data in G.edges(data=True):
+        if adaptation_gdf.crs != "EPSG:4326":
+            adaptation_gdf = adaptation_gdf.to_crs("EPSG:4326")
+
+        adaptation_tree = shapely.STRtree(adaptation_gdf.geometry.values)
+        adapted_edge_count = 0
+        for u, v, edge_key, data in iter_edges_with_keys():
             edge_geom = data.get('geometry')
-            
+
             if edge_geom is None:
                 from shapely.geometry import LineString
                 edge_geom = LineString([
                     (G.nodes[u]['x'], G.nodes[u]['y']),
                     (G.nodes[v]['x'], G.nodes[v]['y'])
                 ])
-            
-            # Find intersecting L1 polygons
-            intersecting_l1_indices = l1_tree.query(edge_geom, predicate='intersects')
-            
-            if len(intersecting_l1_indices) > 0:
-                # Take maximum depth reduction if multiple polygons overlap
-                max_reduction = l1_gdf.iloc[intersecting_l1_indices]['depth_red'].max()
-                edge_depth_reductions[(u, v)] = max_reduction
-        
+
+            intersecting_indices = adaptation_tree.query(
+                edge_geom, predicate='intersects'
+            )
+            if len(intersecting_indices) > 0:
+                max_reduction = adaptation_gdf.iloc[
+                    intersecting_indices
+                ]['depth_red'].max()
+                cache_key = (u, v, edge_key)
+                edge_depth_reductions[cache_key] = (
+                    edge_depth_reductions.get(cache_key, 0.0) + max_reduction
+                )
+                adapted_edge_count += 1
+
         if verbose:
-            print(f"Applied L1 to {len(edge_depth_reductions)} edges")
+            print(f"Applied {label} to {adapted_edge_count} edges")
+
+    add_adaptation_depth_reductions(l1_area_geojson, "L1", 0.3)
+    add_adaptation_depth_reductions(l2_asset_geojson, "L2", 0.15)
     
     # Filter edges based on adjusted thresholds
     edges_to_remove = []
     
-    for u, v, d in G.edges(data=True):
+    for u, v, edge_key, d in iter_edges_with_keys():
         hazard_value = d.get(hazard_column, 0)
         
         # Get edge-specific depth reduction
-        depth_reduction = edge_depth_reductions.get((u, v), 0.0)
+        depth_reduction = edge_depth_reductions.get((u, v, edge_key), 0.0)
         
         # Adjusted threshold: hazard must exceed (base_threshold + reduction)
         adjusted_threshold = threshold + depth_reduction
@@ -159,7 +181,8 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
         if (hazard_value > adjusted_threshold and 
             not is_motorway(d.get("highway")) and 
             not is_protected(d)):
-            edges_to_remove.append((u, v))
+            edge = (u, v, edge_key) if G.is_multigraph() else (u, v)
+            edges_to_remove.append(edge)
     
     G.remove_edges_from(edges_to_remove)
     G.remove_nodes_from(list(nx.isolates(G)))

@@ -4,8 +4,13 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
-from shapely.geometry import Point, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 
+from src.caching import (
+    create_island_cache_key,
+    load_simulation_caches,
+    save_simulation_caches,
+)
 from src.societal_access import (
     analyse_societal_access,
     apply_population_to_allocations,
@@ -211,6 +216,144 @@ def test_get_or_build_allocation_uses_cache_key():
     assert changed_key != key_1
 
 
+def test_island_cache_key_includes_l2_road_adaptation():
+    l2 = gpd.GeoDataFrame(
+        {"depth_red": [0.5]},
+        geometry=[box(0, 0, 5, 5)],
+        crs="EPSG:28992",
+    )
+
+    baseline_key = create_island_cache_key("EV0_ma", 0.2, "assets")
+    l2_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        "assets",
+        l2_asset_geojson=l2,
+        l2_active_timesteps=[0, 24],
+    )
+    other_timesteps_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        "assets",
+        l2_asset_geojson=l2,
+        l2_active_timesteps=[48],
+    )
+    same_bounds_l2 = gpd.GeoDataFrame(
+        {"depth_red": [0.5]},
+        geometry=[Polygon([(0, 0), (5, 0), (5, 5), (0, 0)])],
+        crs="EPSG:28992",
+    )
+    other_geometry_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        "assets",
+        l2_asset_geojson=same_bounds_l2,
+        l2_active_timesteps=[0, 24],
+    )
+
+    assert l2_key != baseline_key
+    assert other_timesteps_key != l2_key
+    assert other_geometry_key != l2_key
+
+
+def test_l2_road_adaptation_changes_computed_topology():
+    nx = pytest.importorskip("networkx")
+    from src.utils import filter_hazard_graph
+
+    graph = nx.Graph()
+    graph.add_node(1, x=0.0, y=0.0)
+    graph.add_node(2, x=1.0, y=0.0)
+    graph.add_edge(
+        1,
+        2,
+        geometry=LineString([(0, 0), (1, 0)]),
+        EV0_ma=0.3,
+    )
+    l2 = gpd.GeoDataFrame(
+        {"depth_red": [0.2]},
+        geometry=[box(-0.1, -0.1, 1.1, 0.1)],
+        crs="EPSG:4326",
+    )
+
+    disrupted = filter_hazard_graph(
+        graph.copy(), 0.2, "EV0_ma"
+    )
+    adapted = filter_hazard_graph(
+        graph.copy(), 0.2, "EV0_ma", l2_asset_geojson=l2
+    )
+
+    assert not disrupted.has_edge(1, 2)
+    assert adapted.has_edge(1, 2)
+
+    parallel_graph = nx.MultiGraph()
+    parallel_graph.add_nodes_from(graph.nodes(data=True))
+    for edge_key in ("a", "b"):
+        parallel_graph.add_edge(
+            1,
+            2,
+            key=edge_key,
+            geometry=LineString([(0, 0), (1, 0)]),
+            EV0_ma=0.5,
+        )
+    adapted_parallel = filter_hazard_graph(
+        parallel_graph, 0.2, "EV0_ma", l2_asset_geojson=l2
+    )
+    assert adapted_parallel.number_of_edges() == 0
+
+
+def test_adaptation_geodataframe_is_not_mutated():
+    from src.adaptation import build_l1_l2_reduction_array
+
+    assets = gpd.GeoDataFrame(
+        {"type": ["hospital"]},
+        geometry=[Point(0, 0)],
+        crs="EPSG:28992",
+    )
+    adaptation = gpd.GeoDataFrame(
+        geometry=[box(-1, -1, 1, 1)],
+        crs="EPSG:28992",
+    )
+
+    build_l1_l2_reduction_array(
+        assets,
+        l1_area_geojson=adaptation,
+        l1_active_timesteps=[0],
+        hazard_maps=["unused"],
+        major_timestep=1,
+    )
+
+    assert "depth_red" not in adaptation.columns
+
+
+def test_societal_allocation_cache_uses_simulation_cache_pickle(tmp_path):
+    allocation_df = build_origin_island_allocations(
+        _make_population_gdf(),
+        cell_id_column="cell_id",
+        islands_gdf=_make_islands_gdf(),
+        road_state_key="roads_a",
+    )
+    cache = {"allocation_key": allocation_df}
+
+    saved = save_simulation_caches(
+        {"societal_allocation_cache": cache},
+        tmp_path,
+        hazard_dir="hazard_a",
+    )
+    loaded = load_simulation_caches(tmp_path, hazard_dir="hazard_a")
+
+    assert (
+        tmp_path / "societal_allocation_cache_hazard_a.pkl"
+    ).exists()
+    assert saved["societal_allocation_cache"]["count"] == 1
+    assert loaded["societal_allocation_cache"]["allocation_key"].equals(
+        allocation_df
+    )
+    assert (
+        loaded["societal_allocation_cache"]["allocation_key"].attrs
+        == allocation_df.attrs
+    )
+
+
 def test_postprocess_societal_access_results_uses_cached_allocations():
     islands = _make_islands_gdf()
     pop = _make_population_gdf().iloc[:2].copy()
@@ -244,6 +387,7 @@ def test_postprocess_societal_access_results_uses_cached_allocations():
         cell_id_column="cell_id",
         allocation_cache=cache,
         all_functions=["education", "emergency_response", "health"],
+        nearest_max_distance=2.0,
     )
 
     row = updated_summary[0]
@@ -275,6 +419,82 @@ def test_postprocess_without_matching_allocation_emits_nan():
     )
 
     assert math.isnan(updated_summary[0]["societal_access_pct__health__total"])
+
+
+def test_postprocess_does_not_reuse_another_road_state_allocation():
+    pop = _make_population_gdf().iloc[:1].copy()
+    allocation_df = build_origin_island_allocations(
+        pop,
+        cell_id_column="cell_id",
+        islands_gdf=_make_islands_gdf(),
+        road_state_key="roads_a",
+    )
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["hospital"]},
+        geometry=[Point(1, 1)],
+        crs="EPSG:28992",
+    )
+    summary_results = [{"timestep": 0, "map": 0}]
+    detailed_results = [{
+        "timestep": 0,
+        "map": 0,
+        "road_state_key": "roads_b",
+        "operational": [True],
+        "island_id": [1],
+    }]
+
+    updated_summary, _ = postprocess_societal_access_results(
+        summary_results=summary_results,
+        detailed_results=detailed_results,
+        gdf_assets=gdf_assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache={"allocation_key": allocation_df},
+        all_functions=["health"],
+    )
+
+    assert math.isnan(
+        updated_summary[0]["societal_access_pct__health__total"]
+    )
+
+
+def test_postprocess_does_not_reuse_another_population_grid_allocation():
+    source_pop = _make_population_gdf().iloc[:1].copy()
+    allocation_df = build_origin_island_allocations(
+        source_pop,
+        cell_id_column="cell_id",
+        islands_gdf=_make_islands_gdf(),
+        road_state_key="roads_a",
+    )
+    changed_pop = source_pop.copy()
+    changed_pop.geometry = [box(2, 2, 4, 4)]
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["hospital"]},
+        geometry=[Point(1, 1)],
+        crs="EPSG:28992",
+    )
+    summary_results = [{"timestep": 0, "map": 0}]
+    detailed_results = [{
+        "timestep": 0,
+        "map": 0,
+        "road_state_key": "roads_a",
+        "operational": [True],
+        "island_id": [1],
+    }]
+
+    updated_summary, _ = postprocess_societal_access_results(
+        summary_results=summary_results,
+        detailed_results=detailed_results,
+        gdf_assets=gdf_assets,
+        pop_grid_gdf=changed_pop,
+        cell_id_column="cell_id",
+        allocation_cache={"allocation_key": allocation_df},
+        all_functions=["health"],
+    )
+
+    assert math.isnan(
+        updated_summary[0]["societal_access_pct__health__total"]
+    )
 
 
 def test_list_societal_metric_names_contains_expected_patterns():
