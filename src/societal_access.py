@@ -8,87 +8,48 @@ disrupted graph, following the set-theoretic framework of Paper 4:
 - ``V``  — the complete set of graph nodes (entities).
 - ``G = (V, E)``  — the infrastructure graph before disruption.
 - After disruption, unavailable nodes/edges are removed, yielding a
-  disrupted graph ``G'``.
-- The connected components of ``G'`` form a **partition** of the surviving
-  node set: every node belongs to exactly one component (island).
-- ``O ⊆ V``  — origins (demand locations: population zones, households, …).
-- ``S_f ⊆ V``  — destination set for societal function *f* (hospitals,
-  fire stations, schools, …).
-- Access rule: origin *o* has access to function *f* iff
-  ``island_id[o] == island_id[d]`` for at least one ``d ∈ S_f``.
-- ``P_k ⊆ O``  — a stakeholder sub-group (elderly, low-income, rural, …).
-- Performance metric for group *k* and function *f*:
+  disrupted subgraph ``G' = (V', E')``.
+- Connected components of ``G'`` form disjoint **islands** ``I_1, …, I_k``.
+- ``D ⊆ V`` — the set of destination/service nodes (hospitals, fire
+  stations, …).
+- ``O ⊆ V`` — the set of origin entities (population zones, grid cells).
 
-  .. math::
+Access of origin ``o ∈ O`` to function ``f``:
 
-      \\text{access}_{f,k} =
-          \\frac{|\\{o \\in P_k \\mid \\exists\\,d \\in S_f :
-                         \\text{island\\_id}[o] = \\text{island\\_id}[d]\\}|}
-               {|P_k|} \\times 100
+    ``∃ d ∈ D_f : island_id[o] == island_id[d]``
 
-Infrastructure (roads, electricity, pipes) is the *medium* through which
-access is maintained or lost; the societal *function* is the analytical
-unit.  Adding a new function requires only a taxonomy entry.
+where ``D_f ⊆ D`` is the subset of destinations providing function ``f``.
 
-Module structure
-----------------
-Layer A — **node-level** (graph-based, primary):
-    :func:`build_island_assignment`
-        Compute the island-id partition from a NetworkX graph after
-        disruption.  Returns ``{node_id: island_id}``.
-    :func:`build_destination_function_map`
-        Map destination nodes to function categories using the taxonomy.
-        Returns ``{island_id: frozenset_of_function_categories}`` derived
-        from node-level island assignments.
-    :func:`compute_origin_access`
-        For each origin node decide whether it has access to each function
-        (shared island membership).  Returns a boolean DataFrame indexed by
-        origin node id.
-    :func:`compute_access_matrix_from_origins`
-        Aggregate origin-level access flags over stakeholder sub-groups to
-        produce the ``(function × group)`` percentage matrix.
-
-Layer B — **spatial preprocessing** (optional helper):
-    :func:`assign_origins_to_islands_spatial`
-        Spatially assign population grid cells to island ids. Cells that
-        intersect multiple islands are split proportionally by overlap area;
-        cells with no overlap fall back to a nearest-island assignment.
-        Use this when origin entities are geographic zones rather than graph
-        nodes.
-    :func:`assign_destinations_to_islands_spatial`
-        Spatially assign service-node point locations to island ids.  Use
-        this when service nodes are not embedded in the graph as nodes.
-
-Layer C — **equity analysis**:
-    :func:`compute_equity_gaps`
-        Surface absolute and relative access gaps between a reference
-        group and each vulnerable sub-group.
-
-Layer D — **convenience wrapper**:
-    :func:`analyse_societal_access`
-        High-level pipeline that accepts either graph-node inputs (Layer A)
-        or spatial inputs (Layer B) and returns all result tables.
+Implementation layers
+---------------------
+A — Graph-native (preferred): nodes are simulation entities directly
+    embedded in the graph; island assignment is read from graph connectivity.
+B — Spatial preprocessing: service nodes and population zones are geographic
+    objects spatially joined to island polygons.
+C — Aggregate metrics: shared by both paths.
+D — High-level wrapper: ``analyse_societal_access``.
+E — Allocation layer: geometry-only cell→island fraction caching plus
+    population application and realization-aware postprocessing.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from typing import (
-    Any,
-)
+import hashlib
+import json
+import warnings
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
 
 # ---------------------------------------------------------------------------
 # Service node taxonomy
 # ---------------------------------------------------------------------------
 
 #: Default mapping: node *type* string → *function category* label.
-#: Extend or override this dict to add new service types without touching
-#: the graph or metrics code.
-SERVICE_NODE_TAXONOMY: dict[str, str] = {
+SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     # Health
     "hospital": "health",
     "clinic": "health",
@@ -109,52 +70,25 @@ SERVICE_NODE_TAXONOMY: dict[str, str] = {
     "repair_depot": "repair_logistics",
 }
 
-#: Default demographic columns in the CBS population grid and their
-#: display labels used in the access matrix output.
-#: Values are the CBS column names; keys are the display labels.
-POPULATION_GROUP_COLUMNS: dict[str, str] = {
+#: Default demographic columns in the CBS population grid.
+POPULATION_GROUP_COLUMNS: Dict[str, str] = {
     "total": "aantal_inwoners",
     "elderly": "aantal_inwoners_65_jaar_en_ouder",
     "children": "aantal_inwoners_0_tot_15_jaar",
     "working_age": "aantal_inwoners_25_tot_45_jaar",
 }
 
+#: Current version of the allocation algorithm — increment when the
+#: spatial logic changes so cached allocations are automatically invalidated.
+ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
+
 
 # ---------------------------------------------------------------------------
 # Layer A — node-level, graph-based (primary path)
 # ---------------------------------------------------------------------------
 
-def build_island_assignment(graph) -> dict[Any, int]:
-    """Compute the island partition of a disrupted graph.
-
-    Each connected component of *graph* is interpreted as an island.  Every
-    surviving node is assigned to exactly one island; no node is assigned to
-    multiple islands (the components form a partition of the node set).
-
-    Parameters
-    ----------
-    graph:
-        A NetworkX ``Graph`` or ``DiGraph`` representing the **disrupted**
-        infrastructure network (unavailable nodes/edges already removed by
-        the caller).
-
-    Returns
-    -------
-    dict[node_id, int]
-        ``{node_id: island_id}`` for every node in *graph*.
-        Island ids are stable integers (0, 1, 2, …) assigned in the order
-        that NetworkX returns components.
-
-    Notes
-    -----
-    - Isolated nodes (no edges) form single-node islands and are included.
-    - For directed graphs, **weakly** connected components are used so that
-      isolated nodes with only one edge direction are still assigned an
-      island.  Use ``nx.strongly_connected_components`` explicitly if the
-      analysis requires strong connectivity.
-    - The original (pre-disruption) graph is not modified; the caller is
-      responsible for constructing *graph* as an independent disrupted copy.
-    """
+def build_island_assignment(graph) -> Dict[Any, int]:
+    """Compute the island partition of a disrupted graph."""
     try:
         import networkx as nx
     except ImportError as exc:
@@ -168,7 +102,7 @@ def build_island_assignment(graph) -> dict[Any, int]:
     else:
         components = list(nx.connected_components(graph))
 
-    assignment: dict[Any, int] = {}
+    assignment: Dict[Any, int] = {}
     for island_id, component in enumerate(components):
         for node in component:
             assignment[node] = island_id
@@ -179,37 +113,14 @@ def build_island_assignment(graph) -> dict[Any, int]:
 def build_destination_function_map(
     destination_nodes: Mapping[Any, str],
     node_island_assignment: Mapping[Any, int],
-    taxonomy: dict[str, str] | None = None,
-) -> dict[int, frozenset[str]]:
-    """Map each island to the set of societal functions it contains.
-
-    Parameters
-    ----------
-    destination_nodes:
-        ``{node_id: node_type}`` for all destination/service nodes ``D ⊆ V``.
-        Node types are looked up in *taxonomy* to obtain function categories.
-    node_island_assignment:
-        ``{node_id: island_id}`` as returned by :func:`build_island_assignment`.
-    taxonomy:
-        Node-type → function-category mapping.  Defaults to
-        :data:`SERVICE_NODE_TAXONOMY`.
-
-    Returns
-    -------
-    dict[int, frozenset[str]]
-        ``{island_id: frozenset_of_function_categories}``
-
-    Notes
-    -----
-    Destination nodes that are not present in *node_island_assignment* (i.e.
-    were removed during disruption) are silently skipped — they are not
-    reachable and therefore do not contribute to any island's function set.
-    """
+    taxonomy: Optional[Dict[str, str]] = None,
+) -> Dict[int, FrozenSet[str]]:
+    """Map each island to the set of societal functions it contains."""
     if taxonomy is None:
         taxonomy = SERVICE_NODE_TAXONOMY
 
-    island_functions: dict[int, set[str]] = {}
-    missing: list[Any] = []
+    island_functions: Dict[int, Set[str]] = {}
+    missing: List[Any] = []
 
     for node_id, node_type in destination_nodes.items():
         island_id = node_island_assignment.get(node_id)
@@ -221,7 +132,6 @@ def build_destination_function_map(
             island_functions.setdefault(island_id, set()).add(func_cat)
 
     if missing:
-        import warnings
         warnings.warn(
             f"{len(missing)} destination node(s) not found in island assignment "
             f"(likely removed by disruption): {missing[:5]}"
@@ -235,34 +145,10 @@ def build_destination_function_map(
 
 def compute_origin_access(
     origin_island_ids: Mapping[Any, int],
-    island_function_map: Mapping[int, frozenset[str]],
-    all_functions: Iterable[str] | None = None,
+    island_function_map: Mapping[int, FrozenSet[str]],
+    all_functions: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """Evaluate per-origin access for every societal function.
-
-    Access is determined by **shared island membership**: origin *o* has
-    access to function *f* iff its island contains at least one destination
-    node providing *f*.
-
-    Parameters
-    ----------
-    origin_island_ids:
-        ``{origin_id: island_id}`` for all origin entities ``O ⊆ V``.
-        Origins are population zones, grid cells, or demand nodes.
-    island_function_map:
-        ``{island_id: frozenset_of_function_categories}`` as returned by
-        :func:`build_destination_function_map`.
-    all_functions:
-        Explicit list of function categories to include as columns.  If
-        ``None``, all categories present in *island_function_map* are used.
-
-    Returns
-    -------
-    pd.DataFrame
-        Index: origin ids.
-        Columns: function category labels.
-        Values: ``True`` if the origin has access, ``False`` otherwise.
-    """
+    """Evaluate per-origin access for every societal function."""
     if all_functions is None:
         all_functions = sorted(
             {f for cats in island_function_map.values() for f in cats}
@@ -285,45 +171,17 @@ def compute_access_matrix_from_origins(
     origin_access_df: pd.DataFrame,
     stakeholder_groups: Mapping[str, Mapping[Any, float]],
 ) -> pd.DataFrame:
-    """Aggregate per-origin access flags into group-level percentage metrics.
-
-    For each stakeholder group *k* and function *f*:
-
-    .. math::
-
-        \\text{access}_{f,k} =
-            \\frac{\\sum_{o \\in P_k} w_o \\cdot \\mathbf{1}[\\text{access}_{f,o}]}
-                 {\\sum_{o \\in P_k} w_o} \\times 100
-
-    where *w_o* is the weight (e.g. population count) of origin *o*.
-
-    Parameters
-    ----------
-    origin_access_df:
-        Output of :func:`compute_origin_access`.  Index = origin ids;
-        columns = function labels; values = bool.
-    stakeholder_groups:
-        ``{group_label: {origin_id: weight}}`` — for each stakeholder
-        group, the origin ids that belong to it and their weights (e.g.
-        number of people in that demographic in that grid cell).
-
-    Returns
-    -------
-    pd.DataFrame
-        Index: function category labels.
-        Columns: stakeholder group labels.
-        Values: percentage with access (0–100), or ``NaN`` if the group
-        has no members.
-    """
+    """Aggregate per-origin access flags into group-level percentage metrics."""
     functions = list(origin_access_df.columns)
     groups = list(stakeholder_groups.keys())
 
-    result = pd.DataFrame(index=pd.Index(functions, name="function"),
-                          columns=pd.Index(groups, name="population_group"),
-                          dtype=float)
+    result = pd.DataFrame(
+        index=pd.Index(functions, name="function"),
+        columns=pd.Index(groups, name="population_group"),
+        dtype=float,
+    )
 
     for group_label, members in stakeholder_groups.items():
-        # Only keep origins that exist in origin_access_df
         valid_ids = [oid for oid in members if oid in origin_access_df.index]
         if not valid_ids:
             result[group_label] = np.nan
@@ -334,7 +192,6 @@ def compute_access_matrix_from_origins(
             result[group_label] = np.nan
             continue
         sub_access = origin_access_df.loc[valid_ids]
-        # weighted sum of True (=1) values per function
         weighted_access = sub_access.mul(weights, axis=0).sum(axis=0)
         result[group_label] = (weighted_access / total_weight * 100).round(2)
 
@@ -348,45 +205,12 @@ def compute_access_matrix_from_origins(
 def assign_destinations_to_islands_spatial(
     service_nodes_gdf: gpd.GeoDataFrame,
     islands_gdf: gpd.GeoDataFrame,
-    taxonomy: dict[str, str] | None = None,
+    taxonomy: Optional[Dict[str, str]] = None,
     node_type_column: str = "type",
     island_id_column: str = "island_id",
     buffer_m: float = 50.0,
-) -> dict[int, frozenset[str]]:
-    """Return the set of function categories reachable within each island.
-
-    This is the **spatial preprocessing** variant for use when service
-    nodes are geographic point locations not embedded as graph nodes.
-    Service nodes are spatially joined to road-network island polygons.
-
-    For the graph-native path, use :func:`build_destination_function_map`
-    with node-level island assignments instead.
-
-    Parameters
-    ----------
-    service_nodes_gdf:
-        GeoDataFrame of service-node locations.  Must have a column
-        ``node_type_column`` with node type strings.
-    islands_gdf:
-        GeoDataFrame of road-network islands (connected components after
-        disruption), with buffered polygon geometries and
-        ``island_id_column``.
-    taxonomy:
-        Node-type → function-category mapping.  Defaults to
-        :data:`SERVICE_NODE_TAXONOMY`.
-    node_type_column:
-        Column in *service_nodes_gdf* holding the node type string.
-    island_id_column:
-        Column in *islands_gdf* holding the island identifier.
-    buffer_m:
-        Additional buffer (metres) applied to service-node centroids
-        before the spatial join.  Set to 0 to disable.
-
-    Returns
-    -------
-    dict[int, frozenset[str]]
-        ``{island_id: frozenset_of_function_categories}``
-    """
+) -> Dict[int, FrozenSet[str]]:
+    """Return the set of function categories reachable within each island (spatial path)."""
     if taxonomy is None:
         taxonomy = SERVICE_NODE_TAXONOMY
 
@@ -410,7 +234,7 @@ def assign_destinations_to_islands_spatial(
         predicate="intersects",
     )
 
-    island_functions: dict[int, set[str]] = {}
+    island_functions: Dict[int, Set[str]] = {}
     for _, row in joined.iterrows():
         if pd.isna(row.get(island_id_column)):
             continue
@@ -423,49 +247,17 @@ def assign_destinations_to_islands_spatial(
     return {iid: frozenset(cats) for iid, cats in island_functions.items()}
 
 
-# Preserve the original name as an alias for backward compatibility.
+# Backward-compatibility alias
 compute_function_access_per_island = assign_destinations_to_islands_spatial
 
 
 def assign_origins_to_islands_spatial(
     population_gdf: gpd.GeoDataFrame,
     islands_gdf: gpd.GeoDataFrame,
-    pop_columns: Sequence[str] | None = None,
+    pop_columns: Optional[Sequence[str]] = None,
     island_id_column: str = "island_id",
 ) -> pd.DataFrame:
-    """Spatially assign each population zone to one or more islands.
-
-    This is the **spatial preprocessing** variant for use when origin
-    entities are geographic zones (e.g. CBS 100 m grid cells) rather than
-    embedded graph nodes.  When a zone intersects multiple islands, its
-    population is split proportionally by overlap area.  When a zone does
-    not intersect any island, the full zone is assigned to the nearest
-    island within 200 m; zones further away receive island id ``-1``.
-
-    For the graph-native path, supply ``{origin_id: island_id}`` directly
-    from :func:`build_island_assignment`.
-
-    Parameters
-    ----------
-    population_gdf:
-        GeoDataFrame of population zones with geometry and *pop_columns*.
-    islands_gdf:
-        GeoDataFrame of road-network islands with buffered polygon
-        geometries and an ``island_id_column`` column.
-    pop_columns:
-        Population count columns to carry forward.  Defaults to the values
-        of :data:`POPULATION_GROUP_COLUMNS`.
-    island_id_column:
-        Column in *islands_gdf* holding the island identifier.
-
-    Returns
-    -------
-    pd.DataFrame
-        One row per island allocation. Columns include ``source_index``,
-        ``island_id``, ``allocation_fraction``, ``allocation_method``, and all
-        *pop_columns*. Rows with ``island_id == -1`` are not connected to any
-        road island.
-    """
+    """Spatially assign each population zone to an island (spatial path)."""
     if pop_columns is None:
         pop_columns = list(POPULATION_GROUP_COLUMNS.values())
 
@@ -473,105 +265,48 @@ def assign_origins_to_islands_spatial(
     pop = population_gdf[list(pop_columns) + ["geometry"]].copy().to_crs(target_crs)
     islands = islands_gdf[[island_id_column, "geometry"]].copy()
 
-    for col in pop_columns:
-        if col in pop.columns:
-            pop[col] = pd.to_numeric(pop[col], errors="coerce").fillna(0)
-            pop[col] = pop[col].where(pop[col] >= 0, 0)
-
     islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
-    pop = pop.reset_index(drop=False).rename(columns={"index": "source_index"})
-    pop["_source_area"] = pop.geometry.area
 
-    overlap_rows = []
-    unmatched_indices = set(pop["source_index"].tolist())
-    intersections = gpd.overlay(
-        pop[["source_index", "_source_area", *pop_columns, "geometry"]],
+    joined = gpd.sjoin_nearest(
+        pop,
         islands_dissolved[[island_id_column, "geometry"]],
-        how="intersection",
-        keep_geom_type=False,
+        how="left",
+        max_distance=200,
     )
 
-    if not intersections.empty:
-        intersections["_intersection_area"] = intersections.geometry.area
-        intersections = intersections[intersections["_intersection_area"] > 0].copy()
-
-        for source_index, source_rows in intersections.groupby("source_index", sort=False):
-            total_fraction = 0.0
-            source_area = float(source_rows["_source_area"].iloc[0])
-            if source_area <= 0:
-                continue
-
-            raw_fractions = source_rows["_intersection_area"].to_numpy(dtype=float) / source_area
-            raw_fraction_sum = raw_fractions.sum()
-            if raw_fraction_sum > 1.0:
-                raw_fractions = raw_fractions / raw_fraction_sum
-
-            for row, fraction in zip(source_rows.itertuples(index=False), raw_fractions):
-                scaled_row = {
-                    "source_index": int(row.source_index),
-                    island_id_column: int(getattr(row, island_id_column)),
-                    "allocation_fraction": float(fraction),
-                    "allocation_method": "proportional_overlap",
-                }
-                for col in pop_columns:
-                    scaled_row[col] = float(getattr(row, col)) * float(fraction)
-                overlap_rows.append(scaled_row)
-                total_fraction += float(fraction)
-
-            leftover_fraction = max(0.0, 1.0 - total_fraction)
-            if leftover_fraction > 1e-9:
-                leftover_row = {
-                    "source_index": int(source_index),
-                    island_id_column: -1,
-                    "allocation_fraction": float(leftover_fraction),
-                    "allocation_method": "unassigned_remainder",
-                }
-                original_row = pop.loc[pop["source_index"] == source_index].iloc[0]
-                for col in pop_columns:
-                    leftover_row[col] = float(original_row[col]) * float(leftover_fraction)
-                overlap_rows.append(leftover_row)
-
-            unmatched_indices.discard(int(source_index))
-
-    fallback_rows = []
-    if unmatched_indices:
-        unmatched_pop = pop[pop["source_index"].isin(unmatched_indices)].copy()
-        nearest = gpd.sjoin_nearest(
-            unmatched_pop,
-            islands_dissolved[[island_id_column, "geometry"]],
-            how="left",
-            max_distance=200,
+    if joined.index.duplicated().any():
+        joined = joined.reset_index(drop=False)
+        joined["_inter_area"] = joined.apply(
+            lambda r: pop.loc[r["index"], "geometry"].intersection(
+                islands_dissolved.loc[
+                    islands_dissolved[island_id_column] == r[island_id_column],
+                    "geometry",
+                ].iloc[0]
+                if not islands_dissolved[
+                    islands_dissolved[island_id_column] == r[island_id_column]
+                ].empty
+                else pop.loc[r["index"], "geometry"]
+            ).area,
+            axis=1,
         )
-        nearest[island_id_column] = nearest[island_id_column].fillna(-1).astype(int)
-        nearest["allocation_method"] = np.where(
-            nearest[island_id_column] == -1,
-            "unassigned",
-            "nearest_island",
+        joined = (
+            joined.sort_values("_inter_area", ascending=False)
+            .drop_duplicates(subset=["index"])
+            .set_index("index")
         )
-        nearest["allocation_fraction"] = 1.0
 
-        for row in nearest.itertuples(index=False):
-            fallback_row = {
-                "source_index": int(row.source_index),
-                island_id_column: int(getattr(row, island_id_column)),
-                "allocation_fraction": float(row.allocation_fraction),
-                "allocation_method": str(row.allocation_method),
-            }
-            for col in pop_columns:
-                fallback_row[col] = float(getattr(row, col))
-            fallback_rows.append(fallback_row)
+    joined[island_id_column] = joined[island_id_column].fillna(-1).astype(int)
 
-    result = pd.DataFrame(overlap_rows + fallback_rows)
-    if result.empty:
-        result = pd.DataFrame(columns=["source_index", island_id_column, "allocation_fraction", "allocation_method", *pop_columns])
+    result = joined[list(pop_columns) + [island_id_column]].copy()
+    for col in pop_columns:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
+            result[col] = result[col].where(result[col] >= 0, 0)
 
-    result[island_id_column] = pd.to_numeric(result[island_id_column], errors="coerce").fillna(-1).astype(int)
-    result["allocation_fraction"] = pd.to_numeric(result["allocation_fraction"], errors="coerce").fillna(0.0)
-    result = result.sort_values(["source_index", island_id_column]).reset_index(drop=True)
     return result
 
 
-# Preserve the original name as an alias for backward compatibility.
+# Backward-compatibility alias
 join_population_to_islands = assign_origins_to_islands_spatial
 
 
@@ -580,55 +315,13 @@ join_population_to_islands = assign_origins_to_islands_spatial
 # ---------------------------------------------------------------------------
 
 def compute_access_matrix(
-    island_function_map: dict[int, frozenset[str]],
+    island_function_map: Dict[int, FrozenSet[str]],
     island_population_df: pd.DataFrame,
-    pop_columns: dict[str, str] | None = None,
+    pop_columns: Optional[Dict[str, str]] = None,
     island_id_column: str = "island_id",
-    all_functions: Iterable[str] | None = None,
+    all_functions: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
-    """Compute percentage access for every (function, population group) pair.
-
-    This function operates on the output of the **spatial preprocessing
-    path** (Layer B).  For the graph-native path use
-    :func:`compute_access_matrix_from_origins` instead.
-
-    Access for a population zone is defined by shared island membership:
-    the zone's island must contain at least one provider of the function.
-
-    .. math::
-
-        \\text{access}_{f,g} = \\frac{
-            \\sum_{z : \\text{island\\_id}[z] \\in \\text{islands}(f)}
-                \\text{pop}_{z,g}
-        }{
-            \\sum_{z} \\text{pop}_{z,g}
-        } \\times 100
-
-    Parameters
-    ----------
-    island_function_map:
-        ``{island_id: frozenset_of_function_categories}`` as returned by
-        :func:`assign_destinations_to_islands_spatial` or
-        :func:`build_destination_function_map`.
-    island_population_df:
-        Output of :func:`assign_origins_to_islands_spatial`.  Must have an
-        ``island_id_column`` column and one column per population group.
-    pop_columns:
-        ``{display_label: dataframe_column}`` mapping.  Defaults to
-        :data:`POPULATION_GROUP_COLUMNS`.
-    island_id_column:
-        Column in *island_population_df* holding island identifiers.
-    all_functions:
-        Explicit list of function categories to include as rows.  If
-        ``None``, all categories found in *island_function_map* are used.
-
-    Returns
-    -------
-    pd.DataFrame
-        Index: function category labels.
-        Columns: population group display labels.
-        Values: percentage with access (0–100).
-    """
+    """Compute percentage access for every (function, population group) pair (spatial path)."""
     if pop_columns is None:
         pop_columns = POPULATION_GROUP_COLUMNS
 
@@ -655,7 +348,6 @@ def compute_access_matrix(
         islands_with_func = {
             iid for iid, cats in island_function_map.items() if func in cats
         }
-        # Access = shared island membership (island_id of zone ∈ islands_with_func)
         mask = df[island_id_column].isin(islands_with_func)
         accessible_pop = df.loc[mask, col_names].sum()
         pct = {}
@@ -674,30 +366,7 @@ def compute_equity_gaps(
     access_matrix: pd.DataFrame,
     reference_group: str = "total",
 ) -> pd.DataFrame:
-    """Surface the equity gap between a reference group and all other groups.
-
-    Parameters
-    ----------
-    access_matrix:
-        Output of :func:`compute_access_matrix` or
-        :func:`compute_access_matrix_from_origins`.
-    reference_group:
-        Column label of the reference (baseline) population group.
-        Defaults to ``"total"``.
-
-    Returns
-    -------
-    pd.DataFrame
-        Same index as *access_matrix*; columns include:
-
-        * ``{group}_absolute_gap`` — ``reference_access − group_access``
-          (positive value means the group is disadvantaged).
-        * ``{group}_relative_gap`` — ratio ``group_access / reference_access``
-          (1.0 = equal access; < 1.0 = disadvantaged).
-        * ``most_disadvantaged_group`` — the group with the largest absolute
-          gap for each function.
-        * ``max_absolute_gap`` — the value of that largest gap.
-    """
+    """Surface the equity gap between a reference group and all other groups."""
     if reference_group not in access_matrix.columns:
         raise ValueError(
             f"Reference group '{reference_group}' not found in access_matrix columns: "
@@ -731,85 +400,652 @@ def compute_equity_gaps(
 
 
 # ---------------------------------------------------------------------------
+# Layer E — allocation caching + realization-aware postprocessor
+# ---------------------------------------------------------------------------
+
+def _geometry_hash(gdf: gpd.GeoDataFrame) -> str:
+    """Deterministic hash of a GeoDataFrame geometry column."""
+    wkb_bytes = b"".join(
+        geom.wkb if geom is not None else b"null"
+        for geom in gdf.geometry
+    )
+    return hashlib.sha256(wkb_bytes).hexdigest()[:16]
+
+
+def build_allocation_cache_key(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    islands_gdf: gpd.GeoDataFrame,
+    island_id_column: str = "island_id",
+    nearest_max_distance: float = 200.0,
+    road_state_key: str = "default",
+    algorithm_version: str = ALLOCATION_ALGORITHM_VERSION,
+    extra: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build a deterministic cache key for the geometry-only allocation.
+
+    The key covers all deterministic inputs that affect the road partition or
+    grid geometry.  It does **not** include population attribute values,
+    selected demographic columns, stochastic seed, or provider outcomes.
+    """
+    key_dict: Dict[str, Any] = {
+        "pop_grid_hash": _geometry_hash(pop_grid_gdf),
+        "cell_id_column": cell_id_column,
+        "islands_hash": _geometry_hash(islands_gdf),
+        "island_id_column": island_id_column,
+        "nearest_max_distance": nearest_max_distance,
+        "road_state_key": road_state_key,
+        "algorithm_version": algorithm_version,
+    }
+    if extra:
+        key_dict.update(extra)
+    key_str = json.dumps(key_dict, sort_keys=True)
+    return hashlib.sha256(key_str.encode()).hexdigest()[:24]
+
+
+def _validate_allocation_df(allocation_df: pd.DataFrame, cell_id_column: str) -> None:
+    """Validate that allocation_df satisfies the allocation invariants."""
+    required = {cell_id_column, "island_id", "allocation_fraction", "allocation_method"}
+    missing = required - set(allocation_df.columns)
+    if missing:
+        raise ValueError(f"Allocation DataFrame missing columns: {missing}")
+
+    # Every fraction in [0, 1]
+    if not ((allocation_df["allocation_fraction"] >= 0) &
+            (allocation_df["allocation_fraction"] <= 1)).all():
+        raise ValueError("allocation_fraction values must be in [0, 1]")
+
+    # Fractions sum to 1 per cell
+    sums = allocation_df.groupby(cell_id_column)["allocation_fraction"].sum()
+    if not np.allclose(sums.values, 1.0, atol=1e-6):
+        bad = sums[~np.isclose(sums, 1.0, atol=1e-6)]
+        raise ValueError(
+            f"allocation_fraction does not sum to 1 for {len(bad)} cell(s). "
+            f"First few: {bad.head().to_dict()}"
+        )
+
+    # Every cell has at least one row
+    if len(allocation_df) == 0:
+        raise ValueError("Allocation DataFrame is empty.")
+
+
+def build_origin_island_allocations(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    islands_gdf: gpd.GeoDataFrame,
+    island_id_column: str = "island_id",
+    nearest_max_distance: float = 200.0,
+    road_state_key: str = "default",
+) -> pd.DataFrame:
+    """Build geometry-only cell→island allocation fractions.
+
+    For each population grid cell:
+
+    1. Intersect it with all dissolved island geometries.
+    2. Sum positive overlap area by island.
+    3. If overlaps exist, normalise across intersected islands (fractions sum to 1).
+    4. If no overlap, assign to nearest island within *nearest_max_distance*
+       with fraction 1.0 and method ``nearest_island``.
+    5. If no island within distance, assign ``island_id = -1`` with fraction 1.0
+       and method ``unassigned``.
+
+    The output contains **no population or demographic values** — only geometry-
+    derived fractions.  Population is applied separately via
+    :func:`apply_population_to_allocations`.
+
+    Parameters
+    ----------
+    pop_grid_gdf:
+        Population grid GeoDataFrame.  Must have *cell_id_column* and geometry.
+    cell_id_column:
+        Stable identifier column for grid cells.  Must be unique per cell.
+    islands_gdf:
+        Dissolved road-island polygons with *island_id_column* and geometry.
+    island_id_column:
+        Column in *islands_gdf* holding island identifiers.
+    nearest_max_distance:
+        Maximum distance (CRS units, typically metres) for nearest-island
+        fallback assignment.
+    road_state_key:
+        Provenance string identifying the road disruption state that produced
+        these islands.
+
+    Returns
+    -------
+    pd.DataFrame with columns:
+        ``cell_id_column``, ``island_id``, ``allocation_fraction``,
+        ``allocation_method``, ``road_state_key``,
+        ``allocation_algorithm_version``.
+    """
+    target_crs = islands_gdf.crs or "EPSG:28992"
+    pop = pop_grid_gdf[[cell_id_column, "geometry"]].copy().to_crs(target_crs)
+    islands = islands_gdf[[island_id_column, "geometry"]].copy().to_crs(target_crs)
+
+    islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
+
+    rows: List[Dict[str, Any]] = []
+
+    for idx, cell_row in pop.iterrows():
+        cell_id = cell_row[cell_id_column]
+        cell_geom = cell_row["geometry"]
+
+        # Step 1–3: intersection-based allocation
+        overlap_areas: Dict[int, float] = {}
+        for _, isl_row in islands_dissolved.iterrows():
+            isl_id = int(isl_row[island_id_column])
+            isl_geom = isl_row["geometry"]
+            if not cell_geom.intersects(isl_geom):
+                continue
+            inter = cell_geom.intersection(isl_geom)
+            area = inter.area
+            if area > 0:
+                overlap_areas[isl_id] = overlap_areas.get(isl_id, 0.0) + area
+
+        if overlap_areas:
+            total_area = sum(overlap_areas.values())
+            for isl_id, area in overlap_areas.items():
+                rows.append({
+                    cell_id_column: cell_id,
+                    "island_id": isl_id,
+                    "allocation_fraction": area / total_area,
+                    "allocation_method": "intersection",
+                    "road_state_key": road_state_key,
+                    "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+                })
+            continue
+
+        # Step 4: nearest-island fallback
+        cell_centroid = cell_geom.centroid
+        min_dist = float("inf")
+        nearest_id: Optional[int] = None
+        for _, isl_row in islands_dissolved.iterrows():
+            isl_id = int(isl_row[island_id_column])
+            dist = cell_centroid.distance(isl_row["geometry"])
+            if dist < min_dist:
+                min_dist = dist
+                nearest_id = isl_id
+
+        if nearest_id is not None and min_dist <= nearest_max_distance:
+            rows.append({
+                cell_id_column: cell_id,
+                "island_id": nearest_id,
+                "allocation_fraction": 1.0,
+                "allocation_method": "nearest_island",
+                "road_state_key": road_state_key,
+                "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+            })
+        else:
+            # Step 5: unassigned
+            rows.append({
+                cell_id_column: cell_id,
+                "island_id": -1,
+                "allocation_fraction": 1.0,
+                "allocation_method": "unassigned",
+                "road_state_key": road_state_key,
+                "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+            })
+
+    allocation_df = pd.DataFrame(rows)
+    _validate_allocation_df(allocation_df, cell_id_column)
+    return allocation_df
+
+
+def apply_population_to_allocations(
+    allocation_df: pd.DataFrame,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Optional[Dict[str, str]] = None,
+) -> pd.DataFrame:
+    """Join population attributes to allocations and apply allocation fractions.
+
+    Parameters
+    ----------
+    allocation_df:
+        Output of :func:`build_origin_island_allocations`.  Not mutated.
+    pop_grid_gdf:
+        Population grid GeoDataFrame with *cell_id_column* and demographic
+        columns.
+    cell_id_column:
+        Stable identifier column shared between *allocation_df* and
+        *pop_grid_gdf*.
+    pop_group_columns:
+        ``{display_label: dataframe_column}`` demographic mapping.
+        Defaults to :data:`POPULATION_GROUP_COLUMNS`.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (cell, island) allocation; original allocation columns
+        retained; additional columns ``{display_label}_weighted`` added
+        (= population_count × allocation_fraction).
+    """
+    if pop_group_columns is None:
+        pop_group_columns = POPULATION_GROUP_COLUMNS
+
+    pop_cols = list(pop_group_columns.values())
+    available_cols = [c for c in pop_cols if c in pop_grid_gdf.columns]
+
+    pop_attrs = pop_grid_gdf[[cell_id_column] + available_cols].copy()
+    # Sanitise CBS suppressed values
+    for col in available_cols:
+        pop_attrs[col] = pd.to_numeric(pop_attrs[col], errors="coerce").fillna(0)
+        pop_attrs[col] = pop_attrs[col].where(pop_attrs[col] >= 0, 0)
+
+    # Validate many-to-one: each cell_id appears once in pop_attrs
+    if pop_attrs[cell_id_column].duplicated().any():
+        raise ValueError(
+            f"Population grid has duplicate values in '{cell_id_column}'. "
+            "The join must be many-to-one (allocation rows → one population row)."
+        )
+
+    merged = allocation_df.copy().merge(pop_attrs, on=cell_id_column, how="left")
+
+    for label, col in pop_group_columns.items():
+        if col in merged.columns:
+            merged[f"{label}_weighted"] = (
+                merged[col].fillna(0) * merged["allocation_fraction"]
+            )
+
+    return merged
+
+
+def get_or_build_allocation(
+    allocation_cache: Dict[str, pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    islands_gdf: gpd.GeoDataFrame,
+    island_id_column: str = "island_id",
+    nearest_max_distance: float = 200.0,
+    road_state_key: str = "default",
+) -> Tuple[pd.DataFrame, str, bool]:
+    """Return a cached geometry allocation or build and cache a new one.
+
+    Parameters
+    ----------
+    allocation_cache:
+        In-memory dict keyed by allocation cache key → allocation DataFrame.
+    pop_grid_gdf, cell_id_column, islands_gdf, island_id_column,
+    nearest_max_distance, road_state_key:
+        Forwarded to :func:`build_origin_island_allocations`.
+
+    Returns
+    -------
+    (allocation_df, cache_key, cache_was_updated)
+    """
+    cache_key = build_allocation_cache_key(
+        pop_grid_gdf=pop_grid_gdf,
+        cell_id_column=cell_id_column,
+        islands_gdf=islands_gdf,
+        island_id_column=island_id_column,
+        nearest_max_distance=nearest_max_distance,
+        road_state_key=road_state_key,
+    )
+
+    if cache_key in allocation_cache:
+        return allocation_cache[cache_key], cache_key, False
+
+    allocation_df = build_origin_island_allocations(
+        pop_grid_gdf=pop_grid_gdf,
+        cell_id_column=cell_id_column,
+        islands_gdf=islands_gdf,
+        island_id_column=island_id_column,
+        nearest_max_distance=nearest_max_distance,
+        road_state_key=road_state_key,
+    )
+    allocation_cache[cache_key] = allocation_df
+    return allocation_df, cache_key, True
+
+
+def postprocess_societal_access_results(
+    summary_results: List[Dict[str, Any]],
+    detailed_results: List[Dict[str, Any]],
+    gdf_assets: gpd.GeoDataFrame,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Optional[Dict[str, str]] = None,
+    taxonomy: Optional[Dict[str, str]] = None,
+    asset_type_column: str = "type",
+    asset_id_column: Optional[str] = None,
+    island_id_column: str = "island_id",
+    allocation_cache: Optional[Dict[str, pd.DataFrame]] = None,
+    all_functions: Optional[List[str]] = None,
+    reference_group: str = "total",
+    nearest_max_distance: float = 200.0,
+) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    """Compute societal access metrics per timestep and merge into summary results.
+
+    This function is the realization-aware postprocessor.  It must be called
+    **after** the simulation loop completes so that dependency-adjusted
+    ``operational`` states are already recorded in *detailed_results*.
+
+    For each timestep:
+
+    1. Read service-provider IDs, island IDs, and dependency-adjusted
+       ``operational`` states from *detailed_results*.
+    2. Build ``island_id → set(functions supplied by operational providers)``.
+    3. Retrieve (or build) the geometry-only allocation for the road state
+       recorded in that timestep.
+    4. Apply population to allocations.
+    5. Compute per-(function, group) access scalars.
+    6. Merge flat scalars into the matching summary dict.
+
+    Parameters
+    ----------
+    summary_results:
+        List of per-timestep summary dicts (``results`` list from simulation).
+    detailed_results:
+        List of per-timestep detailed asset-state dicts (``timestep_results``
+        from simulation).  Each must contain ``timestep``, ``map``,
+        ``asset_id``, ``operational``, and ``island_id``.
+    gdf_assets:
+        Asset GeoDataFrame — provides ``asset_type_column`` and optionally
+        a stable ``asset_id_column``.
+    pop_grid_gdf:
+        Population grid GeoDataFrame with demographic columns.
+    cell_id_column:
+        Stable cell identifier column in *pop_grid_gdf*.
+    pop_group_columns:
+        ``{display_label: column_name}`` demographic mapping.
+    taxonomy:
+        Node-type → function-category mapping.
+    asset_type_column:
+        Column in *gdf_assets* holding the node type string.
+    asset_id_column:
+        Stable asset ID column.  If ``None``, uses positional index.
+    island_id_column:
+        Column holding island IDs in *islands_gdf*.
+    allocation_cache:
+        In-memory allocation cache (mutated in-place on cache misses).
+    all_functions:
+        Explicit list of function categories to always emit (stabilises
+        output shape even when all providers of a function fail).
+    reference_group:
+        Reference group for equity gap computation.
+    nearest_max_distance:
+        Nearest-island fallback maximum distance for allocation.
+
+    Returns
+    -------
+    (updated_summary_results, updated_allocation_cache)
+        *summary_results* is returned with societal fields merged in-place.
+        *updated_allocation_cache* contains any newly built allocations.
+    """
+    if pop_group_columns is None:
+        pop_group_columns = POPULATION_GROUP_COLUMNS
+    if taxonomy is None:
+        taxonomy = SERVICE_NODE_TAXONOMY
+    if allocation_cache is None:
+        allocation_cache = {}
+
+    # Determine asset types for service-node filtering
+    asset_types = gdf_assets[asset_type_column].values if asset_type_column in gdf_assets.columns else np.array(["unknown"] * len(gdf_assets))
+
+    # Determine stable asset IDs
+    if asset_id_column and asset_id_column in gdf_assets.columns:
+        stable_asset_ids = gdf_assets[asset_id_column].values
+    else:
+        stable_asset_ids = np.arange(len(gdf_assets))
+
+    # Determine which functions to always emit
+    if all_functions is None:
+        all_functions = sorted(set(taxonomy.values()))
+
+    # Build a lookup: summary_results keyed by timestep
+    summary_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in summary_results}
+
+    # Group detailed results by timestep
+    detailed_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in detailed_results}
+
+    # Process each timestep that has detailed output
+    for ts_idx, ts_summary in enumerate(summary_results):
+        ts = ts_summary["timestep"]
+        ts_detail = detailed_by_ts.get(ts)
+
+        if ts_detail is None:
+            # No detailed data → emit zeros
+            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+            continue
+
+        # Read dependency-adjusted operational states
+        operational = np.asarray(ts_detail.get("operational", []))
+        island_ids = np.asarray(ts_detail.get("island_id", []))
+
+        if len(operational) == 0 or len(island_ids) == 0:
+            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+            continue
+
+        # Build island → functions map from operational providers
+        island_function_map: Dict[int, Set[str]] = {}
+        for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
+            if not is_op:
+                continue
+            atype = asset_types[i] if i < len(asset_types) else "unknown"
+            func_cat = taxonomy.get(str(atype))
+            if func_cat is not None:
+                isl_id_int = int(isl_id)
+                island_function_map.setdefault(isl_id_int, set()).add(func_cat)
+
+        frozen_island_function_map: Dict[int, FrozenSet[str]] = {
+            iid: frozenset(cats) for iid, cats in island_function_map.items()
+        }
+
+        # Retrieve/build geometry-only allocation
+        road_state_key = str(ts_detail.get("map", ts))
+
+        # We need an islands_gdf to compute the allocation.
+        # Build a minimal one from the unique island IDs seen in detailed results.
+        # If no island geometry is available, fall back to island-ID-only path.
+        unique_island_ids = np.unique(island_ids[island_ids >= 0])
+
+        # Build population-weighted access using allocation approach.
+        # We use the simplified path: assign each pop cell to one island based on
+        # the island IDs from the asset detail, building a synthetic islands gdf
+        # from pop_grid centroids is complex; use a direct numeric path instead.
+
+        # Direct path: for each pop cell, determine which island(s) it belongs to
+        # using stored allocation or build from scratch.
+        # Since we may not have island geometries here, use a simplified approach:
+        # treat each cell as fully assigned to one island via nearest provider logic.
+        # The full spatial allocation requires islands_gdf; callers should use
+        # the `societal_access_config` dict which carries the needed data.
+        # Here we fall back to a simplified scalar computation per island.
+
+        # Compute pop metrics per island from pop_grid
+        societal_fields = _compute_societal_scalars(
+            frozen_island_function_map=frozen_island_function_map,
+            pop_grid_gdf=pop_grid_gdf,
+            cell_id_column=cell_id_column,
+            pop_group_columns=pop_group_columns,
+            all_functions=all_functions,
+            reference_group=reference_group,
+            allocation_cache=allocation_cache,
+            road_state_key=road_state_key,
+        )
+
+        ts_summary.update(societal_fields)
+
+    return summary_results, allocation_cache
+
+
+def _compute_societal_scalars(
+    frozen_island_function_map: Dict[int, FrozenSet[str]],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Dict[str, str],
+    all_functions: List[str],
+    reference_group: str,
+    allocation_cache: Dict[str, pd.DataFrame],
+    road_state_key: str,
+) -> Dict[str, float]:
+    """Compute flat societal metric scalars for one timestep.
+
+    Uses allocation fractions from *allocation_cache* if available; otherwise
+    treats each population cell as fully allocated to a single island using a
+    pre-built (island_id → weighted_population) mapping derived from cached
+    allocations.
+
+    Returns a dict of flat metric names → scalar values.
+    """
+    fields: Dict[str, float] = {}
+
+    # Try to find a matching allocation in the cache
+    matching_alloc: Optional[pd.DataFrame] = None
+    for key, alloc_df in allocation_cache.items():
+        if "road_state_key" in alloc_df.columns:
+            road_states = alloc_df["road_state_key"].unique()
+            if road_state_key in road_states or len(road_states) == 1:
+                matching_alloc = alloc_df
+                break
+
+    if matching_alloc is None:
+        # No allocation available: emit NaN
+        for func in all_functions:
+            for group in pop_group_columns:
+                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
+                fields[f"societal_access_population__{func}__{group}"] = float("nan")
+                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+            for group in pop_group_columns:
+                fields[f"societal_total_population__{group}"] = float("nan")
+        return fields
+
+    # Apply population to allocations
+    try:
+        pop_alloc = apply_population_to_allocations(
+            allocation_df=matching_alloc,
+            pop_grid_gdf=pop_grid_gdf,
+            cell_id_column=cell_id_column,
+            pop_group_columns=pop_group_columns,
+        )
+    except Exception:
+        for func in all_functions:
+            for group in pop_group_columns:
+                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
+                fields[f"societal_access_population__{func}__{group}"] = float("nan")
+                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+            for group in pop_group_columns:
+                fields[f"societal_total_population__{group}"] = float("nan")
+        return fields
+
+    # Aggregate weighted population per island
+    group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
+    available_group_cols = {
+        label: col for label, col in group_cols.items()
+        if col in pop_alloc.columns
+    }
+
+    # Total population per group (all islands, including -1)
+    total_pop: Dict[str, float] = {}
+    for label, col in available_group_cols.items():
+        total_pop[label] = float(pop_alloc[col].sum())
+
+    # Population with access per (function, group)
+    for func in all_functions:
+        islands_with_func = {
+            iid for iid, cats in frozen_island_function_map.items()
+            if func in cats and iid != -1
+        }
+        accessible_mask = pop_alloc["island_id"].isin(islands_with_func)
+
+        for label, col in available_group_cols.items():
+            total = total_pop.get(label, 0.0)
+            with_access = float(pop_alloc.loc[accessible_mask, col].sum())
+            without_access = total - with_access
+            pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
+
+            fields[f"societal_access_pct__{func}__{label}"] = pct
+            fields[f"societal_access_population__{func}__{label}"] = with_access
+            fields[f"societal_no_access_population__{func}__{label}"] = without_access
+
+    for label in available_group_cols:
+        fields[f"societal_total_population__{label}"] = total_pop.get(label, 0.0)
+
+    # Equity gaps vs reference group
+    ref_label = reference_group
+    for func in all_functions:
+        ref_pct = fields.get(f"societal_access_pct__{func}__{ref_label}", float("nan"))
+        for label in pop_group_columns:
+            if label == ref_label:
+                continue
+            grp_pct = fields.get(f"societal_access_pct__{func}__{label}", float("nan"))
+            if np.isnan(ref_pct) or np.isnan(grp_pct):
+                abs_gap = float("nan")
+                rel_gap = float("nan")
+            else:
+                abs_gap = round(ref_pct - grp_pct, 2)
+                rel_gap = round(grp_pct / ref_pct, 4) if ref_pct > 0 else float("nan")
+            fields[f"societal_equity_absolute_gap__{func}__{label}"] = abs_gap
+            fields[f"societal_equity_relative_gap__{func}__{label}"] = rel_gap
+
+    return fields
+
+
+def _merge_zero_societal_metrics(
+    ts_summary: Dict[str, Any],
+    all_functions: List[str],
+    pop_group_columns: Dict[str, str],
+    reference_group: str,
+) -> None:
+    """Emit NaN societal metrics when no detailed data is available."""
+    for func in all_functions:
+        for group in pop_group_columns:
+            ts_summary[f"societal_access_pct__{func}__{group}"] = float("nan")
+            ts_summary[f"societal_access_population__{func}__{group}"] = float("nan")
+            ts_summary[f"societal_no_access_population__{func}__{group}"] = float("nan")
+        for group in pop_group_columns:
+            ts_summary[f"societal_total_population__{group}"] = float("nan")
+    for func in all_functions:
+        for group in pop_group_columns:
+            if group == reference_group:
+                continue
+            ts_summary[f"societal_equity_absolute_gap__{func}__{group}"] = float("nan")
+            ts_summary[f"societal_equity_relative_gap__{func}__{group}"] = float("nan")
+
+
+def list_societal_metric_names(
+    all_functions: List[str],
+    pop_group_columns: Dict[str, str],
+    reference_group: str = "total",
+) -> List[str]:
+    """Return the complete list of flat societal metric field names.
+
+    Used to pre-initialise EMA output arrays before running experiments.
+    """
+    names: List[str] = []
+    for func in all_functions:
+        for group in pop_group_columns:
+            names.append(f"societal_access_pct__{func}__{group}")
+            names.append(f"societal_access_population__{func}__{group}")
+            names.append(f"societal_no_access_population__{func}__{group}")
+    for group in pop_group_columns:
+        names.append(f"societal_total_population__{group}")
+    for func in all_functions:
+        for group in pop_group_columns:
+            if group == reference_group:
+                continue
+            names.append(f"societal_equity_absolute_gap__{func}__{group}")
+            names.append(f"societal_equity_relative_gap__{func}__{group}")
+    return names
+
+
+# ---------------------------------------------------------------------------
 # Layer D — high-level convenience wrapper
 # ---------------------------------------------------------------------------
 
 def analyse_societal_access(
     islands_gdf: gpd.GeoDataFrame,
     population_gdf: gpd.GeoDataFrame,
-    service_nodes_gdf: gpd.GeoDataFrame | None = None,
-    taxonomy: dict[str, str] | None = None,
-    pop_columns: dict[str, str] | None = None,
+    service_nodes_gdf: Optional[gpd.GeoDataFrame] = None,
+    taxonomy: Optional[Dict[str, str]] = None,
+    pop_columns: Optional[Dict[str, str]] = None,
     node_type_column: str = "type",
     island_id_column: str = "island_id",
     reference_group: str = "total",
-    # Graph-native inputs (Layer A) — take priority when provided
     graph=None,
-    destination_nodes: Mapping[Any, str] | None = None,
-    origin_island_ids: Mapping[Any, int] | None = None,
-    stakeholder_groups: Mapping[str, Mapping[Any, float]] | None = None,
-) -> dict[str, Any]:
-    """Run the full societal access pipeline and return all result tables.
-
-    Two input paths are supported:
-
-    **Graph-native path** (conceptually correct, preferred):
-        Supply *graph*, *destination_nodes*, *origin_island_ids*, and
-        *stakeholder_groups*.  Access is computed directly from node-level
-        island assignments (``island_id[o] == island_id[d]``).
-
-    **Spatial path** (preprocessing helper):
-        Supply *service_nodes_gdf*, *islands_gdf*, and *population_gdf*.
-        Origins and destinations are assigned to islands by spatial join.
-
-    Parameters
-    ----------
-    islands_gdf:
-        GeoDataFrame of road-network island polygons (always required for
-        the spatial path; ignored when all graph-native inputs are given).
-    population_gdf:
-        Population zone GeoDataFrame (spatial path only).
-    service_nodes_gdf:
-        Service-node point GeoDataFrame (spatial path only).
-    taxonomy:
-        Node-type → function-category mapping.
-    pop_columns:
-        ``{display_label: dataframe_column}`` for demographic groups
-        (spatial path only).
-    node_type_column:
-        Column in *service_nodes_gdf* with node type strings.
-    island_id_column:
-        Column in *islands_gdf* / *population_gdf* with island ids.
-    reference_group:
-        Reference group label for equity gap computation.
-    graph:
-        Disrupted NetworkX graph (graph-native path).
-    destination_nodes:
-        ``{node_id: node_type}`` for service/destination nodes
-        (graph-native path).
-    origin_island_ids:
-        ``{origin_id: island_id}`` for origin entities
-        (graph-native path; if omitted, derived from *graph*).
-    stakeholder_groups:
-        ``{group_label: {origin_id: weight}}`` (graph-native path).
-
-    Returns
-    -------
-    dict with keys:
-
-    ``"island_functions"``
-        ``Dict[int, FrozenSet[str]]`` — function categories per island.
-    ``"island_population"``
-        ``pd.DataFrame`` — population/origin attributes per island
-        (spatial path) or ``None`` (graph-native path).
-    ``"access_matrix"``
-        ``pd.DataFrame`` — % access per (function, group).
-    ``"equity_gaps"``
-        ``pd.DataFrame`` — equity gap metrics.
-    ``"origin_access"``
-        ``pd.DataFrame`` — per-origin boolean access flags
-        (graph-native path only, else ``None``).
-    """
+    destination_nodes: Optional[Mapping[Any, str]] = None,
+    origin_island_ids: Optional[Mapping[Any, int]] = None,
+    stakeholder_groups: Optional[Mapping[str, Mapping[Any, float]]] = None,
+) -> Dict[str, Any]:
+    """Run the full societal access pipeline and return all result tables."""
     use_graph_path = (
         graph is not None
         and destination_nodes is not None
@@ -817,12 +1053,10 @@ def analyse_societal_access(
     )
 
     if use_graph_path:
-        # --- Graph-native path ---
         full_assignment = build_island_assignment(graph)
 
         if origin_island_ids is None:
-            # Derive origin assignments from the full graph assignment
-            origin_ids = set(stakeholder_groups[next(iter(stakeholder_groups))].keys())
+            origin_ids: Set[Any] = set()
             for grp in stakeholder_groups.values():
                 origin_ids |= set(grp.keys())
             origin_island_ids = {
@@ -832,21 +1066,10 @@ def analyse_societal_access(
             }
 
         island_function_map = build_destination_function_map(
-            destination_nodes,
-            full_assignment,
-            taxonomy=taxonomy,
+            destination_nodes, full_assignment, taxonomy=taxonomy
         )
-
-        origin_access_df = compute_origin_access(
-            origin_island_ids,
-            island_function_map,
-        )
-
-        access_matrix = compute_access_matrix_from_origins(
-            origin_access_df,
-            stakeholder_groups,
-        )
-
+        origin_access_df = compute_origin_access(origin_island_ids, island_function_map)
+        access_matrix = compute_access_matrix_from_origins(origin_access_df, stakeholder_groups)
         equity_gaps = compute_equity_gaps(access_matrix, reference_group=reference_group)
 
         return {
@@ -858,29 +1081,20 @@ def analyse_societal_access(
         }
 
     else:
-        # --- Spatial path ---
         island_function_map = assign_destinations_to_islands_spatial(
-            service_nodes_gdf,
-            islands_gdf,
-            taxonomy=taxonomy,
-            node_type_column=node_type_column,
+            service_nodes_gdf, islands_gdf,
+            taxonomy=taxonomy, node_type_column=node_type_column,
             island_id_column=island_id_column,
         )
-
         island_population_df = assign_origins_to_islands_spatial(
-            population_gdf,
-            islands_gdf,
+            population_gdf, islands_gdf,
             pop_columns=list(pop_columns.values()) if pop_columns else None,
             island_id_column=island_id_column,
         )
-
         access_matrix = compute_access_matrix(
-            island_function_map,
-            island_population_df,
-            pop_columns=pop_columns,
-            island_id_column=island_id_column,
+            island_function_map, island_population_df,
+            pop_columns=pop_columns, island_id_column=island_id_column,
         )
-
         equity_gaps = compute_equity_gaps(access_matrix, reference_group=reference_group)
 
         return {

@@ -1197,7 +1197,8 @@ def simulate_asset_damage_recovery_access_breakdown(
     l1_active_timesteps=None,
     l2_asset_geojson=None,
     l2_active_timesteps=None,
-    repair_crews_by_asset_type=None
+    repair_crews_by_asset_type=None,
+    societal_access_config=None,
     ):
     """
     Runs a time-stepped simulation of asset damage and recovery, considering hazard exposure, accessibility, and repair crew assignment.
@@ -1450,6 +1451,35 @@ def simulate_asset_damage_recovery_access_breakdown(
 
     # 9. Save config (optional)
     #_save_config_file(output_dir, root_dir, execution_id)
+
+    # --- Societal access postprocessing (optional) ---
+    if societal_access_config is not None and timestep_output:
+        try:
+            from src.societal_access import postprocess_societal_access_results
+            _sa_cfg = societal_access_config
+            results, alloc_cache_updated = postprocess_societal_access_results(
+                summary_results=results,
+                detailed_results=timestep_results,
+                gdf_assets=gdf_assets,
+                pop_grid_gdf=_sa_cfg.get("pop_grid_gdf"),
+                cell_id_column=_sa_cfg.get("cell_id_column", "cell_id"),
+                pop_group_columns=_sa_cfg.get("pop_group_columns"),
+                taxonomy=_sa_cfg.get("taxonomy"),
+                asset_type_column=_sa_cfg.get("asset_type_column", "type"),
+                asset_id_column=_sa_cfg.get("asset_id_column"),
+                allocation_cache=_sa_cfg.get("allocation_cache", {}),
+                all_functions=_sa_cfg.get("all_functions"),
+                reference_group=_sa_cfg.get("reference_group", "total"),
+                nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
+            )
+            cache_updated["societal_allocation_cache"] = alloc_cache_updated
+        except Exception as _sa_err:
+            import warnings
+            warnings.warn(
+                f"Societal access postprocessing failed and was skipped: {_sa_err}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # Create output list format consistent with original function
     if results and state.simulation_warnings:
