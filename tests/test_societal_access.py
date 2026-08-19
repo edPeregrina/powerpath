@@ -505,3 +505,163 @@ def test_list_societal_metric_names_contains_expected_patterns():
     assert "societal_access_pct__health__total" in names
     assert "societal_total_population__elderly" in names
     assert "societal_equity_absolute_gap__health__elderly" in names
+
+
+# ---------------------------------------------------------------------------
+# MSLS-only electricity access tests
+# ---------------------------------------------------------------------------
+
+def _make_mixed_assets_gdf():
+    """Assets with LS, MS, and MSLS types."""
+    return gpd.GeoDataFrame(
+        {"type": ["ls", "ms", "msls", "msls"]},
+        geometry=[Point(1, 1), Point(12, 1), Point(3, 3), Point(14, 3)],
+        crs="EPSG:28992",
+    )
+
+
+def test_ls_and_ms_assets_do_not_provide_electricity_access():
+    """LS and MS assets must not contribute electricity access."""
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+
+    # Only LS and MS assets — no MSLS
+    ls_ms_assets = gpd.GeoDataFrame(
+        {"type": ["ls", "ms"]},
+        geometry=[Point(1, 1), Point(12, 1)],
+        crs="EPSG:28992",
+    )
+
+    # Filter to msls only (empty)
+    msls_services = ls_ms_assets.loc[ls_ms_assets["type"].eq("msls"), ["type", "geometry"]].copy()
+    assert msls_services.empty
+
+    allocation_df = build_origin_island_allocations(
+        pop,
+        cell_id_column="cell_id",
+        islands_gdf=islands,
+        road_state_key="roads_ls_ms",
+    )
+    allocation_with_pop = apply_population_to_allocations(allocation_df, pop, "cell_id")
+
+    # island_function_map is empty because no msls assets exist
+    island_function_map = {}
+
+    access = compute_access_matrix(
+        island_function_map=island_function_map,
+        island_population_df=allocation_with_pop,
+        pop_columns={"total": "aantal_inwoners"},
+        island_id_column="island_id",
+        all_functions=["electricity"],
+    )
+
+    assert access.loc["electricity", "total"] == 0.0
+
+
+def test_operational_msls_provides_electricity_access():
+    """Operational MSLS assets grant electricity access to their road island."""
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+    allocation_df = build_origin_island_allocations(
+        pop,
+        cell_id_column="cell_id",
+        islands_gdf=islands,
+        road_state_key="roads_ok",
+    )
+    cache = {}
+    get_or_build_allocation(cache, pop, "cell_id", islands, road_state_key="roads_ok")
+
+    assets = _make_mixed_assets_gdf()
+    summary = [{"timestep": 0, "map": 0}]
+    detailed = [{
+        "timestep": 0,
+        "map": 0,
+        "road_state_key": "roads_ok",
+        "operational": np.array([False, False, True, True]),  # only msls operational
+        "island_id": np.array([1, 2, 1, 2]),
+    }]
+
+    updated, _ = postprocess_societal_access_results(
+        summary_results=summary,
+        detailed_results=detailed,
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=cache,
+        taxonomy={"msls": "electricity"},
+        asset_type_column="type",
+        all_functions=["electricity"],
+    )
+
+    # Both islands have an operational MSLS asset, so all allocated population has access
+    assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(100.0, abs=0.01)
+
+
+def test_failed_msls_assets_remove_electricity_access():
+    """When MSLS assets are non-operational, electricity access drops to zero."""
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+    cache = {}
+    get_or_build_allocation(cache, pop, "cell_id", islands, road_state_key="roads_fail")
+
+    assets = _make_mixed_assets_gdf()
+    summary = [{"timestep": 0, "map": 0}]
+    detailed = [{
+        "timestep": 0,
+        "map": 0,
+        "road_state_key": "roads_fail",
+        "operational": np.array([False, False, False, False]),  # all failed
+        "island_id": np.array([1, 2, 1, 2]),
+    }]
+
+    updated, _ = postprocess_societal_access_results(
+        summary_results=summary,
+        detailed_results=detailed,
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=cache,
+        taxonomy={"msls": "electricity"},
+        asset_type_column="type",
+        all_functions=["electricity"],
+    )
+
+    assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(0.0)
+
+
+def test_electricity_metric_present_when_all_msls_providers_fail():
+    """The 'electricity' key must be present even when every MSLS provider is down."""
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+    cache = {}
+    get_or_build_allocation(cache, pop, "cell_id", islands, road_state_key="roads_all_fail")
+
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls"]},
+        geometry=[Point(5, 5)],
+        crs="EPSG:28992",
+    )
+    summary = [{"timestep": 0, "map": 0}]
+    detailed = [{
+        "timestep": 0,
+        "map": 0,
+        "road_state_key": "roads_all_fail",
+        "operational": np.array([False]),
+        "island_id": np.array([1]),
+    }]
+
+    updated, _ = postprocess_societal_access_results(
+        summary_results=summary,
+        detailed_results=detailed,
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=cache,
+        taxonomy={"msls": "electricity"},
+        asset_type_column="type",
+        all_functions=["electricity"],
+    )
+
+    row = updated[0]
+    assert "societal_access_pct__electricity__total" in row
+    assert row["societal_access_pct__electricity__total"] == pytest.approx(0.0)
