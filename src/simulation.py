@@ -1075,6 +1075,14 @@ def simulate_asset_damage_recovery_access_breakdown(
                 allocation_cache = load_societal_allocation_cache(
                     interim_dir, hazard_dir
                 )
+            # Build islands_gdf_cache from island_cache entries that store
+            # island geometry (populated when islands_gdf was computed during
+            # the simulation loop).
+            islands_gdf_cache = {
+                key: entry["islands_gdf"]
+                for key, entry in island_cache.items()
+                if isinstance(entry, dict) and "islands_gdf" in entry
+            } if island_cache else {}
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
@@ -1089,6 +1097,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
+                islands_gdf_cache=islands_gdf_cache or None,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:
