@@ -733,6 +733,7 @@ def postprocess_societal_access_results(
     all_functions: Optional[List[str]] = None,
     reference_group: str = "total",
     nearest_max_distance: float = 200.0,
+    islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -786,6 +787,12 @@ def postprocess_societal_access_results(
         Reference group for equity gap computation.
     nearest_max_distance:
         Nearest-island fallback maximum distance for allocation.
+    islands_gdf_cache:
+        Dict mapping each ``road_state_key`` to its island GeoDataFrame (road
+        segments with ``island_id`` and geometry).  When provided, allocations
+        are built deterministically via :func:`get_or_build_allocation` for
+        every road state encountered.  When ``None``, the legacy metadata-scan
+        path is used as a backward-compatible fallback.
 
     Returns
     -------
@@ -825,7 +832,7 @@ def postprocess_societal_access_results(
         ts_detail = detailed_by_ts.get(ts)
 
         if ts_detail is None:
-            # No detailed data → emit zeros
+            # No detailed data → emit NaN
             _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
             continue
 
@@ -852,40 +859,61 @@ def postprocess_societal_access_results(
             iid: frozenset(cats) for iid, cats in island_function_map.items()
         }
 
-        # Retrieve/build geometry-only allocation
-        road_state_key = str(
-            ts_detail.get("road_state_key") or ts_detail.get("map", ts)
-        )
+        # Strict road_state_key resolution — no fallback to map index.
+        # Falling back to the map counter would silently reuse the baseline
+        # topology for adapted states that happen to share the same counter.
+        road_state_key_raw = ts_detail.get("road_state_key")
+        if not road_state_key_raw:
+            warnings.warn(
+                f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
+                "Ensure the simulation records road_state_key in its timestep detail.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+            continue
+        road_state_key = str(road_state_key_raw)
 
-        # We need an islands_gdf to compute the allocation.
-        # Build a minimal one from the unique island IDs seen in detailed results.
-        # If no island geometry is available, fall back to island-ID-only path.
-        unique_island_ids = np.unique(island_ids[island_ids >= 0])
+        # Resolve allocation_df — deterministic path when islands_gdf_cache is
+        # available, legacy metadata-scan path otherwise (backward compat).
+        if islands_gdf_cache is not None:
+            islands_gdf = islands_gdf_cache.get(road_state_key)
+            if islands_gdf is None:
+                warnings.warn(
+                    f"Timestep {ts}: no islands_gdf found for road_state_key "
+                    f"'{road_state_key}'; emitting NaN societal metrics. "
+                    "Ensure island_cache entries include islands_gdf.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
+            allocation_df, _, _ = get_or_build_allocation(
+                allocation_cache,
+                pop_grid_gdf,
+                cell_id_column,
+                islands_gdf,
+                island_id_column,
+                nearest_max_distance=nearest_max_distance,
+                road_state_key=road_state_key,
+            )
+        else:
+            allocation_df = _find_allocation_in_cache(
+                allocation_cache,
+                pop_grid_gdf,
+                cell_id_column,
+                road_state_key,
+                nearest_max_distance,
+            )
 
-        # Build population-weighted access using allocation approach.
-        # We use the simplified path: assign each pop cell to one island based on
-        # the island IDs from the asset detail, building a synthetic islands gdf
-        # from pop_grid centroids is complex; use a direct numeric path instead.
-
-        # Direct path: for each pop cell, determine which island(s) it belongs to
-        # using stored allocation or build from scratch.
-        # Since we may not have island geometries here, use a simplified approach:
-        # treat each cell as fully assigned to one island via nearest provider logic.
-        # The full spatial allocation requires islands_gdf; callers should use
-        # the `societal_access_config` dict which carries the needed data.
-        # Here we fall back to a simplified scalar computation per island.
-
-        # Compute pop metrics per island from pop_grid
         societal_fields = _compute_societal_scalars(
             frozen_island_function_map=frozen_island_function_map,
+            allocation_df=allocation_df,
             pop_grid_gdf=pop_grid_gdf,
             cell_id_column=cell_id_column,
             pop_group_columns=pop_group_columns,
             all_functions=all_functions,
             reference_group=reference_group,
-            allocation_cache=allocation_cache,
-            road_state_key=road_state_key,
-            nearest_max_distance=nearest_max_distance,
         )
 
         ts_summary.update(societal_fields)
@@ -893,28 +921,20 @@ def postprocess_societal_access_results(
     return summary_results, allocation_cache
 
 
-def _compute_societal_scalars(
-    frozen_island_function_map: Dict[int, FrozenSet[str]],
+def _find_allocation_in_cache(
+    allocation_cache: Dict[str, pd.DataFrame],
     pop_grid_gdf: gpd.GeoDataFrame,
     cell_id_column: str,
-    pop_group_columns: Dict[str, str],
-    all_functions: List[str],
-    reference_group: str,
-    allocation_cache: Dict[str, pd.DataFrame],
     road_state_key: str,
     nearest_max_distance: float,
-) -> Dict[str, float]:
-    """Compute flat societal metric scalars for one timestep.
+) -> Optional[pd.DataFrame]:
+    """Scan *allocation_cache* for an entry matching all metadata fields.
 
-    Uses allocation fractions from *allocation_cache* if available; otherwise
-    treats each population cell as fully allocated to a single island using a
-    pre-built (island_id → weighted_population) mapping derived from cached
-    allocations.
-
-    Returns a dict of flat metric names → scalar values.
+    This is the legacy (backward-compatible) lookup path used when no
+    ``islands_gdf_cache`` is provided to
+    :func:`postprocess_societal_access_results`.  Returns ``None`` when no
+    unique matching entry is found.
     """
-    fields: Dict[str, float] = {}
-
     expected_metadata = {
         "population_grid_hash": _geometry_hash(pop_grid_gdf),
         "cell_id_column": cell_id_column,
@@ -923,48 +943,77 @@ def _compute_societal_scalars(
         "road_state_key": road_state_key,
         "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
     }
+    matching = [
+        df for df in allocation_cache.values()
+        if all(df.attrs.get(k) == v for k, v in expected_metadata.items())
+    ]
+    return matching[0] if len(matching) == 1 else None
 
-    # Try to find an allocation matching both the road state and grid inputs.
-    matching_allocations: list[pd.DataFrame] = []
-    for alloc_df in allocation_cache.values():
-        if all(
-            alloc_df.attrs.get(name) == value
-            for name, value in expected_metadata.items()
-        ):
-            matching_allocations.append(alloc_df)
 
-    matching_alloc = (
-        matching_allocations[0] if len(matching_allocations) == 1 else None
-    )
+def _compute_societal_scalars(
+    frozen_island_function_map: Dict[int, FrozenSet[str]],
+    allocation_df: Optional[pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Dict[str, str],
+    all_functions: List[str],
+    reference_group: str,
+) -> Dict[str, float]:
+    """Compute flat societal metric scalars for one timestep.
 
-    if matching_alloc is None:
-        # No allocation available: emit NaN
+    Parameters
+    ----------
+    frozen_island_function_map:
+        Mapping of island_id → frozenset of function categories supplied by
+        operational providers on that island.
+    allocation_df:
+        Pre-built (or freshly built) population-cell → island allocation
+        DataFrame.  When ``None``, all output metrics are emitted as NaN.
+    pop_grid_gdf:
+        Population grid GeoDataFrame used to apply demographic weights.
+    cell_id_column:
+        Stable identifier column in *pop_grid_gdf*.
+    pop_group_columns:
+        ``{label: column_name}`` demographic mapping.
+    all_functions:
+        Complete list of function categories to emit.
+    reference_group:
+        Reference group for equity-gap computation.
+
+    Returns a dict of flat metric names → scalar values.
+    """
+    fields: Dict[str, float] = {}
+
+    def _emit_nan() -> Dict[str, float]:
+        nan_fields: Dict[str, float] = {}
         for func in all_functions:
             for group in pop_group_columns:
-                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
-                fields[f"societal_access_population__{func}__{group}"] = float("nan")
-                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_access_pct__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_access_population__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+        for group in pop_group_columns:
+            nan_fields[f"societal_total_population__{group}"] = float("nan")
+        for func in all_functions:
             for group in pop_group_columns:
-                fields[f"societal_total_population__{group}"] = float("nan")
-        return fields
+                if group == reference_group:
+                    continue
+                nan_fields[f"societal_equity_absolute_gap__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_equity_relative_gap__{func}__{group}"] = float("nan")
+        return nan_fields
+
+    if allocation_df is None:
+        return _emit_nan()
 
     # Apply population to allocations
     try:
         pop_alloc = apply_population_to_allocations(
-            allocation_df=matching_alloc,
+            allocation_df=allocation_df,
             pop_grid_gdf=pop_grid_gdf,
             cell_id_column=cell_id_column,
             pop_group_columns=pop_group_columns,
         )
     except Exception:
-        for func in all_functions:
-            for group in pop_group_columns:
-                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
-                fields[f"societal_access_population__{func}__{group}"] = float("nan")
-                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
-            for group in pop_group_columns:
-                fields[f"societal_total_population__{group}"] = float("nan")
-        return fields
+        return _emit_nan()
 
     # Aggregate weighted population per island
     group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
