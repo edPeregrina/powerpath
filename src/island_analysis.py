@@ -26,17 +26,29 @@ from tqdm import tqdm
 tqdm.pandas()
 
 
+def _load_pickle_cache(path):
+    if not path.exists():
+        return {}
+    try:
+        with open(path, 'rb') as cache_file:
+            return pickle.load(cache_file)
+    except Exception as exc:
+        print(f"Ignoring unreadable cache {path}: {exc}")
+        return {}
+
+
 def compute_island_geodataframe_from_graph(
     graph_pickle_path: str, 
     hazard_threshold: float, 
     hazard_column: str, 
     buffer_distance: float = 2.5, 
     verbose: bool = False,
-    l1_area_geojson=None  
+    l1_area_geojson=None,
+    l2_asset_geojson=None,
 ) -> gpd.GeoDataFrame:
     """
     Create GeoDataFrame from graph with buffered road geometries.
-    Applies L1 adaptations before filtering if provided.
+    Applies active L1/L2 road adaptations before filtering if provided.
     """
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
@@ -46,6 +58,7 @@ def compute_island_geodataframe_from_graph(
     G = filter_hazard_graph(
         G, hazard_threshold, hazard_column, 
         l1_area_geojson=l1_area_geojson,
+        l2_asset_geojson=l2_asset_geojson,
         verbose=verbose
     )
 
@@ -173,7 +186,8 @@ def compute_island_geodataframe_from_graph(
 
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
-                       l1_area_geojson=None):  
+                       l1_area_geojson=None, l1_active_timesteps=None,
+                       l2_asset_geojson=None, l2_active_timesteps=None):
     """
     Assign each asset in temp_gdf to the closest road section in islands_gdf using spatial index. 
     This step is executed at initialization only since the access rfid is an attribute of the graph that does not change.
@@ -188,27 +202,40 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
     asset_access_cache_path = _config['interim_dir'] / 'asset_access_rfid.pkl'
     road_segment_lengths_cache_path = _config['interim_dir'] / 'road_segment_lengths.pkl'
     asset_hash = get_asset_centroid_hash(temp_gdf)
+    road_state_key = create_island_cache_key(
+        hazard_column,
+        hazard_threshold,
+        asset_hash,
+        l1_area_geojson=l1_area_geojson,
+        l1_active_timesteps=l1_active_timesteps,
+        l2_asset_geojson=l2_asset_geojson,
+        l2_active_timesteps=l2_active_timesteps,
+    )
 
     # Check if cached or initialize empty dictionaries
     def load_or_init(path):
-        return pickle.load(open(path, 'rb')) if path.exists() else {}
+        return _load_pickle_cache(path)
 
     boundary_assets_dict = load_or_init(boundary_assets_cache_path)
     access_assets_dict = load_or_init(asset_access_cache_path)
-
-    # Load boundary islands and road segment lengths (these are not per asset set)
-    boundary_islands_rfids = pickle.load(open(boundary_islands_cache_path, 'rb')) if boundary_islands_cache_path.exists() else None
-    rfids_lengths = pickle.load(open(road_segment_lengths_cache_path, 'rb')) if road_segment_lengths_cache_path.exists() else None
+    boundary_islands_dict = load_or_init(boundary_islands_cache_path)
+    rfids_lengths_dict = load_or_init(road_segment_lengths_cache_path)
+    if not isinstance(boundary_islands_dict, dict):
+        boundary_islands_dict = {}
+    if rfids_lengths_dict and not isinstance(next(iter(rfids_lengths_dict.values())), dict):
+        rfids_lengths_dict = {}
 
     # Check if all required cached values exist for this asset set
-    has_boundary = asset_hash in boundary_assets_dict
-    has_access = asset_hash in access_assets_dict
-    has_islands = boundary_islands_rfids is not None
-    has_lengths = rfids_lengths is not None
+    has_boundary = road_state_key in boundary_assets_dict
+    has_access = road_state_key in access_assets_dict
+    has_islands = road_state_key in boundary_islands_dict
+    has_lengths = road_state_key in rfids_lengths_dict
 
     if has_boundary and has_access and has_islands and has_lengths:
-        boundary_asset_indices = boundary_assets_dict[asset_hash]
-        access_rfids = access_assets_dict[asset_hash]
+        boundary_asset_indices = boundary_assets_dict[road_state_key]
+        access_rfids = access_assets_dict[road_state_key]
+        boundary_islands_rfids = boundary_islands_dict[road_state_key]
+        rfids_lengths = rfids_lengths_dict[road_state_key]
         return access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths
 
     # If not cached, compute from scratch
@@ -221,7 +248,8 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
             hazard_column=hazard_column, 
             buffer_distance=20, 
             verbose=verbose,
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=l1_area_geojson,
+            l2_asset_geojson=l2_asset_geojson,
         )
         rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
 
@@ -314,19 +342,21 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
         
         # Pickle for future use
-        boundary_assets_dict[asset_hash] = boundary_asset_indices
+        boundary_assets_dict[road_state_key] = boundary_asset_indices
         with open(boundary_assets_cache_path, 'wb') as f:
             pickle.dump(boundary_assets_dict, f)
 
+        boundary_islands_dict[road_state_key] = boundary_islands_rfids
         with open(boundary_islands_cache_path, 'wb') as f:
-            pickle.dump(boundary_islands_rfids, f)
+            pickle.dump(boundary_islands_dict, f)
 
-        access_assets_dict[asset_hash] = temp_gdf['access_rfid']
+        access_assets_dict[road_state_key] = temp_gdf['access_rfid']
         with open(asset_access_cache_path, 'wb') as f:
             pickle.dump(access_assets_dict, f)
 
+        rfids_lengths_dict[road_state_key] = rfids_lengths
         with open(road_segment_lengths_cache_path, 'wb') as f:
-            pickle.dump(rfids_lengths, f)
+            pickle.dump(rfids_lengths_dict, f)
 
         if verbose:
             print(f"Cached {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
@@ -342,7 +372,8 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
 def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, 
                             hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
                             island_cache=None, cache_dir=None, hazard_dir=None,
-                            l1_area_geojson=None, l1_active_timesteps=None):
+                            l1_area_geojson=None, l1_active_timesteps=None,
+                            l2_asset_geojson=None, l2_active_timesteps=None):
        
     """
     Match assets to island IDs based on spatial intersection with road network islands.
@@ -354,37 +385,42 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         _config = config    
     verbose = _config['simulation_config']['verbose']
     asset_hash = get_asset_centroid_hash(temp_gdf)
-    
-    # Create cache key 
-    if island_cache is not None and cache_dir is not None: 
-        cache_key = create_island_cache_key(
-            hazard_column, 
-            hazard_threshold, 
-            asset_hash,
-            l1_area_geojson=l1_area_geojson, 
-            l1_active_timesteps=l1_active_timesteps  
-        )
-        
-        # Check if this computation is already cached
-        if cache_key in island_cache:
-            if verbose:
-                print(f"Using cached island assignment for {cache_key}")
-            return island_cache[cache_key]['island_ids'], island_cache[cache_key]['rfids_islands']
+    cache_key = create_island_cache_key(
+        hazard_column,
+        hazard_threshold,
+        asset_hash,
+        l1_area_geojson=l1_area_geojson,
+        l1_active_timesteps=l1_active_timesteps,
+        l2_asset_geojson=l2_asset_geojson,
+        l2_active_timesteps=l2_active_timesteps,
+    )
+
+    # Check if this computation is already cached
+    if (
+        island_cache is not None
+        and cache_dir is not None
+        and cache_key in island_cache
+    ):
+        if verbose:
+            print(f"Using cached island assignment for {cache_key}")
+        return island_cache[cache_key]['island_ids'], island_cache[cache_key]['rfids_islands']
 
     if boundary_asset_indices is None or boundary_islands_rfids is None: 
         boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
         boundary_islands_cache_path = _config['interim_dir'] / 'boundary_islands.pkl'
         # Load or initialize cache dicts
-        with open(boundary_assets_cache_path, 'rb') as f:
-            boundary_assets_dict = pickle.load(f)
-        if asset_hash in boundary_assets_dict:
-            boundary_asset_indices = boundary_assets_dict[asset_hash]
+        boundary_assets_dict = _load_pickle_cache(boundary_assets_cache_path)
+        if cache_key in boundary_assets_dict:
+            boundary_asset_indices = boundary_assets_dict[cache_key]
         else:
             print(f"Boundary asset indices not provided and not found in cache for asset hash {asset_hash}.")
             return None, None
 
-        with open(boundary_islands_cache_path, 'rb') as f:
-            boundary_islands_rfids = pickle.load(f)
+        boundary_islands_dict = _load_pickle_cache(boundary_islands_cache_path)
+        if not isinstance(boundary_islands_dict, dict) or cache_key not in boundary_islands_dict:
+            print(f"Boundary islands not found in cache for road state {cache_key}.")
+            return None, None
+        boundary_islands_rfids = boundary_islands_dict[cache_key]
 
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / f'base_graph_hazard_editted.p'
@@ -395,7 +431,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             hazard_column=hazard_column, 
             buffer_distance=20, 
             verbose=verbose,
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=l1_area_geojson,
+            l2_asset_geojson=l2_asset_geojson,
         )
 
         # Drop the boundary rfids and find the main island

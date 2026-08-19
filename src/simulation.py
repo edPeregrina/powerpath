@@ -8,7 +8,13 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-from src.caching import load_accessibility_cache, load_island_cache, load_overlap_cache, load_hazard_extraction_cache, save_accessibility_cache, save_overlap_cache, save_hazard_extraction_cache
+from src.caching import (
+    load_accessibility_cache,
+    load_hazard_extraction_cache,
+    load_island_cache,
+    load_overlap_cache,
+    load_societal_allocation_cache,
+)
 from src.island_analysis import match_island_ids_assets, match_assets_access, update_repair_crew_islands, compute_island_geodataframe_from_graph
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.damage_recovery import default_damage_ratio_function, default_repair_time_function, vectorized_damage_ratio_solver, default_fragility_function
@@ -21,6 +27,15 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config import get_config
 from shutil import copyfile
 
+
+def _get_active_adaptation(adaptation, active_timesteps, timestep):
+    if adaptation is None:
+        return None
+    if active_timesteps is None or timestep in active_timesteps:
+        return adaptation
+    return None
+
+
 class SimulationState:
     def __init__(self, gdf_assets, num_assets):
         self.previous_map_counter = None
@@ -32,6 +47,7 @@ class SimulationState:
         self.repair_crews_assigned = np.zeros(num_assets, dtype=bool)
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
+        self.road_state_key = None
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -40,7 +56,8 @@ def _update_hazard_map_states(
     hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
-    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
+    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None,
+    l1_active_timesteps=None, l2_asset_geojson=None, l2_active_timesteps=None
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -69,6 +86,8 @@ def _update_hazard_map_states(
         depth_reductions (np.ndarray or None): 2D array of flood depth reductions
         l1_area_geojson (str or GeoDataFrame or None): Path to L1 adaptation GeoJSON or GeoDataFrame, if applicable
         l1_active_timesteps (list or None): List of timesteps when L1 adaptation is active, or None for all timesteps
+        l2_asset_geojson (str or GeoDataFrame or None): Path to L2 adaptation GeoJSON or GeoDataFrame, if applicable
+        l2_active_timesteps (list or None): List of timesteps when L2 adaptation is active, or None for all timesteps
 
     Returns:
         tuple: Updated available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated (dictionary of updated caches)
@@ -121,13 +140,23 @@ def _update_hazard_map_states(
     if 'island' in repair_crew_assignment_method:
         assert isinstance(available_repair_crews, dict), f"Island method requires dict of recpair crews at this point, got {type(available_repair_crews)}"
         asset_hash = get_asset_centroid_hash(temp_gdf)
+        previous_road_state_key = state.road_state_key
+        active_l1_area_geojson = _get_active_adaptation(
+            l1_area_geojson, l1_active_timesteps, timestep
+        )
+        active_l2_asset_geojson = _get_active_adaptation(
+            l2_asset_geojson, l2_active_timesteps, timestep
+        )
         cache_key = create_island_cache_key(
             haz_col_str, 
             flood_threshold, 
             asset_hash,
-            l1_area_geojson=l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps
+            l1_area_geojson=active_l1_area_geojson,
+            l1_active_timesteps=l1_active_timesteps,
+            l2_asset_geojson=active_l2_asset_geojson,
+            l2_active_timesteps=l2_active_timesteps,
         )
+        state.road_state_key = cache_key
         if cache_key in island_cache:
             island_data = island_cache[cache_key]
             state.island_ids = island_data['island_ids']
@@ -149,9 +178,13 @@ def _update_hazard_map_states(
                     island_cache=island_cache,
                     cache_dir=interim_dir,
                     hazard_dir=hazard_dir,
-                    l1_area_geojson=l1_area_geojson,
-                    l1_active_timesteps=l1_active_timesteps  
+                    l1_area_geojson=active_l1_area_geojson,
+                    l1_active_timesteps=l1_active_timesteps,
+                    l2_asset_geojson=active_l2_asset_geojson,
+                    l2_active_timesteps=l2_active_timesteps,
                 )
+                if asset_island_ids is None or rfids_islands is None:
+                    raise RuntimeError("Island assignment returned no road state")
                 state.island_ids = asset_island_ids
                 # Assign island for each asset for the current state
                 cache_updated['island_cache'] = island_cache
@@ -160,13 +193,10 @@ def _update_hazard_map_states(
                 print(f"Error computing islands for {cache_key}: {e}")
                 print("Falling back to simple island assignment")
                 state.island_ids = np.ones(num_assets, dtype=int)
+                state.road_state_key = None
                 rfids_islands = None
        
         if rfids_islands is not None:
-            # Determine previous map string if available
-            previous_map_str = f'EV{previous_map_counter}_ma' if previous_map_counter is not None else None
-            current_map_str = haz_col_str  # Already defined as f'EV{map_counter}_ma'
-            
             # Call with all caching parameters
             available_repair_crews = update_repair_crew_islands(
                 available_repair_crews,
@@ -175,14 +205,12 @@ def _update_hazard_map_states(
                 rfids_lengths,
                 verbose=verbose,
                 overlap_cache=overlap_cache,
-                current_map=current_map_str,
-                previous_map=previous_map_str,
+                current_map=cache_key,
+                previous_map=previous_road_state_key,
                 hazard_threshold=flood_threshold,
                 hazard_dir=hazard_dir,
                 _config=_config,
                 cache_updated=cache_updated,
-                l1_area_geojson=l1_area_geojson,
-                l1_active_timesteps=l1_active_timesteps
             )
 
             previous_map_counter = map_counter
@@ -548,13 +576,17 @@ def _initialize_simulation(
     if l1_area_geojson is not None or l2_asset_geojson is not None:
         # Create cache key
         cache_key = (
-            str(l1_area_geojson) if l1_area_geojson else 'no_l1',
-            tuple(l1_active_timesteps) if l1_active_timesteps else (),
-            str(l2_asset_geojson) if l2_asset_geojson else 'no_l2',
-            tuple(l2_active_timesteps) if l2_active_timesteps else (),
+            create_island_cache_key(
+                "depth_reduction",
+                0,
+                f"n{len(gdf_assets)}",
+                l1_area_geojson=l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
+                l2_asset_geojson=l2_asset_geojson,
+                l2_active_timesteps=l2_active_timesteps,
+            ),
             len(hazard_maps),
             major_timestep,
-            len(gdf_assets)
         )
         
         # Check cache first
@@ -627,7 +659,8 @@ def _process_timestep(
     boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
     available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
-    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None
+    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
+    l2_asset_geojson=None, l2_active_timesteps=None
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -641,7 +674,9 @@ def _process_timestep(
             fragility_param_k=fragility_param_k, 
             depth_reductions=depth_reductions,  
             l1_area_geojson=l1_area_geojson, 
-            l1_active_timesteps=l1_active_timesteps
+            l1_active_timesteps=l1_active_timesteps,
+            l2_asset_geojson=l2_asset_geojson,
+            l2_active_timesteps=l2_active_timesteps,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -756,7 +791,8 @@ def _collect_timestep_metrics(
         'flooded': flooded_mask.astype(int).copy(),
         'crew_assigned': state.repair_crews_assigned.astype(int).copy(),
         'hazard_value': state.current_hazard_values.copy(),
-        'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int)
+        'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int),
+        'road_state_key': state.road_state_key,
     }
     damaged_assets_mask = state.damage_ratio > damage_threshold
     repair_needed_mask = state.repair_time > repair_threshold
@@ -843,8 +879,13 @@ def simulate_asset_damage_recovery_access_breakdown(
         l1_area_geojson (GeoDataFrame or str, optional): GeoJSON defining L1 adaptation areas.
         l1_active_timesteps (list[int], optional): Timesteps when L1 adaptation is
             active (in hours).
-        l2_asset_depth_red (dict, optional): Mapping of timesteps to lists of tuples
-            (asset_index, depth_reduction) for L2 adaptation measures.
+        l2_asset_geojson (GeoDataFrame or str, optional): GeoJSON defining L2
+            asset-level adaptation measures.
+        l2_active_timesteps (list[int], optional): Timesteps when L2 adaptation
+            measures are active (in hours).
+        societal_access_config (dict, optional): Societal-access inputs. If its
+            allocation cache is omitted, the hazard-scoped interim pickle is
+            loaded automatically.
 
     Returns:
         tuple:
@@ -908,7 +949,14 @@ def simulate_asset_damage_recovery_access_breakdown(
             island_cache=island_cache, 
             cache_dir=interim_dir, 
             hazard_dir=hazard_dir,
-            l1_area_geojson=l1_area_geojson  
+            l1_area_geojson=_get_active_adaptation(
+                l1_area_geojson, l1_active_timesteps, 0
+            ),
+            l1_active_timesteps=l1_active_timesteps,
+            l2_asset_geojson=_get_active_adaptation(
+                l2_asset_geojson, l2_active_timesteps, 0
+            ),
+            l2_active_timesteps=l2_active_timesteps,
         )
         gdf_assets['access_rfid'] = access_rfids
         if isinstance(number_repair_crews, int):
@@ -949,7 +997,9 @@ def simulate_asset_damage_recovery_access_breakdown(
             num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
             depth_reductions=depth_reductions,
             l1_area_geojson=l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps
+            l1_active_timesteps=l1_active_timesteps,
+            l2_asset_geojson=l2_asset_geojson,
+            l2_active_timesteps=l2_active_timesteps,
         )
         
         # Merge cache updates
@@ -1020,6 +1070,11 @@ def simulate_asset_damage_recovery_access_breakdown(
         try:
             from src.societal_access import postprocess_societal_access_results
             _sa_cfg = societal_access_config
+            allocation_cache = _sa_cfg.get("allocation_cache")
+            if allocation_cache is None:
+                allocation_cache = load_societal_allocation_cache(
+                    interim_dir, hazard_dir
+                )
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
@@ -1030,7 +1085,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 taxonomy=_sa_cfg.get("taxonomy"),
                 asset_type_column=_sa_cfg.get("asset_type_column", "type"),
                 asset_id_column=_sa_cfg.get("asset_id_column"),
-                allocation_cache=_sa_cfg.get("allocation_cache", {}),
+                allocation_cache=allocation_cache,
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
@@ -1056,4 +1111,3 @@ def simulate_asset_damage_recovery_access_breakdown(
         'accessible': state.accessible,
         'repair_crews_assigned': state.repair_crews_assigned
     }, cache_updated
-

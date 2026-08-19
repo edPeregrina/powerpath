@@ -405,11 +405,19 @@ def compute_equity_gaps(
 
 def _geometry_hash(gdf: gpd.GeoDataFrame) -> str:
     """Deterministic hash of a GeoDataFrame geometry column."""
-    wkb_bytes = b"".join(
-        geom.wkb if geom is not None else b"null"
-        for geom in gdf.geometry
-    )
-    return hashlib.sha256(wkb_bytes).hexdigest()[:16]
+    digest = hashlib.sha256()
+    digest.update(str(gdf.crs).encode())
+    for geom in gdf.geometry:
+        digest.update(geom.wkb if geom is not None else b"null")
+    return digest.hexdigest()[:16]
+
+
+def _column_hash(df: pd.DataFrame, column: str) -> str:
+    """Deterministic hash of a cache-relevant identifier column."""
+    digest = hashlib.sha256()
+    for value in df[column]:
+        digest.update(f"{type(value).__name__}:{value!r}\0".encode())
+    return digest.hexdigest()[:16]
 
 
 def build_allocation_cache_key(
@@ -431,10 +439,12 @@ def build_allocation_cache_key(
     key_dict: Dict[str, Any] = {
         "pop_grid_hash": _geometry_hash(pop_grid_gdf),
         "cell_id_column": cell_id_column,
+        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
         "islands_hash": _geometry_hash(islands_gdf),
         "island_id_column": island_id_column,
+        "island_id_hash": _column_hash(islands_gdf, island_id_column),
         "nearest_max_distance": nearest_max_distance,
-        "road_state_key": road_state_key,
+        "road_state_key": str(road_state_key),
         "algorithm_version": algorithm_version,
     }
     if extra:
@@ -507,8 +517,8 @@ def build_origin_island_allocations(
         Maximum distance (CRS units, typically metres) for nearest-island
         fallback assignment.
     road_state_key:
-        Provenance string identifying the road disruption state that produced
-        these islands.
+        Island cache key identifying the road disruption and adaptation state
+        that produced these islands.
 
     Returns
     -------
@@ -517,6 +527,7 @@ def build_origin_island_allocations(
         ``allocation_method``, ``road_state_key``,
         ``allocation_algorithm_version``.
     """
+    road_state_key = str(road_state_key)
     target_crs = islands_gdf.crs or "EPSG:28992"
     pop = pop_grid_gdf[[cell_id_column, "geometry"]].copy().to_crs(target_crs)
     islands = islands_gdf[[island_id_column, "geometry"]].copy().to_crs(target_crs)
@@ -586,6 +597,17 @@ def build_origin_island_allocations(
             })
 
     allocation_df = pd.DataFrame(rows)
+    allocation_df.attrs.update({
+        "population_grid_hash": _geometry_hash(pop_grid_gdf),
+        "cell_id_column": cell_id_column,
+        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
+        "islands_hash": _geometry_hash(islands_gdf),
+        "island_id_column": island_id_column,
+        "island_id_hash": _column_hash(islands_gdf, island_id_column),
+        "nearest_max_distance": nearest_max_distance,
+        "road_state_key": road_state_key,
+        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+    })
     _validate_allocation_df(allocation_df, cell_id_column)
     return allocation_df
 
@@ -736,7 +758,8 @@ def postprocess_societal_access_results(
     detailed_results:
         List of per-timestep detailed asset-state dicts (``timestep_results``
         from simulation).  Each must contain ``timestep``, ``map``,
-        ``asset_id``, ``operational``, and ``island_id``.
+        ``asset_id``, ``operational``, and ``island_id``.  Simulation output
+        also supplies ``road_state_key`` for adaptation-aware cache lookup.
     gdf_assets:
         Asset GeoDataFrame — provides ``asset_type_column`` and optionally
         a stable ``asset_id_column``.
@@ -830,7 +853,9 @@ def postprocess_societal_access_results(
         }
 
         # Retrieve/build geometry-only allocation
-        road_state_key = str(ts_detail.get("map", ts))
+        road_state_key = str(
+            ts_detail.get("road_state_key") or ts_detail.get("map", ts)
+        )
 
         # We need an islands_gdf to compute the allocation.
         # Build a minimal one from the unique island IDs seen in detailed results.
@@ -860,6 +885,7 @@ def postprocess_societal_access_results(
             reference_group=reference_group,
             allocation_cache=allocation_cache,
             road_state_key=road_state_key,
+            nearest_max_distance=nearest_max_distance,
         )
 
         ts_summary.update(societal_fields)
@@ -876,6 +902,7 @@ def _compute_societal_scalars(
     reference_group: str,
     allocation_cache: Dict[str, pd.DataFrame],
     road_state_key: str,
+    nearest_max_distance: float,
 ) -> Dict[str, float]:
     """Compute flat societal metric scalars for one timestep.
 
@@ -888,14 +915,27 @@ def _compute_societal_scalars(
     """
     fields: Dict[str, float] = {}
 
-    # Try to find a matching allocation in the cache
-    matching_alloc: Optional[pd.DataFrame] = None
-    for key, alloc_df in allocation_cache.items():
-        if "road_state_key" in alloc_df.columns:
-            road_states = alloc_df["road_state_key"].unique()
-            if road_state_key in road_states or len(road_states) == 1:
-                matching_alloc = alloc_df
-                break
+    expected_metadata = {
+        "population_grid_hash": _geometry_hash(pop_grid_gdf),
+        "cell_id_column": cell_id_column,
+        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
+        "nearest_max_distance": nearest_max_distance,
+        "road_state_key": road_state_key,
+        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+    }
+
+    # Try to find an allocation matching both the road state and grid inputs.
+    matching_allocations: list[pd.DataFrame] = []
+    for alloc_df in allocation_cache.values():
+        if all(
+            alloc_df.attrs.get(name) == value
+            for name, value in expected_metadata.items()
+        ):
+            matching_allocations.append(alloc_df)
+
+    matching_alloc = (
+        matching_allocations[0] if len(matching_allocations) == 1 else None
+    )
 
     if matching_alloc is None:
         # No allocation available: emit NaN

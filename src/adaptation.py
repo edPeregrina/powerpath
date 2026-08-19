@@ -217,7 +217,7 @@ def build_l1_l2_reduction_array(
     if l1_area_geojson is not None and l1_active_timesteps is not None:
         l1_gdf = (gpd.read_file(l1_area_geojson) 
                   if isinstance(l1_area_geojson, (str, Path)) 
-                  else l1_area_geojson)
+                  else l1_area_geojson.copy())
         
         if l1_gdf.crs != gdf_assets.crs:
             l1_gdf = l1_gdf.to_crs(gdf_assets.crs)
@@ -256,7 +256,7 @@ def build_l1_l2_reduction_array(
     if l2_asset_geojson is not None and l2_active_timesteps is not None:
         l2_gdf = (gpd.read_file(l2_asset_geojson) 
                   if isinstance(l2_asset_geojson, (str, Path)) 
-                  else l2_asset_geojson)
+                  else l2_asset_geojson.copy())
         
         if l2_gdf.crs != gdf_assets.crs:
             l2_gdf = l2_gdf.to_crs(gdf_assets.crs)
