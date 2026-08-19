@@ -387,12 +387,15 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         if keep_2d_vars is None:
             keep_2d_vars = []
         
+        societal_access_config = kwargs.get('societal_access_config', None)
+
         return {
             'monetary_categories': monetary_categories,
             'asset_population_map': asset_population_map,
             'asset_to_lu': asset_to_lu,
             'keep_3d_vars': keep_3d_vars,
-            'keep_2d_vars': keep_2d_vars
+            'keep_2d_vars': keep_2d_vars,
+            'societal_access_config': societal_access_config
         }
     
     def _add_impact_metrics(timestep_results, detailed_results, asset_population_map, 
@@ -431,7 +434,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         return timestep_results
     
     def _initialize_result_arrays(n_timesteps, n_assets, keep_3d_vars, keep_2d_vars,
-                                   asset_population_map, monetary_categories):
+                                   asset_population_map, monetary_categories, societal_metric_names):
         """Initialize result arrays based on requested metrics."""
         aggregatable_metrics = [
             'damage_ratio', 'repair_time', 'operational', 'accessible',
@@ -454,6 +457,10 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         result['monetary_impact_total'] = np.zeros(n_timesteps)
         for category in monetary_categories:
             result[f'monetary_impact_{category}'] = np.zeros(n_timesteps)
+
+        # Societal access impacts - always 1D (already aggregated scalars in summary)
+        for name in societal_metric_names:
+            result[name] = np.full(n_timesteps, np.nan)
         
         # Asset metrics 
         # Tier 1: 3D arrays (per-asset, per-timestep)
@@ -480,7 +487,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     
     def _fill_timestep_arrays(result, timestep_results, n_timesteps, n_assets,
                               keep_3d_vars, keep_2d_vars, asset_population_map, 
-                              monetary_categories):
+                              monetary_categories, societal_metric_names):
         """Fill result arrays from timestep data for requested metrics."""
         summary_to_metric = {
             'avg_damage_ratio': 'damage_ratio',
@@ -509,6 +516,10 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
             for category in monetary_categories:
                 col_name = f'monetary_impact_{category}'
                 result[col_name][t_idx] = ts.get(col_name, 0)
+
+            # Societal access impacts (1D)
+            for name in societal_metric_names:
+                result[name][t_idx] = ts.get(name, np.nan)
             
             # Asset metrics - ONLY process requested metrics
             all_requested_metrics = keep_3d_vars + keep_2d_vars
@@ -594,6 +605,10 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     # Get dimensions
     n_assets = len(kwargs['gdf_assets'])
     n_timesteps = len(timestep_results)
+    societal_metric_names = [
+        col for col in timestep_results.columns
+        if isinstance(col, str) and col.startswith('societal_')
+    ]
     
     # Initialize result arrays (MEMORY OPTIMIZED)
     result = _initialize_result_arrays(
@@ -602,7 +617,8 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         config['keep_3d_vars'],
         config['keep_2d_vars'],
         config['asset_population_map'],
-        config['monetary_categories']
+        config['monetary_categories'],
+        societal_metric_names
     )
     
     # Fill result arrays (ONLY for requested metrics)
@@ -614,7 +630,8 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         config['keep_3d_vars'],
         config['keep_2d_vars'],
         config['asset_population_map'],
-        config['monetary_categories']
+        config['monetary_categories'],
+        societal_metric_names
     )
     
     return result
