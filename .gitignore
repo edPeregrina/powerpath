@@ -3,6 +3,7 @@
 /data/interim/*
 /data/book/cache/*
 /src/__pycache__/*
+/tests/__pycache__/*
 /raw_data/*
 /obsolete/*
 

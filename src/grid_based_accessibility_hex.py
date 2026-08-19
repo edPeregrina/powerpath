@@ -41,25 +41,37 @@ import folium
 from shapely.geometry import box, Point, LineString, Polygon, shape
 from pyproj import Transformer
 import networkx as nx
-# for hexagons:
-import geohexgrid as ghg
+
+# Optional heavy dependencies — loaded lazily so that the new graph-only
+# functions (build_hex_adjacency_graph, higher_level_station_within_rings)
+# remain importable without RA2CE or geohexgrid installed.
+try:
+    import geohexgrid as ghg
+    _GEOHEXGRID_AVAILABLE = True
+except ImportError:
+    ghg = None  # type: ignore[assignment]
+    _GEOHEXGRID_AVAILABLE = False
 
 
-# === RA2CE Project Imports ===
-from ra2ce.network.network_config_data.enums.aggregate_wl_enum import AggregateWlEnum
-from ra2ce.network.network_config_data.enums.source_enum import SourceEnum
-from ra2ce.network.network_config_data.enums.network_type_enum import NetworkTypeEnum
-from ra2ce.network.network_config_data.enums.road_type_enum import RoadTypeEnum
-from ra2ce.network.network_config_data.network_config_data import (
-    HazardSection,
-    NetworkConfigData,
-    NetworkSection,
-    OriginsDestinationsSection
-)
-from ra2ce.network.exporters.geodataframe_network_exporter import GeoDataFrameNetworkExporter
-from ra2ce.network.exporters.multi_graph_network_exporter import MultiGraphNetworkExporter
-from ra2ce.network.network_wrappers.osm_network_wrapper.osm_network_wrapper import OsmNetworkWrapper
-from ra2ce.ra2ce_handler import Ra2ceHandler
+# === RA2CE Project Imports (optional) ===
+try:
+    from ra2ce.network.network_config_data.enums.aggregate_wl_enum import AggregateWlEnum
+    from ra2ce.network.network_config_data.enums.source_enum import SourceEnum
+    from ra2ce.network.network_config_data.enums.network_type_enum import NetworkTypeEnum
+    from ra2ce.network.network_config_data.enums.road_type_enum import RoadTypeEnum
+    from ra2ce.network.network_config_data.network_config_data import (
+        HazardSection,
+        NetworkConfigData,
+        NetworkSection,
+        OriginsDestinationsSection,
+    )
+    from ra2ce.network.exporters.geodataframe_network_exporter import GeoDataFrameNetworkExporter
+    from ra2ce.network.exporters.multi_graph_network_exporter import MultiGraphNetworkExporter
+    from ra2ce.network.network_wrappers.osm_network_wrapper.osm_network_wrapper import OsmNetworkWrapper
+    from ra2ce.ra2ce_handler import Ra2ceHandler
+    _RA2CE_AVAILABLE = True
+except ImportError:
+    _RA2CE_AVAILABLE = False
 
 # === Local Imports ===
 from src.utils import project_graph_coords, filter_hazard_graph
@@ -132,6 +144,11 @@ def setup_ra2ce_analysis(project_root=None, hazard_file=None):
     Setup and run RA2CE analysis if needed.
     This function handles the network and hazard analysis preparation.
     """
+    if not _RA2CE_AVAILABLE:
+        raise ImportError(
+            "ra2ce is required for network analysis. "
+            "Install it following the RA2CE project instructions."
+        )
     # Initialize paths
     paths = initialize_project_paths(project_root)
     root_dir = paths['root_dir']
@@ -235,6 +252,11 @@ def filter_motorway_edges(G: nx.Graph) -> nx.Graph:
     return G_filtered
 
 def create_grid(study_area: gpd.GeoDataFrame, cell_size: int, target_crs: str) -> gpd.GeoDataFrame:
+    if not _GEOHEXGRID_AVAILABLE:
+        raise ImportError(
+            "geohexgrid is required to create a hexagonal grid. "
+            "Install it with: pip install geohexgrid"
+        )
     minx, miny, maxx, maxy = study_area.total_bounds
     # Create hexagonal grid
     grid = ghg.make_grid_from_bounds(
@@ -668,13 +690,194 @@ def set_verbose(verbose: bool = True):
     _verbose = verbose
 
 
+# ---------------------------------------------------------------------------
+# Hierarchical-station ring lookup
+# ---------------------------------------------------------------------------
+
+def build_hex_adjacency_graph(grid_gdf: gpd.GeoDataFrame) -> nx.Graph:
+    """
+    Build a NetworkX graph whose nodes are the integer positional indices of
+    *grid_gdf* and whose edges connect cells whose geometries share a boundary
+    (i.e. touch or overlap).
+
+    This is the "knowledge graph" of the hexagonal (or any polygon) grid: it
+    encodes which cells are spatial neighbours so that BFS ring-expansion can
+    be used to ask "is there an asset of type X within N hexagon rings?".
+
+    Parameters
+    ----------
+    grid_gdf : gpd.GeoDataFrame
+        A GeoDataFrame of grid cells (hexagonal or otherwise).  The function
+        uses the *positional* index (0, 1, …) internally; the caller's index
+        is preserved in the returned graph via node attributes.
+
+    Returns
+    -------
+    nx.Graph
+        Undirected graph with one node per cell and one edge per touching-cell
+        pair.  Each node carries a ``label`` attribute equal to the original
+        index value.
+    """
+    grid_reset = grid_gdf.reset_index(drop=False)
+    original_index_col = grid_reset.columns[0]  # first col is the old index
+
+    G = nx.Graph()
+    for pos, row in grid_reset.iterrows():
+        G.add_node(pos, label=row[original_index_col])
+
+    sindex = grid_reset.sindex
+    geoms = grid_reset.geometry
+    for pos, row in grid_reset.iterrows():
+        candidate_positions = list(sindex.query(row.geometry, predicate="touches"))
+        for nb_pos in candidate_positions:
+            if nb_pos <= pos:
+                continue  # add each edge once
+            # Accept only shared-edge adjacency (LineString intersection), not
+            # corner-only contact (Point intersection).  This gives 6 neighbours
+            # for a hex tessellation and 4 neighbours for an orthogonal grid.
+            shared = row.geometry.intersection(geoms.iloc[nb_pos])
+            if not shared.is_empty and shared.geom_type in (
+                "LineString", "MultiLineString"
+            ):
+                G.add_edge(pos, nb_pos)
+
+    return G
+
+
+def higher_level_station_within_rings(
+    grid_gdf: gpd.GeoDataFrame,
+    assets_gdf: gpd.GeoDataFrame,
+    target_types: list,
+    max_rings: int = 3,
+    asset_type_column: str = "type",
+    result_column: str = "higher_level_rings",
+    adjacency_graph: nx.Graph | None = None,
+) -> gpd.GeoDataFrame:
+    """
+    For every grid cell determine the minimum number of hexagon rings separating
+    it from the nearest station of any type listed in *target_types*.
+
+    The function answers the question:
+    *"Is there a higher-level station (e.g. LS or HS) within x surrounding
+    hexagon areas?"*
+
+    It works on the spatial adjacency ("knowledge graph") of the grid, so it is
+    independent of road-network connectivity.  Use ``max_rings`` to set the
+    search radius; use the ``adjacency_graph`` parameter to supply a
+    pre-computed graph and avoid rebuilding it on repeated calls.
+
+    Parameters
+    ----------
+    grid_gdf : gpd.GeoDataFrame
+        Grid cells (hexagonal or any polygon tessellation).
+    assets_gdf : gpd.GeoDataFrame
+        Point or polygon asset layer that contains the higher-level stations.
+        Must be in the same CRS as *grid_gdf*, or the function will reproject.
+    target_types : list of str
+        Asset type values (from *asset_type_column*) that count as a
+        "higher-level station", e.g. ``["ls", "hs"]``.
+    max_rings : int, default 3
+        Maximum number of hexagon-ring hops to search.  Cells beyond this
+        distance receive ``-1``.
+    asset_type_column : str, default "type"
+        Column in *assets_gdf* that holds the asset-type label.
+    result_column : str, default "higher_level_rings"
+        Name of the new column added to the returned GeoDataFrame.  Contains:
+
+        * **0** — a target station sits inside this cell itself.
+        * **1 … max_rings** — nearest target station is that many rings away.
+        * **-1** — no target station found within *max_rings* rings.
+    adjacency_graph : nx.Graph or None, default None
+        Pre-built adjacency graph from :func:`build_hex_adjacency_graph`.
+        Pass this when calling the function in a loop to avoid redundant
+        spatial-index construction.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        A copy of *grid_gdf* with the ``result_column`` column appended.
+
+    Examples
+    --------
+    >>> grid = create_grid(study_area, cell_size=300, target_crs="EPSG:28992")
+    >>> result = higher_level_station_within_rings(
+    ...     grid, gdf_assets, target_types=["ls", "hs"], max_rings=5
+    ... )
+    >>> result[result["higher_level_rings"] == 0]   # cells that host an LS/HS
+    """
+    grid_out = grid_gdf.copy()
+
+    # Align CRS
+    if assets_gdf.crs is not None and grid_out.crs is not None:
+        if assets_gdf.crs != grid_out.crs:
+            assets_gdf = assets_gdf.to_crs(grid_out.crs)
+
+    # Filter assets to target types
+    target_mask = assets_gdf[asset_type_column].isin(target_types)
+    target_assets = assets_gdf.loc[target_mask].copy()
+
+    # Reset index for consistent positional addressing
+    grid_reset = grid_out.reset_index(drop=True)
+
+    # Determine which grid cells contain at least one target asset (spatial join)
+    if target_assets.empty:
+        cells_with_station: set = set()
+    else:
+        joined = gpd.sjoin(
+            target_assets[["geometry"]],
+            grid_reset[["geometry"]],
+            how="left",
+            predicate="within",
+        )
+        # Fallback: assets that did not land inside any cell → nearest cell
+        outside = joined[joined["index_right"].isna()].copy()
+        if not outside.empty:
+            for asset_idx, asset_row in outside.iterrows():
+                nb_positions = grid_reset.sindex.nearest(asset_row.geometry)
+                nearest_pos = int(nb_positions[0]) if hasattr(nb_positions, "__len__") else int(nb_positions)
+                joined.at[asset_idx, "index_right"] = nearest_pos
+
+        cells_with_station = set(
+            joined["index_right"].dropna().astype(int).tolist()
+        )
+
+    # Build or reuse adjacency graph
+    G = adjacency_graph if adjacency_graph is not None else build_hex_adjacency_graph(grid_reset)
+
+    # BFS from every cell-with-station up to max_rings; record minimum distance
+    # Initialise all cells to -1 (not reachable within budget)
+    ring_distance = {pos: -1 for pos in range(len(grid_reset))}
+    for src in cells_with_station:
+        ring_distance[src] = 0
+
+    # Multi-source BFS: start simultaneously from all source cells
+    if cells_with_station:
+        frontier = list(cells_with_station)
+        visited_set = set(cells_with_station)
+        current_ring = 0
+        while frontier and current_ring < max_rings:
+            current_ring += 1
+            next_frontier = []
+            for node in frontier:
+                for nb in G.neighbors(node):
+                    if nb not in visited_set:
+                        visited_set.add(nb)
+                        ring_distance[nb] = current_ring
+                        next_frontier.append(nb)
+            frontier = next_frontier
+
+    grid_out[result_column] = [ring_distance[i] for i in range(len(grid_reset))]
+    return grid_out
+
 
 # Export main functions for easy import
 __all__ = [
     'accessibility_model',
-    'initialize_grid_analysis', 
+    'initialize_grid_analysis',
     'load_or_compute_hazard_graph',
     'compute_hazard_graph_from_map',
     'set_verbose',
-    'compute_island_geodataframe_from_graph'
+    'compute_island_geodataframe_from_graph',
+    'build_hex_adjacency_graph',
+    'higher_level_station_within_rings',
 ]
