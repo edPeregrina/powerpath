@@ -836,3 +836,153 @@ def test_postprocess_missing_islands_gdf_in_cache_emits_nan_and_warns():
         )
 
     assert math.isnan(updated_summary[0]["societal_access_pct__health__total"])
+
+
+# ---------------------------------------------------------------------------
+# Hospital failure-mode test (first required regression test)
+# ---------------------------------------------------------------------------
+
+def test_hospital_not_flooded_disrupted_msls():
+    """First failure-mode regression test: fake hospital Hospital_not_flooded_disrupted_voronoi.
+
+    Scenario
+    --------
+    - Hospital centroid: (82526.21, 455532.75)
+    - Hospital is NOT flooded (hazard value = 0).
+    - Road network remains CONNECTED (single island).
+    - All population starts on the same road island as the hospital.
+    - Supporting MSLS station is initially operational.
+
+    Before MSLS failure
+      hospital flooded: False
+      roads disconnected: False
+      MSLS operational: True
+      hospital operational: True
+      hospital access: 100 %
+
+    After MSLS failure (pairwise dependency blocks the hospital)
+      hospital flooded: False
+      roads disconnected: False   (island_id unchanged)
+      MSLS operational: False
+      hospital operational: False (blocked by dependency)
+      hospital access: 0 %
+    """
+    from src.dependency_evaluator import evaluate_dependencies
+
+    # Assets: index 0 = supporting MSLS station, index 1 = fake hospital
+    asset_types = np.array(["msls", "hospital"])
+    hazard_values = np.array([0.0, 0.0])       # neither asset is flooded
+    island_ids = np.array([1, 1])              # both on the same road island
+
+    # Synthetic road island covering the fake hospital centroid
+    islands = gpd.GeoDataFrame(
+        {"island_id": [1]},
+        geometry=[box(80000, 453000, 86000, 458000)],
+        crs="EPSG:28992",
+    )
+
+    # Population on the same island
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["pop_cell"],
+            "aantal_inwoners": [1000],
+            "aantal_inwoners_65_jaar_en_ouder": [200],
+            "aantal_inwoners_0_tot_15_jaar": [150],
+            "aantal_inwoners_25_tot_45_jaar": [300],
+        },
+        geometry=[box(80500, 454500, 82000, 455500)],
+        crs="EPSG:28992",
+    )
+
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["msls", "hospital"]},
+        geometry=[
+            Point(82000.0, 455000.0),      # MSLS station
+            Point(82526.21, 455532.75),    # fake hospital centroid
+        ],
+        crs="EPSG:28992",
+    )
+
+    # Pre-build the population->island allocation (road state key stays constant
+    # throughout the test because roads do not disconnect)
+    allocation_cache: dict = {}
+    get_or_build_allocation(
+        allocation_cache, pop, "cell_id", islands, road_state_key="roads_connected"
+    )
+
+    # MSLS -> hospital pairwise dependency: when MSLS (index 0) is non-operational,
+    # the hospital (index 1) is blocked.
+    pairwise_deps = [(0, 1)]
+
+    # --- BEFORE MSLS failure ---
+    op_initial = np.array([True, True])
+    op_before, _ = evaluate_dependencies(
+        op_initial.copy(),
+        asset_types,
+        hazard_values=hazard_values,
+        pairwise_dependencies=pairwise_deps,
+        return_report=True,
+    )
+    hospital_operational_before = bool(op_before[1])
+
+    roads_remain_connected = bool(island_ids[0] == island_ids[1])
+
+    updated_before, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_connected",
+            "operational": op_before.astype(int),
+            "island_id": island_ids.copy(),
+        }],
+        gdf_assets=gdf_assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"hospital": "hospital"},
+        all_functions=["hospital"],
+    )
+    hospital_access_before = updated_before[0]["societal_access_pct__hospital__total"]
+
+    # --- AFTER MSLS failure (hospital physically intact, roads intact) ---
+    op_msls_failed = np.array([False, True])   # only MSLS fails; hospital not flooded
+    op_after, _ = evaluate_dependencies(
+        op_msls_failed.copy(),
+        asset_types,
+        hazard_values=hazard_values,
+        pairwise_dependencies=pairwise_deps,
+        return_report=True,
+    )
+    hospital_operational_after = bool(op_after[1])
+
+    updated_after, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 1, "map": 0}],
+        detailed_results=[{
+            "timestep": 1,
+            "map": 0,
+            "road_state_key": "roads_connected",  # roads still connected
+            "operational": op_after.astype(int),
+            "island_id": island_ids.copy(),        # island unchanged (no road disruption)
+        }],
+        gdf_assets=gdf_assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"hospital": "hospital"},
+        all_functions=["hospital"],
+    )
+    hospital_access_after = updated_after[0]["societal_access_pct__hospital__total"]
+
+    # Verify scenario preconditions
+    assert hospital_operational_before is True, "Hospital must be operational before MSLS failure"
+    assert hospital_operational_after is False, "Hospital must be non-operational after MSLS failure"
+    assert roads_remain_connected is True, "Roads must stay connected throughout"
+
+    # Core assertions: access drops from 100 % to 0 % due to dependency alone
+    assert hospital_access_before == pytest.approx(100.0), (
+        "All population should have hospital access before MSLS failure"
+    )
+    assert hospital_access_after == pytest.approx(0.0), (
+        "No population should have hospital access after MSLS failure"
+    )

@@ -82,6 +82,7 @@ class SimulationState:
         self.dependency_report = {}
         self.simulation_warnings = []
         self.road_state_key = None
+        self.islands_gdf_cache: dict = {}
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
 def _update_hazard_map_states(
@@ -195,6 +196,8 @@ def _update_hazard_map_states(
             island_data = island_cache[cache_key]
             state.island_ids = island_data['island_ids']
             rfids_islands = island_data['rfids_islands']
+            if 'islands_gdf' in island_data:
+                state.islands_gdf_cache[cache_key] = island_data['islands_gdf']
             if verbose:
                 print(f"Using cached islands for {cache_key}")
         else:
@@ -222,6 +225,11 @@ def _update_hazard_map_states(
                 state.island_ids = asset_island_ids
                 # Assign island for each asset for the current state
                 cache_updated['island_cache'] = island_cache
+                # Propagate islands_gdf if it was stored in the cache
+                if island_cache is not None and cache_key in island_cache:
+                    _cached = island_cache[cache_key]
+                    if 'islands_gdf' in _cached:
+                        state.islands_gdf_cache[cache_key] = _cached['islands_gdf']
                 print(f"Successfully computed and cached islands for {cache_key}")
             except Exception as e:
                 print(f"Error computing islands for {cache_key}: {e}")
@@ -1526,6 +1534,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
+                islands_gdf_cache=_sa_cfg.get("islands_gdf_cache") or state.islands_gdf_cache,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:

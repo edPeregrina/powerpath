@@ -595,7 +595,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             # Store the computed results in the cache
             island_cache[cache_key] = {
                 'island_ids': asset_island_ids,
-                'rfids_islands': rfids_islands
+                'rfids_islands': rfids_islands,
+                'islands_gdf': islands_gdf,
             }
             
             # Save the updated cache using the standardized function
