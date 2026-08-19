@@ -1213,8 +1213,8 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
 
     summary_row = all_results[0][1][0]
     detail_row = all_results[0][2][0]
-    assert summary_row["societal_allocation_road_state_key"] == detail_row["road_state_key"]
-    assert summary_row["societal_allocation_cache_key"] in cache_updated["societal_allocation_cache"]
+    assert summary_row["allocation_road_state_key"] == detail_row["road_state_key"]
+    assert summary_row["allocation_cache_key"] in cache_updated["societal_allocation_cache"]
     assert math.isfinite(summary_row["societal_access_pct__hospital__total"])
     assert summary_row["societal_access_pct__hospital__total"] == pytest.approx(100.0)
     assert all("islands_gdf" not in entry for entry in cache_updated["island_cache"].values())

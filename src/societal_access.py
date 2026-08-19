@@ -777,6 +777,12 @@ def _build_service_area_population_maps(
         pop_values[col] = pd.to_numeric(pop_values[col], errors="coerce").fillna(0)
         pop_values[col] = pop_values[col].where(pop_values[col] >= 0, 0)
     pop_assets = gpd.GeoDataFrame(pop_values, geometry=pop_grid_gdf.geometry, crs=pop_grid_gdf.crs)
+    if (
+        pop_assets.crs is not None
+        and working_assets.crs is not None
+        and pop_assets.crs != working_assets.crs
+    ):
+        pop_assets = pop_assets.to_crs(working_assets.crs)
 
     function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
     for function_name, provider_types in SERVICE_AREA_FUNCTION_PROVIDER_TYPES.items():
@@ -792,11 +798,25 @@ def _build_service_area_population_maps(
             if len(providers) == 1:
                 provider_map = {providers.index[0]: list(pop_assets.index)}
             else:
-                voronoi_gdf = create_voronoi_for_asset_type(working_assets, provider_type)
-                provider_map = build_voronoi_service_area_map(
-                    voronoi_gdf,
-                    pop_assets[["geometry"]].copy(),
-                )
+                if len(providers) < 4:
+                    provider_map = {}
+                    provider_centroids = {
+                        provider_id: geom.centroid
+                        for provider_id, geom in providers.geometry.items()
+                    }
+                    for pop_idx, pop_geom in pop_assets.geometry.items():
+                        pop_centroid = pop_geom.centroid
+                        nearest_provider = min(
+                            provider_centroids,
+                            key=lambda provider_id: provider_centroids[provider_id].distance(pop_centroid),
+                        )
+                        provider_map.setdefault(nearest_provider, []).append(pop_idx)
+                else:
+                    voronoi_gdf = create_voronoi_for_asset_type(working_assets, provider_type)
+                    provider_map = build_voronoi_service_area_map(
+                        voronoi_gdf,
+                        pop_assets[["geometry"]].copy(),
+                    )
 
             for provider_id, pop_indices in provider_map.items():
                 for label, column_name in pop_group_columns.items():
@@ -1117,8 +1137,8 @@ def postprocess_societal_access_results(
         )
 
         ts_summary.update(societal_fields)
-        ts_summary["societal_allocation_cache_key"] = allocation_cache_key
-        ts_summary["societal_allocation_road_state_key"] = road_state_key
+        ts_summary["allocation_cache_key"] = allocation_cache_key
+        ts_summary["allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
 
