@@ -368,6 +368,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     import pandas as pd
     from src.simulation import simulate_asset_damage_recovery_access_breakdown  # ✅ ADD THIS!
     from src.impacts import calculate_population_impacts, calculate_cumulative_monetized_impacts_ema
+    from src.societal_access import list_societal_metric_names
 
     # Helper functions
     
@@ -536,6 +537,24 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
                     _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
         
         return result
+
+    def _configured_societal_metric_names(societal_access_config):
+        """Resolve configured societal metric names expected by EMA outcomes."""
+        if not societal_access_config:
+            return []
+
+        pop_group_columns = societal_access_config.get('pop_group_columns') or {}
+        all_functions = societal_access_config.get('all_functions') or []
+        reference_group = societal_access_config.get('reference_group', 'total')
+
+        if not pop_group_columns or not all_functions:
+            return []
+
+        return list_societal_metric_names(
+            all_functions=all_functions,
+            pop_group_columns=pop_group_columns,
+            reference_group=reference_group,
+        )
     
     def _get_metric_value(ts, metric, summary_to_metric, count_to_binary):
         """Extract metric value from timestep data, checking multiple sources."""
@@ -609,6 +628,9 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         col for col in timestep_results.columns
         if isinstance(col, str) and col.startswith('societal_')
     ]
+    for name in _configured_societal_metric_names(config['societal_access_config']):
+        if name not in societal_metric_names:
+            societal_metric_names.append(name)
     
     # Initialize result arrays (MEMORY OPTIMIZED)
     result = _initialize_result_arrays(
