@@ -1565,6 +1565,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
                 fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
                 verbose=_sa_cfg.get("verbose", verbose),
+                profiler=profiler,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:

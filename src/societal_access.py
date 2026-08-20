@@ -34,6 +34,7 @@ E — Allocation layer: geometry-only cell→island fraction caching plus
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import warnings
@@ -913,6 +914,7 @@ def postprocess_societal_access_results(
     islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
+    profiler: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1015,14 +1017,19 @@ def postprocess_societal_access_results(
         print(f"Electricity providers: {electricity_provider_count} MSLS")
         print(f"Hospital providers: {hospital_provider_count}")
 
-    service_area_assets = gdf_assets.copy()
-    service_area_assets.index = stable_asset_ids
-    service_area_population_maps = _build_service_area_population_maps(
-        gdf_assets=service_area_assets,
-        pop_grid_gdf=pop_grid_gdf,
-        pop_group_columns=pop_group_columns,
-        asset_type_column=asset_type_column,
-    )
+    with (
+        profiler.section("societal_access._build_service_area_population_maps")
+        if profiler is not None
+        else nullcontext()
+    ):
+        service_area_assets = gdf_assets.copy()
+        service_area_assets.index = stable_asset_ids
+        service_area_population_maps = _build_service_area_population_maps(
+            gdf_assets=service_area_assets,
+            pop_grid_gdf=pop_grid_gdf,
+            pop_group_columns=pop_group_columns,
+            asset_type_column=asset_type_column,
+        )
 
     # Determine which functions to always emit
     if all_functions is None:
@@ -1039,133 +1046,146 @@ def postprocess_societal_access_results(
         ts = ts_summary["timestep"]
         ts_detail = detailed_by_ts.get(ts)
 
-        if ts_detail is None:
-            # No detailed data → emit NaN
-            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-            continue
+        with (
+            profiler.timestep(ts) if profiler is not None else nullcontext()
+        ):
+            if ts_detail is None:
+                # No detailed data → emit NaN
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
 
-        # Read dependency-adjusted operational states
-        operational = np.asarray(ts_detail.get("operational", []))
-        island_ids = np.asarray(ts_detail.get("island_id", []))
+            # Read dependency-adjusted operational states
+            operational = np.asarray(ts_detail.get("operational", []))
+            island_ids = np.asarray(ts_detail.get("island_id", []))
 
-        if len(operational) == 0 or len(island_ids) == 0:
-            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-            continue
+            if len(operational) == 0 or len(island_ids) == 0:
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
 
-        # Build island → functions map from operational providers
-        island_function_map: Dict[int, Set[str]] = {}
-        operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
-        for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
-            atype = asset_types[i] if i < len(asset_types) else "unknown"
-            func_cat = taxonomy.get(str(atype))
-            if func_cat is not None and is_op:
-                operational_asset_ids_by_function.setdefault(func_cat, set()).add(stable_asset_ids[i])
-                isl_id_int = int(isl_id)
-                island_function_map.setdefault(isl_id_int, set()).add(func_cat)
+            # Build island → functions map from operational providers
+            island_function_map: Dict[int, Set[str]] = {}
+            operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
+            for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
+                atype = asset_types[i] if i < len(asset_types) else "unknown"
+                func_cat = taxonomy.get(str(atype))
+                if func_cat is not None and is_op:
+                    operational_asset_ids_by_function.setdefault(func_cat, set()).add(stable_asset_ids[i])
+                    isl_id_int = int(isl_id)
+                    island_function_map.setdefault(isl_id_int, set()).add(func_cat)
 
-        frozen_island_function_map: Dict[int, FrozenSet[str]] = {
-            iid: frozenset(cats) for iid, cats in island_function_map.items()
-        }
+            frozen_island_function_map: Dict[int, FrozenSet[str]] = {
+                iid: frozenset(cats) for iid, cats in island_function_map.items()
+            }
 
-        # Strict road_state_key resolution — no fallback to map index.
-        # Falling back to the map counter would silently reuse the baseline
-        # topology for adapted states that happen to share the same counter.
-        road_state_key_raw = ts_detail.get("road_state_key")
-        if not road_state_key_raw:
-            warnings.warn(
-                f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
-                "Ensure the simulation records road_state_key in its timestep detail.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-            continue
-        road_state_key = str(road_state_key_raw)
-
-        # Resolve allocation_df — deterministic path when islands_gdf_cache is
-        # available, legacy metadata-scan path otherwise (backward compat).
-        allocation_cache_key = None
-        if islands_gdf_cache is not None:
-            islands_gdf = islands_gdf_cache.get(road_state_key)
-            if islands_gdf is None:
-                message = (
-                    f"Timestep {ts}: no islands_gdf found for road_state_key "
-                    f"'{road_state_key}'; no societal allocation can be built."
-                )
-                if fail_on_missing_allocation:
-                    raise RuntimeError(message)
+            # Strict road_state_key resolution — no fallback to map index.
+            # Falling back to the map counter would silently reuse the baseline
+            # topology for adapted states that happen to share the same counter.
+            road_state_key_raw = ts_detail.get("road_state_key")
+            if not road_state_key_raw:
                 warnings.warn(
-                    f"{message} Emitting NaN societal metrics.",
+                    f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
+                    "Ensure the simulation records road_state_key in its timestep detail.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                 continue
-            allocation_df, allocation_cache_key, _ = get_or_build_allocation(
-                allocation_cache,
-                pop_grid_gdf,
-                cell_id_column,
-                islands_gdf,
-                island_id_column,
-                nearest_max_distance=nearest_max_distance,
-                road_state_key=road_state_key,
-            )
-        else:
-            allocation_cache_key, allocation_df = _find_allocation_cache_entry(
-                allocation_cache,
-                pop_grid_gdf,
-                cell_id_column,
-                road_state_key,
-                nearest_max_distance,
-            )
+            road_state_key = str(road_state_key_raw)
 
-        if allocation_df is None and fail_on_missing_allocation:
-            available_road_state_keys = sorted(
-                {
-                    str(df.attrs.get("road_state_key"))
-                    for df in allocation_cache.values()
-                    if df.attrs.get("road_state_key") is not None
-                }
-            )
-            raise RuntimeError(
-                f"Timestep {ts}: no societal allocation found for road_state_key "
-                f"'{road_state_key}'. Available cached road_state_keys="
-                f"{available_road_state_keys[:10]}"
-            )
+            with (
+                profiler.section("societal_access.resolve_allocation", include_in_timestep=True)
+                if profiler is not None
+                else nullcontext()
+            ):
+                # Resolve allocation_df — deterministic path when islands_gdf_cache is
+                # available, legacy metadata-scan path otherwise (backward compat).
+                allocation_cache_key = None
+                if islands_gdf_cache is not None:
+                    islands_gdf = islands_gdf_cache.get(road_state_key)
+                    if islands_gdf is None:
+                        message = (
+                            f"Timestep {ts}: no islands_gdf found for road_state_key "
+                            f"'{road_state_key}'; no societal allocation can be built."
+                        )
+                        if fail_on_missing_allocation:
+                            raise RuntimeError(message)
+                        warnings.warn(
+                            f"{message} Emitting NaN societal metrics.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        continue
+                    allocation_df, allocation_cache_key, _ = get_or_build_allocation(
+                        allocation_cache,
+                        pop_grid_gdf,
+                        cell_id_column,
+                        islands_gdf,
+                        island_id_column,
+                        nearest_max_distance=nearest_max_distance,
+                        road_state_key=road_state_key,
+                    )
+                else:
+                    allocation_cache_key, allocation_df = _find_allocation_cache_entry(
+                        allocation_cache,
+                        pop_grid_gdf,
+                        cell_id_column,
+                        road_state_key,
+                        nearest_max_distance,
+                    )
 
-        if allocation_df is not None:
-            allocation_road_state_key = str(allocation_df.attrs.get("road_state_key"))
-            if allocation_road_state_key != road_state_key:
-                message = (
-                    f"Timestep {ts}: allocation road_state_key '{allocation_road_state_key}' "
-                    f"does not match detailed_results road_state_key '{road_state_key}'."
+                if allocation_df is None and fail_on_missing_allocation:
+                    available_road_state_keys = sorted(
+                        {
+                            str(df.attrs.get("road_state_key"))
+                            for df in allocation_cache.values()
+                            if df.attrs.get("road_state_key") is not None
+                        }
+                    )
+                    raise RuntimeError(
+                        f"Timestep {ts}: no societal allocation found for road_state_key "
+                        f"'{road_state_key}'. Available cached road_state_keys="
+                        f"{available_road_state_keys[:10]}"
+                    )
+
+                if allocation_df is not None:
+                    allocation_road_state_key = str(allocation_df.attrs.get("road_state_key"))
+                    if allocation_road_state_key != road_state_key:
+                        message = (
+                            f"Timestep {ts}: allocation road_state_key '{allocation_road_state_key}' "
+                            f"does not match detailed_results road_state_key '{road_state_key}'."
+                        )
+                        if fail_on_missing_allocation:
+                            raise RuntimeError(message)
+                        warnings.warn(message, RuntimeWarning, stacklevel=2)
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        continue
+
+            with (
+                profiler.section("societal_access.compute_scalars", include_in_timestep=True)
+                if profiler is not None
+                else nullcontext()
+            ):
+                societal_fields = _compute_societal_scalars(
+                    frozen_island_function_map=frozen_island_function_map,
+                    allocation_df=allocation_df,
+                    pop_grid_gdf=pop_grid_gdf,
+                    cell_id_column=cell_id_column,
+                    pop_group_columns=pop_group_columns,
+                    all_functions=all_functions,
+                    reference_group=reference_group,
                 )
-                if fail_on_missing_allocation:
-                    raise RuntimeError(message)
-                warnings.warn(message, RuntimeWarning, stacklevel=2)
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
+                societal_fields = _apply_service_area_societal_scalars(
+                    societal_fields,
+                    operational_asset_ids_by_function=operational_asset_ids_by_function,
+                    service_area_population_maps=service_area_population_maps,
+                    pop_group_columns=pop_group_columns,
+                    reference_group=reference_group,
+                )
 
-        societal_fields = _compute_societal_scalars(
-            frozen_island_function_map=frozen_island_function_map,
-            allocation_df=allocation_df,
-            pop_grid_gdf=pop_grid_gdf,
-            cell_id_column=cell_id_column,
-            pop_group_columns=pop_group_columns,
-            all_functions=all_functions,
-            reference_group=reference_group,
-        )
-        societal_fields = _apply_service_area_societal_scalars(
-            societal_fields,
-            operational_asset_ids_by_function=operational_asset_ids_by_function,
-            service_area_population_maps=service_area_population_maps,
-            pop_group_columns=pop_group_columns,
-            reference_group=reference_group,
-        )
-
-        ts_summary.update(societal_fields)
-        ts_summary["allocation_cache_key"] = allocation_cache_key
-        ts_summary["allocation_road_state_key"] = road_state_key
+            ts_summary.update(societal_fields)
+            ts_summary["allocation_cache_key"] = allocation_cache_key
+            ts_summary["allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
 
