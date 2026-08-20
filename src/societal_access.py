@@ -43,6 +43,7 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequ
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 
 # ---------------------------------------------------------------------------
@@ -866,18 +867,36 @@ def _build_service_area_population_maps(
                 provider_map = {providers.index[0]: list(pop_assets.index)}
             else:
                 if len(providers) < 4:
-                    provider_map = {}
-                    provider_centroids = {
-                        provider_id: geom.centroid
-                        for provider_id, geom in providers.geometry.items()
-                    }
-                    for pop_idx, pop_geom in pop_assets.geometry.items():
-                        pop_centroid = pop_geom.centroid
-                        nearest_provider = min(
-                            provider_centroids,
-                            key=lambda provider_id: provider_centroids[provider_id].distance(pop_centroid),
+                    provider_centroids = providers.geometry.centroid
+                    pop_centroids = pop_assets.geometry.centroid
+
+                    provider_ids = providers.index.to_numpy()
+                    pop_ids = pop_assets.index.to_numpy()
+                    provider_xy = np.column_stack(
+                        (
+                            provider_centroids.x.to_numpy(dtype=float),
+                            provider_centroids.y.to_numpy(dtype=float),
                         )
-                        provider_map.setdefault(nearest_provider, []).append(pop_idx)
+                    )
+                    pop_xy = np.column_stack(
+                        (
+                            pop_centroids.x.to_numpy(dtype=float),
+                            pop_centroids.y.to_numpy(dtype=float),
+                        )
+                    )
+
+                    nearest_idx = cKDTree(provider_xy).query(pop_xy, workers=-1)[1]
+                    assigned_provider_ids = provider_ids[np.asarray(nearest_idx, dtype=int)]
+                    sort_order = np.argsort(assigned_provider_ids, kind="stable")
+                    sorted_provider_ids = assigned_provider_ids[sort_order]
+                    sorted_pop_ids = pop_ids[sort_order]
+                    unique_provider_ids, start_idx = np.unique(
+                        sorted_provider_ids, return_index=True
+                    )
+                    provider_map = {}
+                    for i, provider_id in enumerate(unique_provider_ids):
+                        end = start_idx[i + 1] if i + 1 < len(start_idx) else len(sorted_pop_ids)
+                        provider_map[provider_id] = sorted_pop_ids[start_idx[i]:end].tolist()
                 else:
                     voronoi_gdf = create_voronoi_for_asset_type(
                         working_assets,
