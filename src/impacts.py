@@ -87,7 +87,12 @@ def _normalize_voronoi_boundary(boundary):
     if hasattr(boundary, "crs") and boundary.crs != "EPSG:28992":
         boundary = boundary.to_crs("EPSG:28992")
     if hasattr(boundary, "geometry"):
-        boundary = boundary.geometry.unary_union
+        boundary_geometry = boundary.geometry
+        boundary = (
+            boundary_geometry.union_all()
+            if hasattr(boundary_geometry, "union_all")
+            else boundary_geometry.unary_union
+        )
     return boundary
 
 
@@ -182,7 +187,11 @@ def create_voronoi_for_asset_type(
     valid_asset_ids = []
 
     # If no boundary is provided, use buffered convex hull of centroids
-    centroids_union = assets_filtered.geometry.unary_union
+    centroids_union = (
+        assets_filtered.geometry.union_all()
+        if hasattr(assets_filtered.geometry, "union_all")
+        else assets_filtered.geometry.unary_union
+    )
     convex_hull = centroids_union.convex_hull.buffer(200)  # 200 meters buffer
 
     if boundary is None:

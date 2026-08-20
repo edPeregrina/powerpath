@@ -1015,27 +1015,26 @@ def test_postprocess_reuses_cached_voronoi_across_calls(monkeypatch, capsys):
     )
     pop = gpd.GeoDataFrame(
         {
-            "cell_id": ["sw", "se", "nw", "ne"],
-            "aantal_inwoners": [100, 100, 100, 100],
-            "aantal_inwoners_65_jaar_en_ouder": [20, 20, 20, 20],
-            "aantal_inwoners_0_tot_15_jaar": [15, 15, 15, 15],
-            "aantal_inwoners_25_tot_45_jaar": [40, 40, 40, 40],
+            "cell_id": ["center_a", "center_b"],
+            "aantal_inwoners": [100, 100],
+            "aantal_inwoners_65_jaar_en_ouder": [20, 20],
+            "aantal_inwoners_0_tot_15_jaar": [15, 15],
+            "aantal_inwoners_25_tot_45_jaar": [40, 40],
         },
         geometry=[
-            box(-5, -5, 5, 5),
-            box(195, -5, 205, 5),
-            box(-5, 195, 5, 205),
-            box(195, 195, 205, 205),
+            box(95, 95, 100, 100),
+            box(100, 100, 105, 105),
         ],
         crs="EPSG:28992",
     )
     assets = gpd.GeoDataFrame(
-        {"type": ["msls", "msls", "msls", "msls"]},
+        {"type": ["msls", "msls", "msls", "msls", "msls"]},
         geometry=[
             Point(0, 0),
             Point(200, 0),
             Point(0, 200),
             Point(200, 200),
+            Point(100, 100),
         ],
         crs="EPSG:28992",
     )
@@ -1063,8 +1062,8 @@ def test_postprocess_reuses_cached_voronoi_across_calls(monkeypatch, capsys):
             "timestep": 0,
             "map": 0,
             "road_state_key": "roads_cached_voronoi",
-            "operational": np.array([True, False, True, False]),
-            "island_id": np.array([1, 1, 1, 1]),
+            "operational": np.array([False, False, False, False, True]),
+            "island_id": np.array([1, 1, 1, 1, 1]),
         }],
         gdf_assets=assets,
         pop_grid_gdf=pop,
@@ -1081,8 +1080,8 @@ def test_postprocess_reuses_cached_voronoi_across_calls(monkeypatch, capsys):
 
     assert build_calls["count"] == 1
     assert len(impacts_module._VORONOI_CACHE) == 1
-    assert updated_first[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
-    assert updated_second[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
+    assert updated_first[0]["societal_access_pct__electricity__total"] == pytest.approx(100.0)
+    assert updated_second[0]["societal_access_pct__electricity__total"] == pytest.approx(100.0)
     assert "Sample points" not in first_output
     assert "Sample points" not in second_output
 
