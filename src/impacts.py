@@ -1,10 +1,16 @@
+import hashlib
+import json
+from pathlib import Path
+
 import geopandas as gpd
-import pandas as pd
 import numpy as np
-from shapely.geometry import box
+import pandas as pd
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
-from pathlib import Path
+from shapely.geometry import box
+
+_VORONOI_CACHE = {}
+_VORONOI_CACHE_VERSION = "1.0.0"
 
 def load_voll_data(voll_path=None):
     """
@@ -57,7 +63,87 @@ def load_voll_data(voll_path=None):
 # Load VOLL data at module level to be available to all functions
 BG_TO_GROUP_MAP, CONSUMPTION_PER_SQM, VOLL_PER_SQM, VOLL_DATA, LU_CAT_DICT, LU_CONSUMPT_DICT, LU_VOLL_DICT = load_voll_data()
 
-def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
+def _hash_geometry_sequence(geometries, *, crs=None):
+    """Return a deterministic hash for a geometry iterable."""
+    digest = hashlib.sha256()
+    digest.update(str(crs).encode())
+    for geom in geometries:
+        digest.update(geom.wkb if geom is not None else b"null")
+    return digest.hexdigest()[:16]
+
+
+def _hash_value_sequence(values):
+    """Return a deterministic hash for an ordered value iterable."""
+    digest = hashlib.sha256()
+    for value in values:
+        digest.update(f"{type(value).__name__}:{value!r}\0".encode())
+    return digest.hexdigest()[:16]
+
+
+def _normalize_voronoi_boundary(boundary):
+    """Convert boundary input to an EPSG:28992 shapely geometry."""
+    if boundary is None:
+        return None
+    if hasattr(boundary, "crs") and boundary.crs != "EPSG:28992":
+        boundary = boundary.to_crs("EPSG:28992")
+    if hasattr(boundary, "geometry"):
+        boundary = boundary.geometry.unary_union
+    return boundary
+
+
+def build_voronoi_cache_key(
+    gdf_assets,
+    asset_type,
+    boundary=None,
+    *,
+    asset_cache_key=None,
+    buffer_distance=200.0,
+):
+    """Build a deterministic cache key for Voronoi generation."""
+    from src.caching import get_asset_centroid_hash
+
+    normalized_assets = gpd.GeoDataFrame(
+        gdf_assets.copy(),
+        geometry=gdf_assets.geometry.name,
+        crs=gdf_assets.crs,
+    ).to_crs("EPSG:28992")
+    provider_assets = normalized_assets[
+        normalized_assets["type"].astype(str) == str(asset_type)
+    ].copy()
+    provider_assets["geometry"] = provider_assets.geometry.centroid
+    normalized_boundary = _normalize_voronoi_boundary(boundary)
+    if asset_cache_key is None:
+        asset_cache_key = get_asset_centroid_hash(normalized_assets[["geometry"]].copy())
+    key_dict = {
+        "version": _VORONOI_CACHE_VERSION,
+        "asset_cache_key": asset_cache_key,
+        "asset_type": str(asset_type),
+        "provider_count": int(len(provider_assets)),
+        "provider_geometry_hash": _hash_geometry_sequence(
+            provider_assets.geometry,
+            crs=provider_assets.crs,
+        ),
+        "provider_id_hash": _hash_value_sequence(provider_assets.index.tolist()),
+        "boundary_hash": (
+            _hash_geometry_sequence([normalized_boundary], crs="EPSG:28992")
+            if normalized_boundary is not None
+            else "convex_hull"
+        ),
+        "target_crs": "EPSG:28992",
+        "buffer_distance": float(buffer_distance),
+    }
+    return hashlib.sha256(json.dumps(key_dict, sort_keys=True).encode()).hexdigest()[:24]
+
+
+def create_voronoi_for_asset_type(
+    gdf_assets,
+    asset_type,
+    boundary=None,
+    *,
+    verbose=False,
+    asset_cache_key=None,
+    use_cache=True,
+):
     """
     Create Voronoi polygons for a specific asset type and clip to boundary.
     
@@ -69,6 +155,15 @@ def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
     Returns:
         GeoDataFrame: Voronoi polygons with asset_id column
     """
+    cache_key = build_voronoi_cache_key(
+        gdf_assets,
+        asset_type,
+        boundary=boundary,
+        asset_cache_key=asset_cache_key,
+    )
+    if use_cache and cache_key in _VORONOI_CACHE:
+        return _VORONOI_CACHE[cache_key].copy()
+
     # Filter assets by type and get centroids
     assets_filtered = gdf_assets[gdf_assets['type'] == asset_type].copy()
     
@@ -82,10 +177,6 @@ def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
     if not points:
         return gpd.GeoDataFrame(columns=['asset_id', 'geometry'], crs="EPSG:28992")
 
-    # Check if boundary has CRS and convert if needed
-    if boundary is not None and hasattr(boundary, 'crs') and boundary.crs != "EPSG:28992":
-        boundary = boundary.to_crs("EPSG:28992")
-
     vor = Voronoi(points)
     polygons = []
     valid_asset_ids = []
@@ -97,13 +188,10 @@ def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
     if boundary is None:
         boundary = convex_hull
     else:
-        # Make sure boundary is a geometry, not a GeoDataFrame/GeoSeries
-        if hasattr(boundary, 'geometry'):
-            boundary = boundary.geometry.unary_union
+        boundary = _normalize_voronoi_boundary(boundary)
         boundary = boundary.intersection(convex_hull)
 
-    # Sample a few points to verify coordinate system
-    if len(points) > 0:
+    if verbose and len(points) > 0:
         sample_points = points[:3]
         print(f"Sample points: {sample_points}")
 
@@ -114,7 +202,6 @@ def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
                 polygon = Polygon([vor.vertices[i] for i in region])
                 if not polygon.is_valid:
                     polygon = polygon.buffer(0)
-                # Clip polygon to boundary
                 clipped_polygon = polygon.intersection(boundary)
                 if not clipped_polygon.is_empty and clipped_polygon.is_valid:
                     polygons.append(clipped_polygon)
@@ -125,13 +212,9 @@ def create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None):
 
     voronoi_gdf = gpd.GeoDataFrame({'asset_id': valid_asset_ids, 'geometry': polygons}, crs="EPSG:28992")
     
-    # Finally, clip the gdf to the study area
-    if boundary is not None:
-        try:
-            voronoi_gdf = gpd.clip(voronoi_gdf, boundary)
-        except Exception as e:
-            print(f"Error clipping Voronoi polygons: {e}")
-    
+    if use_cache:
+        _VORONOI_CACHE[cache_key] = voronoi_gdf.copy()
+
     return voronoi_gdf
 
 def create_voronoi_boundary(gdf_assets, buffer=200):

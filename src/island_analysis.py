@@ -598,7 +598,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
 
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
-        print(f"Loading hazard graph from {hazard_graph_path}")
+        if verbose:
+            print(f"Loading hazard graph from {hazard_graph_path}")
         islands_gdf = compute_island_geodataframe_from_graph(
             hazard_graph_path, 
             hazard_threshold=hazard_threshold, 
@@ -631,7 +632,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             }
             
             # Save the updated cache using the standardized function
-            save_island_cache(island_cache, cache_dir, hazard_dir)
+            save_island_cache(island_cache, cache_dir, hazard_dir, verbose=verbose)
             
             if verbose:
                 print(f"Saved island assignment to cache with key {cache_key}")

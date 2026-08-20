@@ -756,6 +756,7 @@ def _build_service_area_population_maps(
     asset_type_column: str = "type",
 ) -> Dict[str, Dict[str, Dict[Any, float]]]:
     """Pre-compute provider→population service-area assignments for special functions."""
+    from src.caching import get_asset_centroid_hash
     from src.impacts import create_voronoi_for_asset_type
     from src.utils import build_voronoi_service_area_map
 
@@ -770,6 +771,7 @@ def _build_service_area_population_maps(
         geometry="geometry",
         crs=gdf_assets.crs,
     )
+    asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
 
     available_cols = [col for col in pop_group_columns.values() if col in pop_grid_gdf.columns]
     pop_values = pop_grid_gdf[available_cols].copy()
@@ -812,7 +814,11 @@ def _build_service_area_population_maps(
                         )
                         provider_map.setdefault(nearest_provider, []).append(pop_idx)
                 else:
-                    voronoi_gdf = create_voronoi_for_asset_type(working_assets, provider_type)
+                    voronoi_gdf = create_voronoi_for_asset_type(
+                        working_assets,
+                        provider_type,
+                        asset_cache_key=asset_cache_key,
+                    )
                     provider_map = build_voronoi_service_area_map(
                         voronoi_gdf,
                         pop_assets[["geometry"]].copy(),

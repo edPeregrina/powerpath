@@ -232,7 +232,8 @@ def _update_hazard_map_states(
             cache_updated['island_cache'] = island_cache
             if allocation_cache is not None:
                 cache_updated['societal_allocation_cache'] = allocation_cache
-            print(f"Successfully resolved islands for {cache_key}")
+            if verbose:
+                print(f"Successfully resolved islands for {cache_key}")
         except Exception as e:
             print(f"Error computing islands for {cache_key}: {e}")
             print("Falling back to simple island assignment")

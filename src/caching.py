@@ -322,7 +322,7 @@ def _compute_l1_hash(l1_area_geojson, l1_active_timesteps=None):
 
     return digest.hexdigest()[:16]
 
-def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
+def save_island_cache(cache_dict, cache_dir, hazard_dir=None, verbose=False):
     """
     Save island assignment cache to disk.
     
@@ -340,7 +340,8 @@ def save_island_cache(cache_dict, cache_dir, hazard_dir=None):
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_dict, f)
-        print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
+        if verbose:
+            print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
         print(f"ERROR: Failed to save island cache: {e}")
 

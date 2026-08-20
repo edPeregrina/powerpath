@@ -9,6 +9,7 @@ from config import get_config
 
 import src.island_analysis as island_analysis
 import src.grid_based_accessibility_hex as grid_hex_module
+import src.impacts as impacts_module
 import src.simulation as simulation_module
 from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
 from src.caching import (
@@ -1004,6 +1005,88 @@ def test_electricity_access_uses_voronoi_service_areas_not_road_islands():
     assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
 
 
+def test_postprocess_reuses_cached_voronoi_across_calls(monkeypatch, capsys):
+    impacts_module._VORONOI_CACHE.clear()
+
+    islands = gpd.GeoDataFrame(
+        {"island_id": [1]},
+        geometry=[box(-10, -10, 210, 210)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["sw", "se", "nw", "ne"],
+            "aantal_inwoners": [100, 100, 100, 100],
+            "aantal_inwoners_65_jaar_en_ouder": [20, 20, 20, 20],
+            "aantal_inwoners_0_tot_15_jaar": [15, 15, 15, 15],
+            "aantal_inwoners_25_tot_45_jaar": [40, 40, 40, 40],
+        },
+        geometry=[
+            box(-5, -5, 5, 5),
+            box(195, -5, 205, 5),
+            box(-5, 195, 5, 205),
+            box(195, 195, 205, 205),
+        ],
+        crs="EPSG:28992",
+    )
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls", "msls", "msls", "msls"]},
+        geometry=[
+            Point(0, 0),
+            Point(200, 0),
+            Point(0, 200),
+            Point(200, 200),
+        ],
+        crs="EPSG:28992",
+    )
+    allocation_cache = {}
+    get_or_build_allocation(
+        allocation_cache,
+        pop,
+        "cell_id",
+        islands,
+        road_state_key="roads_cached_voronoi",
+    )
+
+    original_voronoi = impacts_module.Voronoi
+    build_calls = {"count": 0}
+
+    def counting_voronoi(*args, **kwargs):
+        build_calls["count"] += 1
+        return original_voronoi(*args, **kwargs)
+
+    monkeypatch.setattr(impacts_module, "Voronoi", counting_voronoi)
+
+    kwargs = dict(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_cached_voronoi",
+            "operational": np.array([True, False, True, False]),
+            "island_id": np.array([1, 1, 1, 1]),
+        }],
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"msls": "electricity"},
+        all_functions=["electricity"],
+    )
+
+    updated_first, _ = postprocess_societal_access_results(**kwargs)
+    first_output = capsys.readouterr().out
+    updated_second, _ = postprocess_societal_access_results(**kwargs)
+    second_output = capsys.readouterr().out
+
+    assert build_calls["count"] == 1
+    assert len(impacts_module._VORONOI_CACHE) == 1
+    assert updated_first[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
+    assert updated_second[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
+    assert "Sample points" not in first_output
+    assert "Sample points" not in second_output
+
+
 def test_electricity_metric_present_when_all_msls_providers_fail():
     """The 'electricity' key must be present even when every MSLS provider is down."""
     islands = _make_islands_gdf()
@@ -1365,7 +1448,7 @@ def test_hospital_not_flooded_disrupted_voronoi():
     )
 
 
-def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkeypatch, tmp_path):
+def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkeypatch, tmp_path, capsys):
     hazard_dir = tmp_path / "hazard_case"
     hazard_dir.mkdir(parents=True, exist_ok=True)
     config = get_config(root_dir=tmp_path, hazard_dir_override=hazard_dir)
@@ -1484,6 +1567,7 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
         societal_access_config=societal_access_config,
         verbose=False,
     )
+    first_output = capsys.readouterr().out
 
     summary_row = all_results[0][1][0]
     detail_row = all_results[0][2][0]
@@ -1510,6 +1594,11 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
         },
         verbose=False,
     )
+    second_output = capsys.readouterr().out
 
     assert math.isfinite(float(ema_result["societal_access_pct__hospital__total"][0]))
     assert float(ema_result["societal_access_pct__hospital__total"][0]) == pytest.approx(100.0)
+    combined_output = first_output + second_output
+    assert "Successfully resolved islands" not in combined_output
+    assert "Loading hazard graph from" not in combined_output
+    assert "Saved island cache:" not in combined_output
