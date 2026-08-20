@@ -86,9 +86,9 @@ def test_graph_path_access_pipeline():
     origin_access = compute_origin_access(
         {"origin_a": assignment["origin_a"], "origin_b": assignment["origin_b"]},
         island_functions,
-        all_functions=["education", "health"],
+        all_functions=["education", "hospital"],
     )
-    assert bool(origin_access.loc["origin_a", "health"])
+    assert bool(origin_access.loc["origin_a", "hospital"])
     assert not bool(origin_access.loc["origin_a", "education"])
 
     stakeholder_groups = {
@@ -96,11 +96,11 @@ def test_graph_path_access_pipeline():
         "elderly": {"origin_a": 30, "origin_b": 10},
     }
     access_matrix = compute_access_matrix_from_origins(origin_access, stakeholder_groups)
-    assert access_matrix.loc["health", "total"] == 60.0
+    assert access_matrix.loc["hospital", "total"] == 60.0
     assert access_matrix.loc["education", "total"] == 40.0
 
     equity = compute_equity_gaps(access_matrix, reference_group="total")
-    assert equity.loc["health", "elderly_absolute_gap"] == -15.0
+    assert equity.loc["hospital", "elderly_absolute_gap"] == -15.0
 
 
 def test_spatial_access_pipeline_and_wrapper():
@@ -132,13 +132,13 @@ def test_spatial_access_pipeline_and_wrapper():
     )
 
     access_matrix = result["access_matrix"]
-    assert access_matrix.loc["health", "total"] == pytest.approx(66.67, abs=0.01)
+    assert access_matrix.loc["hospital", "total"] == pytest.approx(66.67, abs=0.01)
     assert access_matrix.loc["education", "total"] == pytest.approx(33.33, abs=0.01)
     assert result["origin_access"] is None
 
 
 def test_compute_access_matrix_handles_explicit_functions():
-    island_function_map = {1: frozenset(["health"]), 2: frozenset(["education"])}
+    island_function_map = {1: frozenset(["hospital"]), 2: frozenset(["education"])}
     island_population_df = pd.DataFrame(
         {
             "island_id": [1, 2],
@@ -152,7 +152,7 @@ def test_compute_access_matrix_handles_explicit_functions():
     matrix = compute_access_matrix(
         island_function_map,
         island_population_df,
-        all_functions=["education", "health", "repair_logistics"],
+        all_functions=["education", "hospital", "repair_logistics"],
     )
     assert matrix.loc["repair_logistics", "total"] == 0.0
 
@@ -673,13 +673,13 @@ def test_postprocess_societal_access_results_uses_cached_allocations():
         pop_grid_gdf=pop,
         cell_id_column="cell_id",
         allocation_cache=cache,
-        all_functions=["education", "emergency_response", "health"],
+        all_functions=["education", "emergency_response", "hospital"],
         nearest_max_distance=2.0,
     )
 
     row = updated_summary[0]
     assert row["societal_total_population__total"] == pytest.approx(150.0)
-    assert row["societal_access_pct__health__total"] == pytest.approx(66.67, abs=0.01)
+    assert row["societal_access_pct__hospital__total"] == pytest.approx(66.67, abs=0.01)
     assert row["societal_access_pct__education__total"] == pytest.approx(0.0)
     assert row["societal_access_pct__emergency_response__total"] == pytest.approx(33.33, abs=0.01)
     assert updated_cache is cache
@@ -702,10 +702,10 @@ def test_postprocess_without_matching_allocation_emits_nan():
         pop_grid_gdf=pop,
         cell_id_column="cell_id",
         allocation_cache={},
-        all_functions=["health"],
+        all_functions=["hospital"],
     )
 
-    assert math.isnan(updated_summary[0]["societal_access_pct__health__total"])
+    assert math.isnan(updated_summary[0]["societal_access_pct__hospital__total"])
 
 
 def test_postprocess_does_not_reuse_another_road_state_allocation():
@@ -737,11 +737,11 @@ def test_postprocess_does_not_reuse_another_road_state_allocation():
         pop_grid_gdf=pop,
         cell_id_column="cell_id",
         allocation_cache={"allocation_key": allocation_df},
-        all_functions=["health"],
+        all_functions=["hospital"],
     )
 
     assert math.isnan(
-        updated_summary[0]["societal_access_pct__health__total"]
+        updated_summary[0]["societal_access_pct__hospital__total"]
     )
 
 
@@ -776,22 +776,22 @@ def test_postprocess_does_not_reuse_another_population_grid_allocation():
         pop_grid_gdf=changed_pop,
         cell_id_column="cell_id",
         allocation_cache={"allocation_key": allocation_df},
-        all_functions=["health"],
+        all_functions=["hospital"],
     )
 
     assert math.isnan(
-        updated_summary[0]["societal_access_pct__health__total"]
+        updated_summary[0]["societal_access_pct__hospital__total"]
     )
 
 
 def test_list_societal_metric_names_contains_expected_patterns():
     names = list_societal_metric_names(
-        ["health"],
+        ["hospital"],
         {"total": "aantal_inwoners", "elderly": "aantal_inwoners_65_jaar_en_ouder"},
     )
-    assert "societal_access_pct__health__total" in names
+    assert "societal_access_pct__hospital__total" in names
     assert "societal_total_population__elderly" in names
-    assert "societal_equity_absolute_gap__health__elderly" in names
+    assert "societal_equity_absolute_gap__hospital__elderly" in names
 
 
 # ---------------------------------------------------------------------------
@@ -1005,6 +1005,63 @@ def test_electricity_access_uses_voronoi_service_areas_not_road_islands():
     assert updated[0]["societal_access_pct__electricity__total"] == pytest.approx(50.0)
 
 
+def test_service_area_function_provider_types_can_override_default_functions():
+    islands = gpd.GeoDataFrame(
+        {"island_id": [1]},
+        geometry=[box(-10, -10, 210, 10)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["west", "east"],
+            "aantal_inwoners": [100, 100],
+            "aantal_inwoners_65_jaar_en_ouder": [20, 20],
+            "aantal_inwoners_0_tot_15_jaar": [15, 15],
+            "aantal_inwoners_25_tot_45_jaar": [40, 40],
+        },
+        geometry=[box(-5, -5, 5, 5), box(195, -5, 205, 5)],
+        crs="EPSG:28992",
+    )
+    assets = gpd.GeoDataFrame(
+        {"type": ["hospital", "hospital"]},
+        geometry=[Point(0, 0), Point(200, 0)],
+        crs="EPSG:28992",
+    )
+    allocation_cache = {}
+    get_or_build_allocation(
+        allocation_cache,
+        pop,
+        "cell_id",
+        islands,
+        road_state_key="roads_connected_hospital",
+    )
+    common_kwargs = dict(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_connected_hospital",
+            "operational": np.array([True, False]),
+            "island_id": np.array([1, 1]),
+        }],
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"hospital": "hospital"},
+        all_functions=["hospital"],
+    )
+
+    updated_default, _ = postprocess_societal_access_results(**common_kwargs)
+    updated_override, _ = postprocess_societal_access_results(
+        **common_kwargs,
+        service_area_function_provider_types={"hospital": frozenset({"hospital"})},
+    )
+
+    assert updated_default[0]["societal_access_pct__hospital__total"] == pytest.approx(100.0)
+    assert updated_override[0]["societal_access_pct__hospital__total"] == pytest.approx(50.0)
+
+
 def test_postprocess_reuses_cached_voronoi_across_calls(monkeypatch, capsys):
     impacts_module._VORONOI_CACHE.clear()
 
@@ -1159,10 +1216,10 @@ def test_postprocess_missing_road_state_key_emits_nan_and_warns():
             pop_grid_gdf=pop,
             cell_id_column="cell_id",
             allocation_cache={"k": allocation_df},
-            all_functions=["health"],
+            all_functions=["hospital"],
         )
 
-    assert math.isnan(updated_summary[0]["societal_access_pct__health__total"])
+    assert math.isnan(updated_summary[0]["societal_access_pct__hospital__total"])
 
 
 def test_postprocess_builds_allocation_from_islands_gdf_cache():
@@ -1192,14 +1249,14 @@ def test_postprocess_builds_allocation_from_islands_gdf_cache():
         pop_grid_gdf=pop,
         cell_id_column="cell_id",
         allocation_cache=empty_cache,
-        all_functions=["health"],
+        all_functions=["hospital"],
         islands_gdf_cache={"roads_fresh": islands},
         nearest_max_distance=200.0,
     )
 
     row = updated_summary[0]
     # A numeric (non-NaN) result means the allocation was built successfully.
-    assert not math.isnan(row["societal_access_pct__health__total"])
+    assert not math.isnan(row["societal_access_pct__hospital__total"])
     # The new allocation must have been stored in the cache.
     assert len(updated_cache) == 1
 
@@ -1251,7 +1308,7 @@ def test_postprocess_distinct_allocations_for_different_road_states():
         pop_grid_gdf=pop,
         cell_id_column="cell_id",
         allocation_cache={},
-        all_functions=["health"],
+        all_functions=["hospital"],
         islands_gdf_cache=islands_gdf_cache,
         nearest_max_distance=200.0,
     )
@@ -1290,11 +1347,11 @@ def test_postprocess_missing_islands_gdf_in_cache_emits_nan_and_warns():
             pop_grid_gdf=pop,
             cell_id_column="cell_id",
             allocation_cache={},
-            all_functions=["health"],
+            all_functions=["hospital"],
             islands_gdf_cache={"some_other_key": _make_islands_gdf()},
         )
 
-    assert math.isnan(updated_summary[0]["societal_access_pct__health__total"])
+    assert math.isnan(updated_summary[0]["societal_access_pct__hospital__total"])
 
 
 # ---------------------------------------------------------------------------

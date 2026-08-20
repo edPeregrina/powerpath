@@ -92,13 +92,24 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #                      https://www.cbs.nl/nl-nl/longread/diversen/2025/statistische-gegevens-per-vierkant-en-postcode-2022-2023-2024/4-beschrijving-cijfers
         # 'reference_group'  : the population group used as the baseline when computing
         #                      equity gaps (must be a key in 'population_groups').
+        # 'service_area_function_provider_types' (optional):
+        #                      override for function categories that should use
+        #                      service-area/Voronoi assignment instead of island
+        #                      connectivity, e.g.
+        #                      {'electricity': frozenset({'msls'}),
+        #                       'hospital': frozenset({'hospital', 'clinic'})}
+        #                      Provider type strings are exact tokens and must
+        #                      match asset "type" values exactly.
+        #                      If omitted or None, defaults from
+        #                      src.societal_access.SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+        #                      are used.
         'service_node_config': {
             'taxonomy': {
                 # Health
-                'hospital': 'health',
-                'clinic': 'health',
-                'huisartsenpraktijk': 'health',
-                'apotheek': 'health',
+                'hospital': 'hospital',
+                'clinic': 'hospital',
+                'huisartsenpraktijk': 'hospital',
+                'apotheek': 'hospital',
                 # Emergency response
                 'fire_station': 'emergency_response',
                 'brandweerkazerne': 'emergency_response',

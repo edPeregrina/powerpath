@@ -43,7 +43,6 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequ
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
 
 
 # ---------------------------------------------------------------------------
@@ -53,10 +52,10 @@ from scipy.spatial import cKDTree
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     # Health
-    "hospital": "health",
-    "clinic": "health",
-    "huisartsenpraktijk": "health",
-    "apotheek": "health",
+    "hospital": "hospital",
+    "clinic": "hospital",
+    "huisartsenpraktijk": "hospital",
+    "apotheek": "hospital",
     # Emergency response
     "fire_station": "emergency_response",
     "brandweerkazerne": "emergency_response",
@@ -820,6 +819,7 @@ def _build_service_area_population_maps(
     pop_grid_gdf: gpd.GeoDataFrame,
     pop_group_columns: Dict[str, str],
     asset_type_column: str = "type",
+    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
 ) -> Dict[str, Dict[str, Dict[Any, float]]]:
     """Pre-compute provider→population service-area assignments for special functions."""
     from src.caching import get_asset_centroid_hash
@@ -852,8 +852,11 @@ def _build_service_area_population_maps(
     ):
         pop_assets = pop_assets.to_crs(working_assets.crs)
 
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+
     function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
-    for function_name, provider_types in SERVICE_AREA_FUNCTION_PROVIDER_TYPES.items():
+    for function_name, provider_types in service_area_function_provider_types.items():
         group_maps: Dict[str, Dict[Any, float]] = {label: {} for label in pop_group_columns}
         has_provider = False
 
@@ -872,21 +875,24 @@ def _build_service_area_population_maps(
 
                     provider_ids = providers.index.to_numpy()
                     pop_ids = pop_assets.index.to_numpy()
-                    provider_xy = np.column_stack(
+                    provider_coords = np.column_stack(
                         (
                             provider_centroids.x.to_numpy(dtype=float),
                             provider_centroids.y.to_numpy(dtype=float),
                         )
                     )
-                    pop_xy = np.column_stack(
+                    pop_coords = np.column_stack(
                         (
                             pop_centroids.x.to_numpy(dtype=float),
                             pop_centroids.y.to_numpy(dtype=float),
                         )
                     )
 
-                    nearest_idx = cKDTree(provider_xy).query(pop_xy)[1]
-                    assigned_provider_ids = provider_ids[np.asarray(nearest_idx, dtype=int)]
+                    sq_dist = (
+                        (pop_coords[:, None, :] - provider_coords[None, :, :]) ** 2
+                    ).sum(axis=2)
+                    nearest_idx = np.argmin(sq_dist, axis=1)
+                    assigned_provider_ids = provider_ids[nearest_idx]
                     sort_order = np.argsort(assigned_provider_ids, kind="stable")
                     sorted_provider_ids = assigned_provider_ids[sort_order]
                     sorted_pop_ids = pop_ids[sort_order]
@@ -1014,6 +1020,7 @@ def postprocess_societal_access_results(
     reference_group: str = "total",
     nearest_max_distance: float = 200.0,
     islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
+    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
     profiler: Optional[Any] = None,
@@ -1076,6 +1083,11 @@ def postprocess_societal_access_results(
         are built deterministically via :func:`get_or_build_allocation` for
         every road state encountered.  When ``None``, the legacy metadata-scan
         path is used as a backward-compatible fallback.
+    service_area_function_provider_types:
+        Optional ``{function_name: frozenset({provider_type, ...})}`` override
+        for service-area routing.  Provider type tokens must match
+        ``asset_type_column`` values exactly.  When ``None``, defaults to
+        :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
 
     Returns
     -------
@@ -1131,6 +1143,7 @@ def postprocess_societal_access_results(
             pop_grid_gdf=pop_grid_gdf,
             pop_group_columns=pop_group_columns,
             asset_type_column=asset_type_column,
+            service_area_function_provider_types=service_area_function_provider_types,
         )
 
     # Determine which functions to always emit

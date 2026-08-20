@@ -1292,7 +1292,10 @@ def simulate_asset_damage_recovery_access_breakdown(
             measures are active (in hours).
         societal_access_config (dict, optional): Societal-access inputs. If its
             allocation cache is omitted, the hazard-scoped interim pickle is
-            loaded automatically.
+            loaded automatically. Optional key
+            ``service_area_function_provider_types`` overrides which function
+            categories use service-area/Voronoi routing:
+            ``{function_name: frozenset({provider_type, ...})}``.
         profiler (SimulationTimingProfiler, optional): Optional timing profiler.
             When provided, each major phase within every timestep is wrapped in
             a ``profiler.section()`` context so that wall-clock time is recorded.
@@ -1563,6 +1566,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
+                service_area_function_provider_types=_sa_cfg.get("service_area_function_provider_types"),
                 fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
                 verbose=_sa_cfg.get("verbose", verbose),
                 profiler=profiler,
