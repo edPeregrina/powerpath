@@ -909,24 +909,43 @@ def _apply_service_area_societal_scalars(
     service_area_population_maps: Dict[str, Dict[str, Dict[Any, float]]],
     pop_group_columns: Dict[str, str],
     reference_group: str,
+    numpy_maps: Optional[Dict[str, Dict[str, Tuple[Any, Any]]]] = None,
 ) -> Dict[str, float]:
-    """Override function metrics for service-area-based services such as electricity."""
+    """Override function metrics for service-area-based services such as electricity.
+
+    Parameters
+    ----------
+    numpy_maps:
+        Optional precomputed numpy arrays per function/label.  Each entry is
+        ``{func: {label: (ids_array, pops_array)}}``.  When provided, the
+        O(N×G) Python generator sums are replaced by O(N) masked numpy sums.
+    """
     if not service_area_population_maps:
         return fields
 
     derived_totals: Dict[str, float] = {}
     for function_name, group_maps in service_area_population_maps.items():
         operational_ids = operational_asset_ids_by_function.get(function_name, set())
+        func_numpy = numpy_maps.get(function_name) if numpy_maps is not None else None
         for label in pop_group_columns:
-            provider_population = group_maps.get(label, {})
-            total = float(sum(provider_population.values()))
-            with_access = float(
-                sum(
-                    population
-                    for provider_id, population in provider_population.items()
-                    if provider_id in operational_ids
+            if func_numpy is not None and label in func_numpy:
+                ids_arr, pops_arr = func_numpy[label]
+                total = float(pops_arr.sum())
+                if len(ids_arr) > 0 and operational_ids:
+                    mask = np.isin(ids_arr, list(operational_ids))
+                    with_access = float(pops_arr[mask].sum())
+                else:
+                    with_access = 0.0
+            else:
+                provider_population = group_maps.get(label, {})
+                total = float(sum(provider_population.values()))
+                with_access = float(
+                    sum(
+                        population
+                        for provider_id, population in provider_population.items()
+                        if provider_id in operational_ids
+                    )
                 )
-            )
             without_access = total - with_access
             pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
 
@@ -1113,7 +1132,24 @@ def postprocess_societal_access_results(
     _islands_hash_cache: Dict[str, Tuple[str, str]] = {}
 
     # --- Problem 3: pop_alloc cache keyed by allocation_cache_key ---
-    _pop_alloc_cache: Dict[str, pd.DataFrame] = {}
+    # Each entry: {"pop_alloc": df, "island_pop": df, "total_pop": dict, "available_group_cols": dict}
+    _pop_alloc_cache: Dict[str, Dict[str, Any]] = {}
+
+    # --- Problem 6: cache _compute_societal_scalars output per (allocation_cache_key, frozen_island_function_map) ---
+    _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
+
+    # --- Problem 4: precompute numpy arrays for _apply_service_area_societal_scalars ---
+    _service_area_numpy: Dict[str, Dict[str, Any]] = {}
+    for _func, _group_maps in service_area_population_maps.items():
+        _service_area_numpy[_func] = {}
+        for _label, _provider_pop in _group_maps.items():
+            if _provider_pop:
+                _ids = np.array(list(_provider_pop.keys()))
+                _pops = np.array(list(_provider_pop.values()), dtype=float)
+            else:
+                _ids = np.array([])
+                _pops = np.array([], dtype=float)
+            _service_area_numpy[_func][_label] = (_ids, _pops)
 
     # Process each timestep that has detailed output
     for ts_idx, ts_summary in enumerate(summary_results):
@@ -1259,37 +1295,71 @@ def postprocess_societal_access_results(
                 if profiler is not None
                 else nullcontext()
             ):
-                # --- Problem 3: retrieve or build pop_alloc once per allocation_cache_key ---
-                cached_pop_alloc: Optional[pd.DataFrame] = None
+                # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
+                _cached_entry: Optional[Dict[str, Any]] = None
                 if allocation_cache_key is not None and allocation_df is not None:
                     if allocation_cache_key not in _pop_alloc_cache:
                         try:
-                            _pop_alloc_cache[allocation_cache_key] = apply_population_to_allocations(
+                            _pop_alloc_df = apply_population_to_allocations(
                                 allocation_df=allocation_df,
                                 pop_grid_gdf=pop_grid_gdf,
                                 cell_id_column=cell_id_column,
                                 pop_group_columns=pop_group_columns,
                             )
+                            _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
+                            _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
+                            _wcl = list(_agc.values())
+                            _isl_pop = (
+                                _pop_alloc_df.groupby("island_id")[_wcl].sum()
+                                if _wcl
+                                else pd.DataFrame()
+                            )
+                            _tot_pop: Dict[str, float] = {}
+                            if not _isl_pop.empty:
+                                for _lbl, _col in _agc.items():
+                                    _tot_pop[_lbl] = float(_isl_pop[_col].sum())
+                            else:
+                                for _lbl, _col in _agc.items():
+                                    _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
+                            _pop_alloc_cache[allocation_cache_key] = {
+                                "pop_alloc": _pop_alloc_df,
+                                "island_pop": _isl_pop,
+                                "total_pop": _tot_pop,
+                                "available_group_cols": _agc,
+                            }
                         except Exception:
                             pass
-                    cached_pop_alloc = _pop_alloc_cache.get(allocation_cache_key)
+                    _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
 
-                societal_fields = _compute_societal_scalars(
-                    frozen_island_function_map=frozen_island_function_map,
-                    allocation_df=allocation_df,
-                    pop_grid_gdf=pop_grid_gdf,
-                    cell_id_column=cell_id_column,
-                    pop_group_columns=pop_group_columns,
-                    all_functions=all_functions,
-                    reference_group=reference_group,
-                    pop_alloc=cached_pop_alloc,
-                )
+                # --- Fix 6: cache _compute_societal_scalars per (allocation_cache_key, frozen_island_function_map) ---
+                _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key)
+                if _scalar_cache_key in _scalar_fields_cache:
+                    societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
+                else:
+                    societal_fields = _compute_societal_scalars(
+                        frozen_island_function_map=frozen_island_function_map,
+                        allocation_df=allocation_df,
+                        pop_grid_gdf=pop_grid_gdf,
+                        cell_id_column=cell_id_column,
+                        pop_group_columns=pop_group_columns,
+                        all_functions=all_functions,
+                        reference_group=reference_group,
+                        pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
+                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                    )
+                    _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+
+                # --- Fix 4: use precomputed numpy arrays for service area computation ---
                 societal_fields = _apply_service_area_societal_scalars(
                     societal_fields,
                     operational_asset_ids_by_function=operational_asset_ids_by_function,
                     service_area_population_maps=service_area_population_maps,
                     pop_group_columns=pop_group_columns,
                     reference_group=reference_group,
+                    numpy_maps=_service_area_numpy if _service_area_numpy else None,
                 )
 
             ts_summary.update(societal_fields)
@@ -1332,6 +1402,9 @@ def _compute_societal_scalars(
     all_functions: List[str],
     reference_group: str,
     pop_alloc: Optional[pd.DataFrame] = None,
+    island_pop: Optional[pd.DataFrame] = None,
+    total_pop: Optional[Dict[str, float]] = None,
+    available_group_cols: Optional[Dict[str, str]] = None,
 ) -> Dict[str, float]:
     """Compute flat societal metric scalars for one timestep.
 
@@ -1357,6 +1430,14 @@ def _compute_societal_scalars(
         Optional pre-built output of :func:`apply_population_to_allocations`.
         When provided, the internal ``apply_population_to_allocations`` call is
         skipped (Problem 3 optimisation).
+    island_pop:
+        Optional pre-aggregated per-island population DataFrame (Fix 1).
+        When provided, the groupby is skipped entirely.
+    total_pop:
+        Optional pre-computed total population per group (Fix 2).
+        When provided, the per-group sum is skipped.
+    available_group_cols:
+        Optional pre-computed ``{label: weighted_col_name}`` mapping (Fix 1).
 
     Returns a dict of flat metric names → scalar values.
     """
@@ -1394,27 +1475,30 @@ def _compute_societal_scalars(
         except Exception:
             return _emit_nan()
 
-    # Aggregate weighted population per island
-    group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
-    available_group_cols = {
-        label: col for label, col in group_cols.items()
-        if col in pop_alloc.columns
-    }
+    # --- Fix 1: use pre-aggregated island_pop / total_pop when available ---
+    if available_group_cols is None:
+        group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
+        available_group_cols = {
+            label: col for label, col in group_cols.items()
+            if col in pop_alloc.columns
+        }
 
-    weighted_col_list = list(available_group_cols.values())
+    if island_pop is None:
+        weighted_col_list = list(available_group_cols.values())
+        island_pop = (
+            pop_alloc.groupby("island_id")[weighted_col_list].sum()
+            if weighted_col_list
+            else pd.DataFrame()
+        )
 
-    # Problem 4: Pre-compute per-island population aggregates once (O(N_rows) groupby)
-    # rather than repeating F×G .isin()+.sum() calls on the full DataFrame.
-    island_pop = pop_alloc.groupby("island_id")[weighted_col_list].sum() if weighted_col_list else pd.DataFrame()
-
-    # Total population per group (all islands, including -1)
-    total_pop: Dict[str, float] = {}
-    if not island_pop.empty:
-        for label, col in available_group_cols.items():
-            total_pop[label] = float(island_pop[col].sum())
-    else:
-        for label, col in available_group_cols.items():
-            total_pop[label] = float(pop_alloc[col].sum())
+    if total_pop is None:
+        total_pop = {}
+        if not island_pop.empty:
+            for label, col in available_group_cols.items():
+                total_pop[label] = float(island_pop[col].sum())
+        else:
+            for label, col in available_group_cols.items():
+                total_pop[label] = float(pop_alloc[col].sum())
 
     # Population with access per (function, group) — use island_pop for efficiency
     for func in all_functions:
