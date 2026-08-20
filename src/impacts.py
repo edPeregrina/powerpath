@@ -5,9 +5,9 @@ from pathlib import Path
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-from scipy.spatial import Voronoi
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPoint, Polygon
 from shapely.geometry import box
+from shapely.ops import voronoi_diagram
 
 _VORONOI_CACHE = {}
 _VORONOI_CACHE_VERSION = "1.0.0"
@@ -182,44 +182,49 @@ def create_voronoi_for_asset_type(
     if not points:
         return gpd.GeoDataFrame(columns=['asset_id', 'geometry'], crs="EPSG:28992")
 
-    vor = Voronoi(points)
-    polygons = []
-    valid_asset_ids = []
-
-    # If no boundary is provided, use buffered convex hull of centroids
+    # Determine the clipping boundary.
     centroids_union = (
         assets_filtered.geometry.union_all()
         if hasattr(assets_filtered.geometry, "union_all")
         else assets_filtered.geometry.unary_union
     )
-    convex_hull = centroids_union.convex_hull.buffer(200)  # 200 meters buffer
+    # Buffer the convex hull so voronoi_diagram can produce finite polygons
+    # for all regions (including peripheral ones).  The final gpd.clip()
+    # below constrains them to the actual boundary.
+    convex_hull_buffered = centroids_union.convex_hull.buffer(200)
+    envelope = convex_hull_buffered
 
     if boundary is None:
-        boundary = convex_hull
+        clip_boundary = convex_hull_buffered
     else:
         boundary = _normalize_voronoi_boundary(boundary)
-        boundary = boundary.intersection(convex_hull)
+        clip_boundary = boundary
 
     if verbose and len(points) > 0:
-        sample_points = points[:3]
-        print(f"Sample points: {sample_points}")
+        print(f"Sample points: {points[:3]}")
 
-    for point_idx, region_idx in enumerate(vor.point_region):
-        region = vor.regions[region_idx]
-        if not -1 in region and len(region) > 0:
-            try:
-                polygon = Polygon([vor.vertices[i] for i in region])
-                if not polygon.is_valid:
-                    polygon = polygon.buffer(0)
-                clipped_polygon = polygon.intersection(boundary)
-                if not clipped_polygon.is_empty and clipped_polygon.is_valid:
-                    polygons.append(clipped_polygon)
-                    valid_asset_ids.append(asset_ids[point_idx])
-                    
-            except Exception as e:
-                print(f"Error processing Voronoi region for asset {asset_ids[point_idx]}: {e}")
+    # shapely.ops.voronoi_diagram handles infinite regions by bounding them
+    # with the supplied envelope, so every input point gets a polygon.
+    multipoint = MultiPoint([assets_filtered.geometry[i] for i in assets_filtered.index])
+    regions = voronoi_diagram(multipoint, envelope=envelope)
+
+    # Match each Voronoi region back to the nearest centroid.
+    centroid_geoms = [(asset_id, assets_filtered.at[asset_id, 'geometry'])
+                      for asset_id in asset_ids]
+    polygons = []
+    valid_asset_ids = []
+    for region_geom in regions.geoms:
+        best_id = min(centroid_geoms, key=lambda t: region_geom.distance(t[1]))[0]
+        polygons.append(region_geom)
+        valid_asset_ids.append(best_id)
 
     voronoi_gdf = gpd.GeoDataFrame({'asset_id': valid_asset_ids, 'geometry': polygons}, crs="EPSG:28992")
+
+    # Clip the whole GeoDataFrame to the boundary so that Voronoi polygons
+    # that extend far beyond the study area are properly contained.
+    if not voronoi_gdf.empty and clip_boundary is not None:
+        clip_gdf = gpd.GeoDataFrame(geometry=[clip_boundary], crs="EPSG:28992")
+        voronoi_gdf = gpd.clip(voronoi_gdf, clip_gdf).reset_index(drop=True)
     
     if use_cache:
         _VORONOI_CACHE[cache_key] = voronoi_gdf.copy()
