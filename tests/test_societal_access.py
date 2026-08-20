@@ -414,6 +414,230 @@ def test_island_cache_remains_lightweight_without_islands_gdf(tmp_path, monkeypa
     assert "islands_gdf" not in island_cache[cache_key]
 
 
+def test_match_island_ids_assets_cache_hit_with_cached_allocation_skips_graph(
+    tmp_path, monkeypatch, capsys
+):
+    config = get_config(
+        root_dir=tmp_path,
+        hazard_dir_override=tmp_path / "hazard_case",
+    )
+    config["simulation_config"]["verbose"] = True
+
+    temp_gdf = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "hospital"],
+            "access_rfid": [10, 10],
+        },
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs="EPSG:28992",
+    )
+    cache_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        get_asset_centroid_hash(temp_gdf),
+    )
+    island_cache = {
+        cache_key: {
+            "island_ids": np.array([1, 1], dtype=int),
+            "rfids_islands": {10: 1},
+        }
+    }
+
+    pop = _make_population_gdf().iloc[:1].copy()
+    allocation_df = build_origin_island_allocations(
+        pop,
+        cell_id_column="cell_id",
+        islands_gdf=_make_islands_gdf(),
+        road_state_key=cache_key,
+    )
+    allocation_cache = {"allocation_key": allocation_df}
+
+    compute_calls = {"count": 0}
+    save_calls = {"count": 0}
+
+    def _unexpected_compute(*args, **kwargs):
+        compute_calls["count"] += 1
+        raise AssertionError("Graph reconstruction should not run on allocation cache hit")
+
+    def _unexpected_save(*args, **kwargs):
+        save_calls["count"] += 1
+        raise AssertionError("Island cache should not be rewritten on cache hit")
+
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        _unexpected_compute,
+    )
+    monkeypatch.setattr(island_analysis, "save_island_cache", _unexpected_save)
+
+    asset_island_ids, rfids_islands = island_analysis.match_island_ids_assets(
+        temp_gdf,
+        boundary_asset_indices=[],
+        boundary_islands_rfids=[],
+        hazard_threshold=0.2,
+        hazard_column="EV0_ma",
+        config=config,
+        island_cache=island_cache,
+        cache_dir=config["interim_dir"],
+        hazard_dir=config["hazard_dir"],
+        societal_allocation_cache=allocation_cache,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+    )
+
+    output = capsys.readouterr().out
+    assert compute_calls["count"] == 0
+    assert save_calls["count"] == 0
+    assert "Island cache hit" in output
+    assert "Societal allocation cache hit" in output
+    assert "Skipping hazard graph reconstruction" in output
+    assert asset_island_ids.tolist() == [1, 1]
+    assert rfids_islands == {10: 1}
+
+
+def test_match_island_ids_assets_cache_hit_missing_allocation_builds_once(
+    tmp_path, monkeypatch
+):
+    config = get_config(
+        root_dir=tmp_path,
+        hazard_dir_override=tmp_path / "hazard_case",
+    )
+    config["simulation_config"]["verbose"] = False
+
+    temp_gdf = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "hospital"],
+            "access_rfid": [10, 10],
+        },
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs="EPSG:28992",
+    )
+    cache_key = create_island_cache_key(
+        "EV0_ma",
+        0.2,
+        get_asset_centroid_hash(temp_gdf),
+    )
+    island_cache = {
+        cache_key: {
+            "island_ids": np.array([1, 1], dtype=int),
+            "rfids_islands": {10: 1},
+        }
+    }
+    pop = _make_population_gdf().iloc[:1].copy()
+    allocation_cache = {}
+
+    compute_calls = {"count": 0}
+    save_calls = {"count": 0}
+
+    def _mock_compute(*args, **kwargs):
+        compute_calls["count"] += 1
+        return gpd.GeoDataFrame(
+            {"rfid": [10], "island_id": [1], "length_m": [100.0]},
+            geometry=[LineString([(0, 0), (10, 0)])],
+            crs="EPSG:28992",
+        )
+
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        _mock_compute,
+    )
+    monkeypatch.setattr(
+        island_analysis,
+        "save_island_cache",
+        lambda *args, **kwargs: save_calls.__setitem__("count", save_calls["count"] + 1),
+    )
+
+    for _ in range(2):
+        asset_island_ids, rfids_islands = island_analysis.match_island_ids_assets(
+            temp_gdf,
+            boundary_asset_indices=[],
+            boundary_islands_rfids=[],
+            hazard_threshold=0.2,
+            hazard_column="EV0_ma",
+            config=config,
+            island_cache=island_cache,
+            cache_dir=config["interim_dir"],
+            hazard_dir=config["hazard_dir"],
+            societal_allocation_cache=allocation_cache,
+            pop_grid_gdf=pop,
+            cell_id_column="cell_id",
+        )
+        assert asset_island_ids.tolist() == [1, 1]
+        assert rfids_islands == {10: 1}
+
+    assert compute_calls["count"] == 1
+    assert save_calls["count"] == 0
+    assert len(allocation_cache) == 1
+
+
+def test_match_island_ids_assets_repeated_run_reuses_island_and_allocation_caches(
+    tmp_path, monkeypatch
+):
+    config = get_config(
+        root_dir=tmp_path,
+        hazard_dir_override=tmp_path / "hazard_case",
+    )
+    config["simulation_config"]["verbose"] = False
+
+    temp_gdf = gpd.GeoDataFrame(
+        {
+            "type": ["msls", "hospital"],
+            "access_rfid": [10, 10],
+        },
+        geometry=[Point(0, 0), Point(1, 1)],
+        crs="EPSG:28992",
+    )
+    island_cache = {}
+    pop = _make_population_gdf().iloc[:1].copy()
+    allocation_cache = {}
+
+    compute_calls = {"count": 0}
+    save_calls = {"count": 0}
+
+    def _mock_compute(*args, **kwargs):
+        compute_calls["count"] += 1
+        return gpd.GeoDataFrame(
+            {"rfid": [10], "island_id": [1], "length_m": [100.0]},
+            geometry=[LineString([(0, 0), (10, 0)])],
+            crs="EPSG:28992",
+        )
+
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        _mock_compute,
+    )
+    monkeypatch.setattr(
+        island_analysis,
+        "save_island_cache",
+        lambda *args, **kwargs: save_calls.__setitem__("count", save_calls["count"] + 1),
+    )
+
+    for _ in range(2):
+        asset_island_ids, rfids_islands = island_analysis.match_island_ids_assets(
+            temp_gdf,
+            boundary_asset_indices=[],
+            boundary_islands_rfids=[],
+            hazard_threshold=0.2,
+            hazard_column="EV0_ma",
+            config=config,
+            island_cache=island_cache,
+            cache_dir=config["interim_dir"],
+            hazard_dir=config["hazard_dir"],
+            societal_allocation_cache=allocation_cache,
+            pop_grid_gdf=pop,
+            cell_id_column="cell_id",
+        )
+        assert asset_island_ids.tolist() == [1, 1]
+        assert rfids_islands == {10: 1}
+
+    assert compute_calls["count"] == 1
+    assert save_calls["count"] == 1
+    assert len(island_cache) == 1
+    assert len(allocation_cache) == 1
+
+
 def test_postprocess_societal_access_results_uses_cached_allocations():
     islands = _make_islands_gdf()
     pop = _make_population_gdf().iloc[:2].copy()
@@ -579,6 +803,47 @@ def _make_mixed_assets_gdf():
         geometry=[Point(1, 1), Point(5, 5), Point(9, 9), Point(12, 5)],
         crs="EPSG:28992",
     )
+
+
+def test_postprocess_verbose_logs_asset_and_provider_scope(capsys):
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+    allocation_cache = {}
+    get_or_build_allocation(
+        allocation_cache,
+        pop,
+        "cell_id",
+        islands,
+        road_state_key="roads_scope",
+    )
+
+    assets = gpd.GeoDataFrame(
+        {"type": ["ls", "ms", "msls", "hospital"]},
+        geometry=[Point(1, 1), Point(5, 5), Point(9, 9), Point(12, 5)],
+        crs="EPSG:28992",
+    )
+    postprocess_societal_access_results(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_scope",
+            "operational": np.array([True, True, True, True]),
+            "island_id": np.array([1, 1, 1, 2]),
+        }],
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"msls": "electricity", "hospital": "hospital"},
+        all_functions=["electricity", "hospital"],
+        verbose=True,
+    )
+    output = capsys.readouterr().out
+    assert "Simulation assets: 4" in output
+    assert "Asset counts by type:" in output
+    assert "Electricity providers: 1 MSLS" in output
+    assert "Hospital providers: 1" in output
 
 
 def test_ls_and_ms_assets_do_not_provide_electricity_access():
@@ -1186,6 +1451,14 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
             crs="EPSG:28992",
         ),
     )
+    accessibility_calls = {"count": 0}
+    monkeypatch.setattr(
+        simulation_module.grid_hex,
+        "accessibility_model",
+        lambda *args, **kwargs: accessibility_calls.__setitem__(
+            "count", accessibility_calls["count"] + 1
+        ) or [True] * len(args[0]),
+    )
 
     societal_access_config = {
         "pop_grid_gdf": pop,
@@ -1218,6 +1491,7 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
     assert math.isfinite(summary_row["societal_access_pct__hospital__total"])
     assert summary_row["societal_access_pct__hospital__total"] == pytest.approx(100.0)
     assert all("islands_gdf" not in entry for entry in cache_updated["island_cache"].values())
+    assert accessibility_calls["count"] == 0
 
     ema_result = simulate_asset_damage_recovery_access_breakdown_ema(
         gdf_assets=gdf_assets.copy(),

@@ -546,7 +546,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         and cache_key in island_cache
     )
     if cache_hit and verbose:
-        print(f"Using cached island assignment for {cache_key}")
+        print(f"Island cache hit: {cache_key}")
 
     if boundary_asset_indices is None or boundary_islands_rfids is None: 
         boundary_assets_cache_path = _config['interim_dir'] / 'boundary_assets.pkl'
@@ -578,6 +578,24 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
     if cache_hit and not needs_transient_islands:
         return asset_island_ids, rfids_islands
 
+    if cache_hit and needs_transient_islands:
+        from src.societal_access import _find_allocation_cache_entry
+
+        allocation_cache_key, _ = _find_allocation_cache_entry(
+            societal_allocation_cache,
+            pop_grid_gdf,
+            cell_id_column,
+            cache_key,
+            nearest_max_distance,
+        )
+        if allocation_cache_key is not None:
+            if verbose:
+                print(f"Societal allocation cache hit: {allocation_cache_key}")
+                print("Skipping hazard graph reconstruction")
+            return asset_island_ids, rfids_islands
+        if verbose:
+            print(f"Societal allocation cache miss for road state: {cache_key}")
+
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
         print(f"Loading hazard graph from {hazard_graph_path}")
@@ -604,8 +622,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             asset_island_ids = np.array(asset_island_ids, dtype=int)
             rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
 
-        # Cache the results
-        if island_cache is not None and cache_dir is not None:
+        # Cache the results only when this road state was not already cached.
+        if island_cache is not None and cache_dir is not None and not cache_hit:
             # Store the computed results in the cache
             island_cache[cache_key] = {
                 'island_ids': asset_island_ids,
@@ -621,7 +639,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         if needs_transient_islands:
             from src.societal_access import get_or_build_allocation
 
-            get_or_build_allocation(
+            _, allocation_cache_key, allocation_cache_updated = get_or_build_allocation(
                 societal_allocation_cache,
                 pop_grid_gdf,
                 cell_id_column,
@@ -630,6 +648,12 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 nearest_max_distance=nearest_max_distance,
                 road_state_key=cache_key,
             )
+            if verbose:
+                allocation_cache_state = "miss" if allocation_cache_updated else "hit"
+                print(
+                    f"Societal allocation cache {allocation_cache_state}: "
+                    f"{allocation_cache_key}"
+                )
 
     except Exception as e:
         print(f"Error in computing islands from graph: {e}")

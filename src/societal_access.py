@@ -906,6 +906,7 @@ def postprocess_societal_access_results(
     nearest_max_distance: float = 200.0,
     islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
     fail_on_missing_allocation: bool = False,
+    verbose: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -987,6 +988,26 @@ def postprocess_societal_access_results(
         stable_asset_ids = gdf_assets[asset_id_column].values
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
+
+    if verbose:
+        if asset_type_column in gdf_assets.columns:
+            asset_counts_by_type = (
+                gdf_assets[asset_type_column].astype(str).value_counts().to_dict()
+            )
+            electricity_provider_count = int(
+                gdf_assets[asset_type_column].astype(str).eq("msls").sum()
+            )
+            hospital_provider_count = int(
+                gdf_assets[asset_type_column].astype(str).eq("hospital").sum()
+            )
+        else:
+            asset_counts_by_type = {}
+            electricity_provider_count = 0
+            hospital_provider_count = 0
+        print(f"Simulation assets: {len(gdf_assets)}")
+        print(f"Asset counts by type: {asset_counts_by_type}")
+        print(f"Electricity providers: {electricity_provider_count} MSLS")
+        print(f"Hospital providers: {hospital_provider_count}")
 
     service_area_assets = gdf_assets.copy()
     service_area_assets.index = stable_asset_ids
