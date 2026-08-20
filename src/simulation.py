@@ -4,6 +4,7 @@ Functions to run the damage and recovery simulation.
 
 import sys
 import pickle
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -91,7 +92,8 @@ def _update_hazard_map_states(
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
     fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
-    repair_crews_by_asset_type=None, l2_asset_geojson=None, l2_active_timesteps=None
+    repair_crews_by_asset_type=None, l2_asset_geojson=None, l2_active_timesteps=None,
+    societal_access_config=None,
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -191,44 +193,54 @@ def _update_hazard_map_states(
             l2_active_timesteps=l2_active_timesteps,
         )
         state.road_state_key = cache_key
-        if cache_key in island_cache:
-            island_data = island_cache[cache_key]
-            state.island_ids = island_data['island_ids']
-            rfids_islands = island_data['rfids_islands']
+        try:
+            temp_gdf_for_islands = temp_gdf
+            allocation_cache = None
+            pop_grid_gdf = None
+            cell_id_column = "cell_id"
+            island_id_column = "island_id"
+            nearest_max_distance = 200.0
+            if societal_access_config is not None:
+                allocation_cache = societal_access_config.get("allocation_cache")
+                pop_grid_gdf = societal_access_config.get("pop_grid_gdf")
+                cell_id_column = societal_access_config.get("cell_id_column", "cell_id")
+                island_id_column = societal_access_config.get("island_id_column", "island_id")
+                nearest_max_distance = societal_access_config.get("nearest_max_distance", 200.0)
+
+            asset_island_ids, rfids_islands = match_island_ids_assets(
+                temp_gdf_for_islands,
+                boundary_asset_indices=boundary_asset_indices,
+                boundary_islands_rfids=boundary_islands_rfids,
+                hazard_threshold=flood_threshold,
+                hazard_column=haz_col_str,
+                config=_config,
+                island_cache=island_cache,
+                cache_dir=interim_dir,
+                hazard_dir=hazard_dir,
+                l1_area_geojson=active_l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
+                l2_asset_geojson=active_l2_asset_geojson,
+                l2_active_timesteps=l2_active_timesteps,
+                societal_allocation_cache=allocation_cache,
+                pop_grid_gdf=pop_grid_gdf,
+                cell_id_column=cell_id_column,
+                island_id_column=island_id_column,
+                nearest_max_distance=nearest_max_distance,
+            )
+            if asset_island_ids is None or rfids_islands is None:
+                raise RuntimeError("Island assignment returned no road state")
+            state.island_ids = asset_island_ids
+            cache_updated['island_cache'] = island_cache
+            if allocation_cache is not None:
+                cache_updated['societal_allocation_cache'] = allocation_cache
             if verbose:
-                print(f"Using cached islands for {cache_key}")
-        else:
-            print(f"Cache miss for {cache_key}, computing islands on the fly...")
-            try:
-                temp_gdf_for_islands = temp_gdf
-                
-                asset_island_ids, rfids_islands = match_island_ids_assets(
-                    temp_gdf_for_islands, 
-                    boundary_asset_indices=boundary_asset_indices, 
-                    boundary_islands_rfids=boundary_islands_rfids, 
-                    hazard_threshold=flood_threshold, 
-                    hazard_column=haz_col_str, 
-                    config=_config,
-                    island_cache=island_cache,
-                    cache_dir=interim_dir,
-                    hazard_dir=hazard_dir,
-                    l1_area_geojson=active_l1_area_geojson,
-                    l1_active_timesteps=l1_active_timesteps,
-                    l2_asset_geojson=active_l2_asset_geojson,
-                    l2_active_timesteps=l2_active_timesteps,
-                )
-                if asset_island_ids is None or rfids_islands is None:
-                    raise RuntimeError("Island assignment returned no road state")
-                state.island_ids = asset_island_ids
-                # Assign island for each asset for the current state
-                cache_updated['island_cache'] = island_cache
-                print(f"Successfully computed and cached islands for {cache_key}")
-            except Exception as e:
-                print(f"Error computing islands for {cache_key}: {e}")
-                print("Falling back to simple island assignment")
-                state.island_ids = np.ones(num_assets, dtype=int)
-                state.road_state_key = None
-                rfids_islands = None
+                print(f"Successfully resolved islands for {cache_key}")
+        except Exception as e:
+            print(f"Error computing islands for {cache_key}: {e}")
+            print("Falling back to simple island assignment")
+            state.island_ids = np.ones(num_assets, dtype=int)
+            state.road_state_key = None
+            rfids_islands = None
        
         if rfids_islands is not None:
             # Call with all caching parameters
@@ -826,7 +838,8 @@ def _process_timestep(
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
     depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
     repair_crews_by_asset_type=None,
-    l2_asset_geojson=None, l2_active_timesteps=None
+    l2_asset_geojson=None, l2_active_timesteps=None,
+    societal_access_config=None,
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -844,6 +857,7 @@ def _process_timestep(
             repair_crews_by_asset_type=repair_crews_by_asset_type,
             l2_asset_geojson=l2_asset_geojson,
             l2_active_timesteps=l2_active_timesteps,
+            societal_access_config=societal_access_config,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -1235,6 +1249,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     l2_active_timesteps=None,
     repair_crews_by_asset_type=None,
     societal_access_config=None,
+    profiler=None,
     ):
     """
     Runs a time-stepped simulation of asset damage and recovery, considering hazard exposure, accessibility, and repair crew assignment.
@@ -1277,7 +1292,14 @@ def simulate_asset_damage_recovery_access_breakdown(
             measures are active (in hours).
         societal_access_config (dict, optional): Societal-access inputs. If its
             allocation cache is omitted, the hazard-scoped interim pickle is
-            loaded automatically.
+            loaded automatically. Optional key
+            ``service_area_function_provider_types`` overrides which function
+            categories use service-area/Voronoi routing:
+            ``{function_name: frozenset({provider_type, ...})}``.
+        profiler (SimulationTimingProfiler, optional): Optional timing profiler.
+            When provided, each major phase within every timestep is wrapped in
+            a ``profiler.section()`` context so that wall-clock time is recorded.
+            See :class:`src.timing_profiler.SimulationTimingProfiler`.
 
     Returns:
         tuple:
@@ -1319,6 +1341,12 @@ def simulate_asset_damage_recovery_access_breakdown(
     hazard_extraction_cache = init['hazard_extraction_cache']
     overlap_cache = init['overlap_cache']
     island_cache = init['island_cache']
+
+    if societal_access_config is not None:
+        allocation_cache = societal_access_config.get("allocation_cache")
+        if allocation_cache is None:
+            allocation_cache = load_societal_allocation_cache(interim_dir, hazard_dir)
+            societal_access_config["allocation_cache"] = allocation_cache
 
     # Results tracking for this simulation
     results = []
@@ -1387,117 +1415,128 @@ def simulate_asset_damage_recovery_access_breakdown(
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
 
-    for timestep in timesteps:
-        day_counter = timestep // 24
-        map_counter = int(timestep / major_timestep)
+    with (profiler.section("simulation.total") if profiler is not None else nullcontext()):
+        for timestep in timesteps:
+            day_counter = timestep // 24
+            map_counter = int(timestep / major_timestep)
+
+            with (profiler.timestep(timestep) if profiler is not None else nullcontext()):
+                # 1. Process hazard map and update state if on major timestep
+                with (profiler.section("simulation._process_timestep", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    available_repair_crews, previous_rfids_islands, previous_map_counter, flooded_mask, timestep_cache_updated = _process_timestep(
+                        state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
+                        accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
+                        boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
+                        available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
+                        num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
+                        depth_reductions=depth_reductions,
+                        l1_area_geojson=l1_area_geojson,
+                        l1_active_timesteps=l1_active_timesteps,
+                        repair_crews_by_asset_type=repair_crews_by_asset_type,
+                        l2_asset_geojson=l2_asset_geojson,
+                        l2_active_timesteps=l2_active_timesteps,
+                        societal_access_config=societal_access_config,
+                    )
                 
-        # 1. Process hazard map and update state if on major timestep
-        available_repair_crews, previous_rfids_islands, previous_map_counter, flooded_mask, timestep_cache_updated = _process_timestep(
-            state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
-            accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
-            boundary_asset_indices, boundary_islands_rfids, interim_dir, hazard_dir, 
-            available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
-            num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
-            depth_reductions=depth_reductions,
-            l1_area_geojson=l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps,
-            repair_crews_by_asset_type=repair_crews_by_asset_type,
-            l2_asset_geojson=l2_asset_geojson,
-            l2_active_timesteps=l2_active_timesteps,
-        )
-        
-        # Merge cache updates
-        for cache_name, cache_content in timestep_cache_updated.items():
-            cache_updated[cache_name] = cache_content
+                # Merge cache updates
+                for cache_name, cache_content in timestep_cache_updated.items():
+                    cache_updated[cache_name] = cache_content
 
-        if _knowledge_graph is not None:
-            activate_delayed_trigger_waits(
-                state.operational,
-                asset_type,
-                _dep_config.get('hazard_type', 'flooding'),
-                _knowledge_graph,
-                flooded_mask=flooded_mask,
-                wait_vectors=state.recovery_wait_vectors,
-                active_masks=state.recovery_delay_active,
-            )
+                if _knowledge_graph is not None:
+                    with (profiler.section("simulation.activate_delayed_trigger_waits", include_in_timestep=True) if profiler is not None else nullcontext()):
+                        activate_delayed_trigger_waits(
+                            state.operational,
+                            asset_type,
+                            _dep_config.get('hazard_type', 'flooding'),
+                            _knowledge_graph,
+                            flooded_mask=flooded_mask,
+                            wait_vectors=state.recovery_wait_vectors,
+                            active_masks=state.recovery_delay_active,
+                        )
 
-        # 2. Repair crew assignment
-        available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
-            timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
-            flooded_mask, state.recovery_wait_vectors["repair_time"], state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map,
-            asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
-        )
-        
-        # 3. Update repair progress
-        _update_repair_progress(
-            state,
-            flooded_mask,
-            elapsed_time=_config['recovery_parameters'].get(
-                'time_step_hours', 1.0
-            ),
-        )
-        
-        # 4. Handle completed repairs
-        available_repair_crews = _handle_completed_repairs(
-            state, available_repair_crews, verbose, timestep,
-            asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
-        )
+                # 2. Repair crew assignment
+                with (profiler.section("simulation._assign_repair_crews", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
+                        timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
+                        flooded_mask, state.recovery_wait_vectors["repair_time"], state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map,
+                        asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
+                    )
+                
+                # 3. Update repair progress
+                with (profiler.section("simulation._update_repair_progress", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    _update_repair_progress(
+                        state,
+                        flooded_mask,
+                        elapsed_time=_config['recovery_parameters'].get(
+                            'time_step_hours', 1.0
+                        ),
+                    )
+                
+                # 4. Handle completed repairs
+                with (profiler.section("simulation._handle_completed_repairs", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    available_repair_crews = _handle_completed_repairs(
+                        state, available_repair_crews, verbose, timestep,
+                        asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
+                    )
 
-        # 5. Evaluate dependencies using current repair/hazard state
-        _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
+                # 5. Evaluate dependencies using current repair/hazard state
+                with (profiler.section("simulation._update_operational_state", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
 
-        # 6. Update unreachable assets (island method)
-        if island_method_active:
-            _update_unreachable_assets(
-                state,
-                available_repair_crews,
-                flooded_mask,
-                damage_threshold,
-                asset_type=asset_type,
-                repair_crews_by_asset_type=repair_crews_by_asset_type,
-            )
+                # 6. Update unreachable assets (island method)
+                if island_method_active:
+                    with (profiler.section("simulation._update_unreachable_assets", include_in_timestep=True) if profiler is not None else nullcontext()):
+                        _update_unreachable_assets(
+                            state,
+                            available_repair_crews,
+                            flooded_mask,
+                            damage_threshold,
+                            asset_type=asset_type,
+                            repair_crews_by_asset_type=repair_crews_by_asset_type,
+                        )
 
-        # 7. Collect timestep metrics
-        if timestep_output:
-            timestep_data, metrics = _collect_timestep_metrics(
-                state, timestep, map_counter, day_counter, num_assets, flooded_mask,
-                damage_threshold, repair_threshold
-            )
-            timestep_results.append(timestep_data)
-            results.append(metrics)
-        else:
-            # If not collecting detailed timestep output, still need metrics
-            repair_time = state.recovery_wait_vectors["repair_time"]
-            damaged_assets_mask = state.damage_ratio > damage_threshold
-            repair_needed_mask = repair_time > repair_threshold
-            avg_damage_ratio = state.damage_ratio[damaged_assets_mask].mean() if np.any(damaged_assets_mask) else 0.0
-            avg_repair_time = repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
-            total_repair_backlog = repair_time.sum()
-            total_damage_ratio = state.damage_ratio.sum()
-            
-            results.append({
-                'day': day_counter,
-                'map': map_counter,
-                'timestep': timestep,
-                'operational_count': state.operational.sum(),
-                'accessible_count': state.accessible.sum(),
-                'unreachable_count': state.unreachable.sum(),
-                'flooded_count': (state.current_hazard_values > flood_threshold).sum(),
-                'damaged_count': damaged_assets_mask.sum(),
-                'crews_assigned_count': state.repair_crews_assigned.sum(),
-                'avg_damage_ratio': avg_damage_ratio,
-                'avg_repair_time': avg_repair_time,
-                'total_repair_backlog': total_repair_backlog,  
-                'total_damage_ratio': total_damage_ratio,
-                'dependency_blocked_count': state.dependency_report.get('blocked_count', 0),
-                'dependency_active_rule_count': state.dependency_report.get('active_rule_count', len(state.dependency_report.get('active_rules', []))),
-                'dependency_warning': state.dependency_report.get('warning'),
-            })
+                # 7. Collect timestep metrics
+                with (profiler.section("simulation._collect_timestep_metrics", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    if timestep_output:
+                        timestep_data, metrics = _collect_timestep_metrics(
+                            state, timestep, map_counter, day_counter, num_assets, flooded_mask,
+                            damage_threshold, repair_threshold
+                        )
+                        timestep_results.append(timestep_data)
+                        results.append(metrics)
+                    else:
+                        # If not collecting detailed timestep output, still need metrics
+                        repair_time = state.recovery_wait_vectors["repair_time"]
+                        damaged_assets_mask = state.damage_ratio > damage_threshold
+                        repair_needed_mask = repair_time > repair_threshold
+                        avg_damage_ratio = state.damage_ratio[damaged_assets_mask].mean() if np.any(damaged_assets_mask) else 0.0
+                        avg_repair_time = repair_time[repair_needed_mask].mean() if np.any(repair_needed_mask) else 0.0
+                        total_repair_backlog = repair_time.sum()
+                        total_damage_ratio = state.damage_ratio.sum()
+                        
+                        results.append({
+                            'day': day_counter,
+                            'map': map_counter,
+                            'timestep': timestep,
+                            'operational_count': state.operational.sum(),
+                            'accessible_count': state.accessible.sum(),
+                            'unreachable_count': state.unreachable.sum(),
+                            'flooded_count': (state.current_hazard_values > flood_threshold).sum(),
+                            'damaged_count': damaged_assets_mask.sum(),
+                            'crews_assigned_count': state.repair_crews_assigned.sum(),
+                            'avg_damage_ratio': avg_damage_ratio,
+                            'avg_repair_time': avg_repair_time,
+                            'total_repair_backlog': total_repair_backlog,  
+                            'total_damage_ratio': total_damage_ratio,
+                            'dependency_blocked_count': state.dependency_report.get('blocked_count', 0),
+                            'dependency_active_rule_count': state.dependency_report.get('active_rule_count', len(state.dependency_report.get('active_rules', []))),
+                            'dependency_warning': state.dependency_report.get('warning'),
+                        })
 
-        # 8. Print end-of-day summary if verbose
-        if timestep % 24 == 23 and verbose:
-            print(f"Day {day_counter} summary: {state.operational.sum()}/{num_assets} operational, "
-                  f"{state.accessible.sum()} accessible, {state.unreachable.sum()} unreachable damaged assets, {flooded_mask.sum()} flooded")
+                # 8. Print end-of-day summary if verbose
+                if timestep % 24 == 23 and verbose:
+                    print(f"Day {day_counter} summary: {state.operational.sum()}/{num_assets} operational, "
+                          f"{state.accessible.sum()} accessible, {state.unreachable.sum()} unreachable damaged assets, {flooded_mask.sum()} flooded")
 
     # 9. Save config (optional)
     #_save_config_file(output_dir, root_dir, execution_id)
@@ -1512,6 +1551,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 allocation_cache = load_societal_allocation_cache(
                     interim_dir, hazard_dir
                 )
+                _sa_cfg["allocation_cache"] = allocation_cache
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
@@ -1526,6 +1566,10 @@ def simulate_asset_damage_recovery_access_breakdown(
                 all_functions=_sa_cfg.get("all_functions"),
                 reference_group=_sa_cfg.get("reference_group", "total"),
                 nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
+                service_area_function_provider_types=_sa_cfg.get("service_area_function_provider_types"),
+                fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
+                verbose=_sa_cfg.get("verbose", verbose),
+                profiler=profiler,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:

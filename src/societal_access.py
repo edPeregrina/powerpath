@@ -34,6 +34,7 @@ E — Allocation layer: geometry-only cell→island fraction caching plus
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import warnings
@@ -51,10 +52,10 @@ import pandas as pd
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     # Health
-    "hospital": "health",
-    "clinic": "health",
-    "huisartsenpraktijk": "health",
-    "apotheek": "health",
+    "hospital": "hospital",
+    "clinic": "hospital",
+    "huisartsenpraktijk": "hospital",
+    "apotheek": "hospital",
     # Emergency response
     "fire_station": "emergency_response",
     "brandweerkazerne": "emergency_response",
@@ -68,6 +69,8 @@ SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     "basisonderwijs": "education",
     "voortgezet_onderwijs": "education",
     "repair_depot": "repair_logistics",
+    # Electricity
+    "msls": "electricity",
 }
 
 #: Default demographic columns in the CBS population grid.
@@ -81,6 +84,9 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
 #: Current version of the allocation algorithm — increment when the
 #: spatial logic changes so cached allocations are automatically invalidated.
 ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
+SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
+    "electricity": frozenset({"msls"}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -429,20 +435,29 @@ def build_allocation_cache_key(
     road_state_key: str = "default",
     algorithm_version: str = ALLOCATION_ALGORITHM_VERSION,
     extra: Optional[Dict[str, Any]] = None,
+    pop_grid_geom_hash: Optional[str] = None,
+    pop_cell_id_hash: Optional[str] = None,
+    islands_geom_hash: Optional[str] = None,
+    islands_id_hash: Optional[str] = None,
 ) -> str:
     """Build a deterministic cache key for the geometry-only allocation.
 
     The key covers all deterministic inputs that affect the road partition or
     grid geometry.  It does **not** include population attribute values,
     selected demographic columns, stochastic seed, or provider outcomes.
+
+    Optional pre-computed hash strings (``pop_grid_geom_hash``,
+    ``pop_cell_id_hash``, ``islands_geom_hash``, ``islands_id_hash``) may be
+    supplied to avoid redundant hash computation inside tight loops.  When
+    ``None``, the corresponding hash is computed internally.
     """
     key_dict: Dict[str, Any] = {
-        "pop_grid_hash": _geometry_hash(pop_grid_gdf),
+        "pop_grid_hash": pop_grid_geom_hash if pop_grid_geom_hash is not None else _geometry_hash(pop_grid_gdf),
         "cell_id_column": cell_id_column,
-        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
-        "islands_hash": _geometry_hash(islands_gdf),
+        "cell_id_hash": pop_cell_id_hash if pop_cell_id_hash is not None else _column_hash(pop_grid_gdf, cell_id_column),
+        "islands_hash": islands_geom_hash if islands_geom_hash is not None else _geometry_hash(islands_gdf),
         "island_id_column": island_id_column,
-        "island_id_hash": _column_hash(islands_gdf, island_id_column),
+        "island_id_hash": islands_id_hash if islands_id_hash is not None else _column_hash(islands_gdf, island_id_column),
         "nearest_max_distance": nearest_max_distance,
         "road_state_key": str(road_state_key),
         "algorithm_version": algorithm_version,
@@ -486,6 +501,10 @@ def build_origin_island_allocations(
     island_id_column: str = "island_id",
     nearest_max_distance: float = 200.0,
     road_state_key: str = "default",
+    pop_grid_geom_hash: Optional[str] = None,
+    pop_cell_id_hash: Optional[str] = None,
+    islands_geom_hash: Optional[str] = None,
+    islands_id_hash: Optional[str] = None,
 ) -> pd.DataFrame:
     """Build geometry-only cell→island allocation fractions.
 
@@ -519,6 +538,9 @@ def build_origin_island_allocations(
     road_state_key:
         Island cache key identifying the road disruption and adaptation state
         that produced these islands.
+    pop_grid_geom_hash, pop_cell_id_hash, islands_geom_hash, islands_id_hash:
+        Pre-computed hash strings.  When supplied, the corresponding
+        ``_geometry_hash`` / ``_column_hash`` calls are skipped.
 
     Returns
     -------
@@ -536,74 +558,98 @@ def build_origin_island_allocations(
 
     rows: List[Dict[str, Any]] = []
 
-    for idx, cell_row in pop.iterrows():
-        cell_id = cell_row[cell_id_column]
-        cell_geom = cell_row["geometry"]
+    # --- Vectorized intersection-based allocation (Problem 2) ---
+    pop_renamed = pop.rename(columns={cell_id_column: "__cell_id"})
+    islands_renamed = islands_dissolved.rename(columns={island_id_column: "__island_id"})
 
-        # Step 1–3: intersection-based allocation
-        overlap_areas: Dict[int, float] = {}
-        for _, isl_row in islands_dissolved.iterrows():
-            isl_id = int(isl_row[island_id_column])
-            isl_geom = isl_row["geometry"]
-            if not cell_geom.intersects(isl_geom):
-                continue
-            inter = cell_geom.intersection(isl_geom)
-            area = inter.area
-            if area > 0:
-                overlap_areas[isl_id] = overlap_areas.get(isl_id, 0.0) + area
+    overlaps = gpd.overlay(
+        pop_renamed,
+        islands_renamed,
+        how="intersection",
+        keep_geom_type=False,
+    )
+    overlaps["__area"] = overlaps.geometry.area
+    overlaps = overlaps[overlaps["__area"] > 0]
 
-        if overlap_areas:
-            total_area = sum(overlap_areas.values())
-            for isl_id, area in overlap_areas.items():
+    if not overlaps.empty:
+        area_by_cell_island = overlaps.groupby(["__cell_id", "__island_id"])["__area"].sum()
+        total_by_cell = area_by_cell_island.groupby(level=0).transform("sum")
+        fractions = (area_by_cell_island / total_by_cell).reset_index()
+        fractions.columns = ["__cell_id", "__island_id", "allocation_fraction"]
+
+        for _, frow in fractions.iterrows():
+            rows.append({
+                cell_id_column: frow["__cell_id"],
+                "island_id": int(frow["__island_id"]),
+                "allocation_fraction": float(frow["allocation_fraction"]),
+                "allocation_method": "intersection",
+                "road_state_key": road_state_key,
+                "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+            })
+
+    # Identify cells with no intersection
+    intersected_cell_ids: set = set(overlaps["__cell_id"].unique()) if not overlaps.empty else set()
+    no_overlap_pop = pop[~pop[cell_id_column].isin(intersected_cell_ids)].copy()
+
+    if not no_overlap_pop.empty:
+        # Step 4: vectorized nearest-island fallback
+        no_overlap_centroids = no_overlap_pop.copy()
+        no_overlap_centroids["geometry"] = no_overlap_centroids.geometry.centroid
+        no_overlap_centroids_gdf = gpd.GeoDataFrame(
+            no_overlap_centroids[[cell_id_column, "geometry"]],
+            geometry="geometry",
+            crs=target_crs,
+        )
+
+        nearest_join = gpd.sjoin_nearest(
+            no_overlap_centroids_gdf,
+            islands_renamed[["__island_id", "geometry"]],
+            how="left",
+            max_distance=nearest_max_distance,
+            distance_col="__dist",
+        )
+
+        # sjoin_nearest may produce duplicates; keep the first (closest)
+        nearest_join = nearest_join.drop_duplicates(subset=[cell_id_column], keep="first")
+
+        for _, nrow in nearest_join.iterrows():
+            cell_id = nrow[cell_id_column]
+            island_id_val = nrow.get("__island_id")
+            if pd.notna(island_id_val):
                 rows.append({
                     cell_id_column: cell_id,
-                    "island_id": isl_id,
-                    "allocation_fraction": area / total_area,
-                    "allocation_method": "intersection",
+                    "island_id": int(island_id_val),
+                    "allocation_fraction": 1.0,
+                    "allocation_method": "nearest_island",
                     "road_state_key": road_state_key,
                     "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
                 })
-            continue
-
-        # Step 4: nearest-island fallback
-        cell_centroid = cell_geom.centroid
-        min_dist = float("inf")
-        nearest_id: Optional[int] = None
-        for _, isl_row in islands_dissolved.iterrows():
-            isl_id = int(isl_row[island_id_column])
-            dist = cell_centroid.distance(isl_row["geometry"])
-            if dist < min_dist:
-                min_dist = dist
-                nearest_id = isl_id
-
-        if nearest_id is not None and min_dist <= nearest_max_distance:
-            rows.append({
-                cell_id_column: cell_id,
-                "island_id": nearest_id,
-                "allocation_fraction": 1.0,
-                "allocation_method": "nearest_island",
-                "road_state_key": road_state_key,
-                "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
-            })
-        else:
-            # Step 5: unassigned
-            rows.append({
-                cell_id_column: cell_id,
-                "island_id": -1,
-                "allocation_fraction": 1.0,
-                "allocation_method": "unassigned",
-                "road_state_key": road_state_key,
-                "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
-            })
+            else:
+                # Step 5: unassigned
+                rows.append({
+                    cell_id_column: cell_id,
+                    "island_id": -1,
+                    "allocation_fraction": 1.0,
+                    "allocation_method": "unassigned",
+                    "road_state_key": road_state_key,
+                    "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+                })
 
     allocation_df = pd.DataFrame(rows)
+
+    # Resolve hashes — use pre-computed values when available (Problem 1)
+    _pop_geom_hash = pop_grid_geom_hash if pop_grid_geom_hash is not None else _geometry_hash(pop_grid_gdf)
+    _pop_id_hash = pop_cell_id_hash if pop_cell_id_hash is not None else _column_hash(pop_grid_gdf, cell_id_column)
+    _isl_geom_hash = islands_geom_hash if islands_geom_hash is not None else _geometry_hash(islands_gdf)
+    _isl_id_hash = islands_id_hash if islands_id_hash is not None else _column_hash(islands_gdf, island_id_column)
+
     allocation_df.attrs.update({
-        "population_grid_hash": _geometry_hash(pop_grid_gdf),
+        "population_grid_hash": _pop_geom_hash,
         "cell_id_column": cell_id_column,
-        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
-        "islands_hash": _geometry_hash(islands_gdf),
+        "cell_id_hash": _pop_id_hash,
+        "islands_hash": _isl_geom_hash,
         "island_id_column": island_id_column,
-        "island_id_hash": _column_hash(islands_gdf, island_id_column),
+        "island_id_hash": _isl_id_hash,
         "nearest_max_distance": nearest_max_distance,
         "road_state_key": road_state_key,
         "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
@@ -660,7 +706,7 @@ def apply_population_to_allocations(
             "The join must be many-to-one (allocation rows → one population row)."
         )
 
-    merged = allocation_df.copy().merge(pop_attrs, on=cell_id_column, how="left")
+    merged = allocation_df.merge(pop_attrs, on=cell_id_column, how="left")
 
     for label, col in pop_group_columns.items():
         if col in merged.columns:
@@ -679,6 +725,10 @@ def get_or_build_allocation(
     island_id_column: str = "island_id",
     nearest_max_distance: float = 200.0,
     road_state_key: str = "default",
+    pop_grid_geom_hash: Optional[str] = None,
+    pop_cell_id_hash: Optional[str] = None,
+    islands_geom_hash: Optional[str] = None,
+    islands_id_hash: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, str, bool]:
     """Return a cached geometry allocation or build and cache a new one.
 
@@ -689,6 +739,8 @@ def get_or_build_allocation(
     pop_grid_gdf, cell_id_column, islands_gdf, island_id_column,
     nearest_max_distance, road_state_key:
         Forwarded to :func:`build_origin_island_allocations`.
+    pop_grid_geom_hash, pop_cell_id_hash, islands_geom_hash, islands_id_hash:
+        Pre-computed hash strings forwarded to avoid redundant computation.
 
     Returns
     -------
@@ -701,6 +753,10 @@ def get_or_build_allocation(
         island_id_column=island_id_column,
         nearest_max_distance=nearest_max_distance,
         road_state_key=road_state_key,
+        pop_grid_geom_hash=pop_grid_geom_hash,
+        pop_cell_id_hash=pop_cell_id_hash,
+        islands_geom_hash=islands_geom_hash,
+        islands_id_hash=islands_id_hash,
     )
 
     if cache_key in allocation_cache:
@@ -713,9 +769,239 @@ def get_or_build_allocation(
         island_id_column=island_id_column,
         nearest_max_distance=nearest_max_distance,
         road_state_key=road_state_key,
+        pop_grid_geom_hash=pop_grid_geom_hash,
+        pop_cell_id_hash=pop_cell_id_hash,
+        islands_geom_hash=islands_geom_hash,
+        islands_id_hash=islands_id_hash,
     )
     allocation_cache[cache_key] = allocation_df
     return allocation_df, cache_key, True
+
+
+def _find_allocation_cache_entry(
+    allocation_cache: Dict[str, pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    road_state_key: str,
+    nearest_max_distance: float,
+    pop_grid_geom_hash: Optional[str] = None,
+    pop_cell_id_hash: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[pd.DataFrame]]:
+    """Return the unique cache entry matching the expected allocation metadata.
+
+    Parameters
+    ----------
+    pop_grid_geom_hash, pop_cell_id_hash:
+        Pre-computed hash strings for the population grid.  When supplied,
+        the corresponding ``_geometry_hash`` / ``_column_hash`` calls are
+        skipped (Problem 5 optimisation).
+    """
+    expected_metadata = {
+        "population_grid_hash": pop_grid_geom_hash if pop_grid_geom_hash is not None else _geometry_hash(pop_grid_gdf),
+        "cell_id_column": cell_id_column,
+        "cell_id_hash": pop_cell_id_hash if pop_cell_id_hash is not None else _column_hash(pop_grid_gdf, cell_id_column),
+        "nearest_max_distance": nearest_max_distance,
+        "road_state_key": road_state_key,
+        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
+    }
+    matching = [
+        (cache_key, df)
+        for cache_key, df in allocation_cache.items()
+        if all(df.attrs.get(k) == v for k, v in expected_metadata.items())
+    ]
+    if len(matching) != 1:
+        return None, None
+    return matching[0]
+
+
+def _build_service_area_population_maps(
+    gdf_assets: gpd.GeoDataFrame,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    pop_group_columns: Dict[str, str],
+    asset_type_column: str = "type",
+    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
+) -> Dict[str, Dict[str, Dict[Any, float]]]:
+    """Pre-compute provider→population service-area assignments for special functions."""
+    from src.caching import get_asset_centroid_hash
+    from src.impacts import create_voronoi_for_asset_type
+    from src.utils import build_voronoi_service_area_map
+
+    if gdf_assets.empty or pop_grid_gdf.empty:
+        return {}
+
+    working_assets = gdf_assets[[asset_type_column, "geometry"]].copy()
+    if asset_type_column != "type":
+        working_assets = working_assets.rename(columns={asset_type_column: "type"})
+    working_assets = gpd.GeoDataFrame(
+        working_assets,
+        geometry="geometry",
+        crs=gdf_assets.crs,
+    )
+    asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
+
+    available_cols = [col for col in pop_group_columns.values() if col in pop_grid_gdf.columns]
+    pop_values = pop_grid_gdf[available_cols].copy()
+    for col in available_cols:
+        pop_values[col] = pd.to_numeric(pop_values[col], errors="coerce").fillna(0)
+        pop_values[col] = pop_values[col].where(pop_values[col] >= 0, 0)
+    pop_assets = gpd.GeoDataFrame(pop_values, geometry=pop_grid_gdf.geometry, crs=pop_grid_gdf.crs)
+    if (
+        pop_assets.crs is not None
+        and working_assets.crs is not None
+        and pop_assets.crs != working_assets.crs
+    ):
+        pop_assets = pop_assets.to_crs(working_assets.crs)
+
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+
+    function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
+    for function_name, provider_types in service_area_function_provider_types.items():
+        group_maps: Dict[str, Dict[Any, float]] = {label: {} for label in pop_group_columns}
+        has_provider = False
+
+        for provider_type in sorted(provider_types):
+            providers = working_assets[working_assets["type"].astype(str) == str(provider_type)]
+            if providers.empty:
+                continue
+            has_provider = True
+
+            if len(providers) == 1:
+                provider_map = {providers.index[0]: list(pop_assets.index)}
+            else:
+                if len(providers) < 4:
+                    provider_centroids = providers.geometry.centroid
+                    pop_centroids = pop_assets.geometry.centroid
+
+                    provider_ids = providers.index.to_numpy()
+                    pop_ids = pop_assets.index.to_numpy()
+                    provider_coords = np.column_stack(
+                        (
+                            provider_centroids.x.to_numpy(dtype=float),
+                            provider_centroids.y.to_numpy(dtype=float),
+                        )
+                    )
+                    pop_coords = np.column_stack(
+                        (
+                            pop_centroids.x.to_numpy(dtype=float),
+                            pop_centroids.y.to_numpy(dtype=float),
+                        )
+                    )
+
+                    sq_dist = (
+                        (pop_coords[:, None, :] - provider_coords[None, :, :]) ** 2
+                    ).sum(axis=2)
+                    nearest_idx = np.argmin(sq_dist, axis=1)
+                    assigned_provider_ids = provider_ids[nearest_idx]
+                    sort_order = np.argsort(assigned_provider_ids, kind="stable")
+                    sorted_provider_ids = assigned_provider_ids[sort_order]
+                    sorted_pop_ids = pop_ids[sort_order]
+                    unique_provider_ids, start_idx = np.unique(
+                        sorted_provider_ids, return_index=True
+                    )
+                    provider_map = {}
+                    for i, provider_id in enumerate(unique_provider_ids):
+                        end = start_idx[i + 1] if i + 1 < len(start_idx) else len(sorted_pop_ids)
+                        provider_map[provider_id] = sorted_pop_ids[start_idx[i]:end].tolist()
+                else:
+                    voronoi_gdf = create_voronoi_for_asset_type(
+                        working_assets,
+                        provider_type,
+                        asset_cache_key=asset_cache_key,
+                    )
+                    provider_map = build_voronoi_service_area_map(
+                        voronoi_gdf,
+                        pop_assets[["geometry"]].copy(),
+                    )
+
+            for provider_id, pop_indices in provider_map.items():
+                for label, column_name in pop_group_columns.items():
+                    if column_name not in pop_assets.columns:
+                        continue
+                    group_maps[label][provider_id] = group_maps[label].get(provider_id, 0.0) + float(
+                        pop_assets.loc[list(pop_indices), column_name].sum()
+                    )
+
+        if has_provider:
+            function_maps[function_name] = group_maps
+
+    return function_maps
+
+
+def _apply_service_area_societal_scalars(
+    fields: Dict[str, float],
+    operational_asset_ids_by_function: Dict[str, Set[Any]],
+    service_area_population_maps: Dict[str, Dict[str, Dict[Any, float]]],
+    pop_group_columns: Dict[str, str],
+    reference_group: str,
+    numpy_maps: Optional[Dict[str, Dict[str, Tuple[Any, Any]]]] = None,
+) -> Dict[str, float]:
+    """Override function metrics for service-area-based services such as electricity.
+
+    Parameters
+    ----------
+    numpy_maps:
+        Optional precomputed numpy arrays per function/label.  Each entry is
+        ``{func: {label: (ids_array, pops_array)}}``.  When provided, the
+        O(N×G) Python generator sums are replaced by O(N) masked numpy sums.
+    """
+    if not service_area_population_maps:
+        return fields
+
+    derived_totals: Dict[str, float] = {}
+    for function_name, group_maps in service_area_population_maps.items():
+        operational_ids = operational_asset_ids_by_function.get(function_name, set())
+        func_numpy = numpy_maps.get(function_name) if numpy_maps is not None else None
+        for label in pop_group_columns:
+            if func_numpy is not None and label in func_numpy:
+                ids_arr, pops_arr = func_numpy[label]
+                total = float(pops_arr.sum())
+                if len(ids_arr) > 0 and operational_ids:
+                    mask = np.isin(ids_arr, list(operational_ids))
+                    with_access = float(pops_arr[mask].sum())
+                else:
+                    with_access = 0.0
+            else:
+                provider_population = group_maps.get(label, {})
+                total = float(sum(provider_population.values()))
+                with_access = float(
+                    sum(
+                        population
+                        for provider_id, population in provider_population.items()
+                        if provider_id in operational_ids
+                    )
+                )
+            without_access = total - with_access
+            pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
+
+            fields[f"societal_access_pct__{function_name}__{label}"] = pct
+            fields[f"societal_access_population__{function_name}__{label}"] = with_access
+            fields[f"societal_no_access_population__{function_name}__{label}"] = without_access
+            derived_totals[label] = total
+
+        ref_pct = fields.get(
+            f"societal_access_pct__{function_name}__{reference_group}",
+            float("nan"),
+        )
+        for label in pop_group_columns:
+            if label == reference_group:
+                continue
+            grp_pct = fields.get(f"societal_access_pct__{function_name}__{label}", float("nan"))
+            if np.isnan(ref_pct) or np.isnan(grp_pct):
+                abs_gap = float("nan")
+                rel_gap = float("nan")
+            else:
+                abs_gap = round(ref_pct - grp_pct, 2)
+                rel_gap = round(grp_pct / ref_pct, 4) if ref_pct > 0 else float("nan")
+            fields[f"societal_equity_absolute_gap__{function_name}__{label}"] = abs_gap
+            fields[f"societal_equity_relative_gap__{function_name}__{label}"] = rel_gap
+
+    for label, total in derived_totals.items():
+        total_key = f"societal_total_population__{label}"
+        if np.isnan(fields.get(total_key, float("nan"))):
+            fields[total_key] = total
+
+    return fields
 
 
 def postprocess_societal_access_results(
@@ -733,6 +1019,11 @@ def postprocess_societal_access_results(
     all_functions: Optional[List[str]] = None,
     reference_group: str = "total",
     nearest_max_distance: float = 200.0,
+    islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
+    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
+    fail_on_missing_allocation: bool = False,
+    verbose: bool = False,
+    profiler: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -786,6 +1077,17 @@ def postprocess_societal_access_results(
         Reference group for equity gap computation.
     nearest_max_distance:
         Nearest-island fallback maximum distance for allocation.
+    islands_gdf_cache:
+        Dict mapping each ``road_state_key`` to its island GeoDataFrame (road
+        segments with ``island_id`` and geometry).  When provided, allocations
+        are built deterministically via :func:`get_or_build_allocation` for
+        every road state encountered.  When ``None``, the legacy metadata-scan
+        path is used as a backward-compatible fallback.
+    service_area_function_provider_types:
+        Optional ``{function_name: frozenset({provider_type, ...})}`` override
+        for service-area routing.  Provider type tokens must match
+        ``asset_type_column`` values exactly.  When ``None``, defaults to
+        :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
 
     Returns
     -------
@@ -809,6 +1111,41 @@ def postprocess_societal_access_results(
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
 
+    if verbose:
+        if asset_type_column in gdf_assets.columns:
+            asset_counts_by_type = (
+                gdf_assets[asset_type_column].astype(str).value_counts().to_dict()
+            )
+            electricity_provider_count = int(
+                gdf_assets[asset_type_column].astype(str).eq("msls").sum()
+            )
+            hospital_provider_count = int(
+                gdf_assets[asset_type_column].astype(str).eq("hospital").sum()
+            )
+        else:
+            asset_counts_by_type = {}
+            electricity_provider_count = 0
+            hospital_provider_count = 0
+        print(f"Simulation assets: {len(gdf_assets)}")
+        print(f"Asset counts by type: {asset_counts_by_type}")
+        print(f"Electricity providers: {electricity_provider_count} MSLS")
+        print(f"Hospital providers: {hospital_provider_count}")
+
+    with (
+        profiler.section("societal_access._build_service_area_population_maps")
+        if profiler is not None
+        else nullcontext()
+    ):
+        service_area_assets = gdf_assets.copy()
+        service_area_assets.index = stable_asset_ids
+        service_area_population_maps = _build_service_area_population_maps(
+            gdf_assets=service_area_assets,
+            pop_grid_gdf=pop_grid_gdf,
+            pop_group_columns=pop_group_columns,
+            asset_type_column=asset_type_column,
+            service_area_function_provider_types=service_area_function_provider_types,
+        )
+
     # Determine which functions to always emit
     if all_functions is None:
         all_functions = sorted(set(taxonomy.values()))
@@ -819,176 +1156,396 @@ def postprocess_societal_access_results(
     # Group detailed results by timestep
     detailed_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in detailed_results}
 
+    # --- Problem 1: Pre-compute population grid hashes once ---
+    pop_grid_geom_hash: str = _geometry_hash(pop_grid_gdf)
+    pop_cell_id_hash: str = _column_hash(pop_grid_gdf, cell_id_column)
+
+    # Per road_state_key islands hash cache (populated on first encounter)
+    _islands_hash_cache: Dict[str, Tuple[str, str]] = {}
+
+    # --- Problem 3: pop_alloc cache keyed by allocation_cache_key ---
+    # Each entry: {"pop_alloc": df, "island_pop": df, "total_pop": dict, "available_group_cols": dict}
+    _pop_alloc_cache: Dict[str, Dict[str, Any]] = {}
+
+    # --- Problem 6: cache _compute_societal_scalars output per (allocation_cache_key, frozen_island_function_map) ---
+    _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
+
+    # --- Problem 4: precompute numpy arrays for _apply_service_area_societal_scalars ---
+    _service_area_numpy: Dict[str, Dict[str, Any]] = {}
+    for _func, _group_maps in service_area_population_maps.items():
+        _service_area_numpy[_func] = {}
+        for _label, _provider_pop in _group_maps.items():
+            if _provider_pop:
+                _ids = np.array(list(_provider_pop.keys()))
+                _pops = np.array(list(_provider_pop.values()), dtype=float)
+            else:
+                _ids = np.array([])
+                _pops = np.array([], dtype=float)
+            _service_area_numpy[_func][_label] = (_ids, _pops)
+
     # Process each timestep that has detailed output
     for ts_idx, ts_summary in enumerate(summary_results):
         ts = ts_summary["timestep"]
         ts_detail = detailed_by_ts.get(ts)
 
-        if ts_detail is None:
-            # No detailed data → emit zeros
-            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-            continue
-
-        # Read dependency-adjusted operational states
-        operational = np.asarray(ts_detail.get("operational", []))
-        island_ids = np.asarray(ts_detail.get("island_id", []))
-
-        if len(operational) == 0 or len(island_ids) == 0:
-            _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-            continue
-
-        # Build island → functions map from operational providers
-        island_function_map: Dict[int, Set[str]] = {}
-        for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
-            if not is_op:
+        with (
+            profiler.timestep(ts) if profiler is not None else nullcontext()
+        ):
+            if ts_detail is None:
+                # No detailed data → emit NaN
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                 continue
-            atype = asset_types[i] if i < len(asset_types) else "unknown"
-            func_cat = taxonomy.get(str(atype))
-            if func_cat is not None:
-                isl_id_int = int(isl_id)
-                island_function_map.setdefault(isl_id_int, set()).add(func_cat)
 
-        frozen_island_function_map: Dict[int, FrozenSet[str]] = {
-            iid: frozenset(cats) for iid, cats in island_function_map.items()
-        }
+            # Read dependency-adjusted operational states
+            operational = np.asarray(ts_detail.get("operational", []))
+            island_ids = np.asarray(ts_detail.get("island_id", []))
 
-        # Retrieve/build geometry-only allocation
-        road_state_key = str(
-            ts_detail.get("road_state_key") or ts_detail.get("map", ts)
-        )
+            if len(operational) == 0 or len(island_ids) == 0:
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
 
-        # We need an islands_gdf to compute the allocation.
-        # Build a minimal one from the unique island IDs seen in detailed results.
-        # If no island geometry is available, fall back to island-ID-only path.
-        unique_island_ids = np.unique(island_ids[island_ids >= 0])
+            # Build island → functions map from operational providers
+            island_function_map: Dict[int, Set[str]] = {}
+            operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
+            for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
+                atype = asset_types[i] if i < len(asset_types) else "unknown"
+                func_cat = taxonomy.get(str(atype))
+                if func_cat is not None and is_op:
+                    operational_asset_ids_by_function.setdefault(func_cat, set()).add(stable_asset_ids[i])
+                    isl_id_int = int(isl_id)
+                    island_function_map.setdefault(isl_id_int, set()).add(func_cat)
 
-        # Build population-weighted access using allocation approach.
-        # We use the simplified path: assign each pop cell to one island based on
-        # the island IDs from the asset detail, building a synthetic islands gdf
-        # from pop_grid centroids is complex; use a direct numeric path instead.
+            frozen_island_function_map: Dict[int, FrozenSet[str]] = {
+                iid: frozenset(cats) for iid, cats in island_function_map.items()
+            }
 
-        # Direct path: for each pop cell, determine which island(s) it belongs to
-        # using stored allocation or build from scratch.
-        # Since we may not have island geometries here, use a simplified approach:
-        # treat each cell as fully assigned to one island via nearest provider logic.
-        # The full spatial allocation requires islands_gdf; callers should use
-        # the `societal_access_config` dict which carries the needed data.
-        # Here we fall back to a simplified scalar computation per island.
+            # Strict road_state_key resolution — no fallback to map index.
+            # Falling back to the map counter would silently reuse the baseline
+            # topology for adapted states that happen to share the same counter.
+            road_state_key_raw = ts_detail.get("road_state_key")
+            if not road_state_key_raw:
+                warnings.warn(
+                    f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
+                    "Ensure the simulation records road_state_key in its timestep detail.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                continue
+            road_state_key = str(road_state_key_raw)
 
-        # Compute pop metrics per island from pop_grid
-        societal_fields = _compute_societal_scalars(
-            frozen_island_function_map=frozen_island_function_map,
-            pop_grid_gdf=pop_grid_gdf,
-            cell_id_column=cell_id_column,
-            pop_group_columns=pop_group_columns,
-            all_functions=all_functions,
-            reference_group=reference_group,
-            allocation_cache=allocation_cache,
-            road_state_key=road_state_key,
-            nearest_max_distance=nearest_max_distance,
-        )
+            with (
+                profiler.section("societal_access.resolve_allocation", include_in_timestep=True)
+                if profiler is not None
+                else nullcontext()
+            ):
+                # --- Problem 1: get or populate islands hashes for this road_state_key ---
+                if road_state_key not in _islands_hash_cache and islands_gdf_cache is not None:
+                    islands_gdf_tmp = islands_gdf_cache.get(road_state_key)
+                    if islands_gdf_tmp is not None:
+                        _islands_hash_cache[road_state_key] = (
+                            _geometry_hash(islands_gdf_tmp),
+                            _column_hash(islands_gdf_tmp, island_id_column),
+                        )
+                _cur_islands_geom_hash, _cur_islands_id_hash = _islands_hash_cache.get(
+                    road_state_key, (None, None)
+                )
 
-        ts_summary.update(societal_fields)
+                # Resolve allocation_df — deterministic path when islands_gdf_cache is
+                # available, legacy metadata-scan path otherwise (backward compat).
+                allocation_cache_key = None
+                if islands_gdf_cache is not None:
+                    islands_gdf = islands_gdf_cache.get(road_state_key)
+                    if islands_gdf is None:
+                        message = (
+                            f"Timestep {ts}: no islands_gdf found for road_state_key "
+                            f"'{road_state_key}'; no societal allocation can be built."
+                        )
+                        if fail_on_missing_allocation:
+                            raise RuntimeError(message)
+                        warnings.warn(
+                            f"{message} Emitting NaN societal metrics.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        continue
+                    allocation_df, allocation_cache_key, _ = get_or_build_allocation(
+                        allocation_cache,
+                        pop_grid_gdf,
+                        cell_id_column,
+                        islands_gdf,
+                        island_id_column,
+                        nearest_max_distance=nearest_max_distance,
+                        road_state_key=road_state_key,
+                        pop_grid_geom_hash=pop_grid_geom_hash,
+                        pop_cell_id_hash=pop_cell_id_hash,
+                        islands_geom_hash=_cur_islands_geom_hash,
+                        islands_id_hash=_cur_islands_id_hash,
+                    )
+                else:
+                    # --- Problem 5: pass pre-computed pop grid hashes ---
+                    allocation_cache_key, allocation_df = _find_allocation_cache_entry(
+                        allocation_cache,
+                        pop_grid_gdf,
+                        cell_id_column,
+                        road_state_key,
+                        nearest_max_distance,
+                        pop_grid_geom_hash=pop_grid_geom_hash,
+                        pop_cell_id_hash=pop_cell_id_hash,
+                    )
+
+                if allocation_df is None and fail_on_missing_allocation:
+                    available_road_state_keys = sorted(
+                        {
+                            str(df.attrs.get("road_state_key"))
+                            for df in allocation_cache.values()
+                            if df.attrs.get("road_state_key") is not None
+                        }
+                    )
+                    raise RuntimeError(
+                        f"Timestep {ts}: no societal allocation found for road_state_key "
+                        f"'{road_state_key}'. Available cached road_state_keys="
+                        f"{available_road_state_keys[:10]}"
+                    )
+
+                if allocation_df is not None:
+                    allocation_road_state_key = str(allocation_df.attrs.get("road_state_key"))
+                    if allocation_road_state_key != road_state_key:
+                        message = (
+                            f"Timestep {ts}: allocation road_state_key '{allocation_road_state_key}' "
+                            f"does not match detailed_results road_state_key '{road_state_key}'."
+                        )
+                        if fail_on_missing_allocation:
+                            raise RuntimeError(message)
+                        warnings.warn(message, RuntimeWarning, stacklevel=2)
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        continue
+
+            with (
+                profiler.section("societal_access.compute_scalars", include_in_timestep=True)
+                if profiler is not None
+                else nullcontext()
+            ):
+                # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
+                _cached_entry: Optional[Dict[str, Any]] = None
+                if allocation_cache_key is not None and allocation_df is not None:
+                    if allocation_cache_key not in _pop_alloc_cache:
+                        try:
+                            _pop_alloc_df = apply_population_to_allocations(
+                                allocation_df=allocation_df,
+                                pop_grid_gdf=pop_grid_gdf,
+                                cell_id_column=cell_id_column,
+                                pop_group_columns=pop_group_columns,
+                            )
+                            _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
+                            _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
+                            _wcl = list(_agc.values())
+                            _isl_pop = (
+                                _pop_alloc_df.groupby("island_id")[_wcl].sum()
+                                if _wcl
+                                else pd.DataFrame()
+                            )
+                            _tot_pop: Dict[str, float] = {}
+                            if not _isl_pop.empty:
+                                for _lbl, _col in _agc.items():
+                                    _tot_pop[_lbl] = float(_isl_pop[_col].sum())
+                            else:
+                                for _lbl, _col in _agc.items():
+                                    _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
+                            _pop_alloc_cache[allocation_cache_key] = {
+                                "pop_alloc": _pop_alloc_df,
+                                "island_pop": _isl_pop,
+                                "total_pop": _tot_pop,
+                                "available_group_cols": _agc,
+                            }
+                        except Exception:
+                            pass
+                    _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
+
+                # --- Fix 6: cache _compute_societal_scalars per (allocation_cache_key, frozen_island_function_map) ---
+                _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key)
+                if _scalar_cache_key in _scalar_fields_cache:
+                    societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
+                else:
+                    societal_fields = _compute_societal_scalars(
+                        frozen_island_function_map=frozen_island_function_map,
+                        allocation_df=allocation_df,
+                        pop_grid_gdf=pop_grid_gdf,
+                        cell_id_column=cell_id_column,
+                        pop_group_columns=pop_group_columns,
+                        all_functions=all_functions,
+                        reference_group=reference_group,
+                        pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
+                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                    )
+                    _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+
+                # --- Fix 4: use precomputed numpy arrays for service area computation ---
+                societal_fields = _apply_service_area_societal_scalars(
+                    societal_fields,
+                    operational_asset_ids_by_function=operational_asset_ids_by_function,
+                    service_area_population_maps=service_area_population_maps,
+                    pop_group_columns=pop_group_columns,
+                    reference_group=reference_group,
+                    numpy_maps=_service_area_numpy if _service_area_numpy else None,
+                )
+
+            ts_summary.update(societal_fields)
+            ts_summary["allocation_cache_key"] = allocation_cache_key
+            ts_summary["allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
 
 
+def _find_allocation_in_cache(
+    allocation_cache: Dict[str, pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    road_state_key: str,
+    nearest_max_distance: float,
+) -> Optional[pd.DataFrame]:
+    """Scan *allocation_cache* for an entry matching all metadata fields.
+
+    This is the legacy (backward-compatible) lookup path used when no
+    ``islands_gdf_cache`` is provided to
+    :func:`postprocess_societal_access_results`.  Returns ``None`` when no
+    unique matching entry is found.
+    """
+    _, allocation_df = _find_allocation_cache_entry(
+        allocation_cache,
+        pop_grid_gdf,
+        cell_id_column,
+        road_state_key,
+        nearest_max_distance,
+    )
+    return allocation_df
+
+
 def _compute_societal_scalars(
     frozen_island_function_map: Dict[int, FrozenSet[str]],
+    allocation_df: Optional[pd.DataFrame],
     pop_grid_gdf: gpd.GeoDataFrame,
     cell_id_column: str,
     pop_group_columns: Dict[str, str],
     all_functions: List[str],
     reference_group: str,
-    allocation_cache: Dict[str, pd.DataFrame],
-    road_state_key: str,
-    nearest_max_distance: float,
+    pop_alloc: Optional[pd.DataFrame] = None,
+    island_pop: Optional[pd.DataFrame] = None,
+    total_pop: Optional[Dict[str, float]] = None,
+    available_group_cols: Optional[Dict[str, str]] = None,
 ) -> Dict[str, float]:
     """Compute flat societal metric scalars for one timestep.
 
-    Uses allocation fractions from *allocation_cache* if available; otherwise
-    treats each population cell as fully allocated to a single island using a
-    pre-built (island_id → weighted_population) mapping derived from cached
-    allocations.
+    Parameters
+    ----------
+    frozen_island_function_map:
+        Mapping of island_id → frozenset of function categories supplied by
+        operational providers on that island.
+    allocation_df:
+        Pre-built (or freshly built) population-cell → island allocation
+        DataFrame.  When ``None``, all output metrics are emitted as NaN.
+    pop_grid_gdf:
+        Population grid GeoDataFrame used to apply demographic weights.
+    cell_id_column:
+        Stable identifier column in *pop_grid_gdf*.
+    pop_group_columns:
+        ``{label: column_name}`` demographic mapping.
+    all_functions:
+        Complete list of function categories to emit.
+    reference_group:
+        Reference group for equity-gap computation.
+    pop_alloc:
+        Optional pre-built output of :func:`apply_population_to_allocations`.
+        When provided, the internal ``apply_population_to_allocations`` call is
+        skipped (Problem 3 optimisation).
+    island_pop:
+        Optional pre-aggregated per-island population DataFrame (Fix 1).
+        When provided, the groupby is skipped entirely.
+    total_pop:
+        Optional pre-computed total population per group (Fix 2).
+        When provided, the per-group sum is skipped.
+    available_group_cols:
+        Optional pre-computed ``{label: weighted_col_name}`` mapping (Fix 1).
 
     Returns a dict of flat metric names → scalar values.
     """
     fields: Dict[str, float] = {}
 
-    expected_metadata = {
-        "population_grid_hash": _geometry_hash(pop_grid_gdf),
-        "cell_id_column": cell_id_column,
-        "cell_id_hash": _column_hash(pop_grid_gdf, cell_id_column),
-        "nearest_max_distance": nearest_max_distance,
-        "road_state_key": road_state_key,
-        "allocation_algorithm_version": ALLOCATION_ALGORITHM_VERSION,
-    }
-
-    # Try to find an allocation matching both the road state and grid inputs.
-    matching_allocations: list[pd.DataFrame] = []
-    for alloc_df in allocation_cache.values():
-        if all(
-            alloc_df.attrs.get(name) == value
-            for name, value in expected_metadata.items()
-        ):
-            matching_allocations.append(alloc_df)
-
-    matching_alloc = (
-        matching_allocations[0] if len(matching_allocations) == 1 else None
-    )
-
-    if matching_alloc is None:
-        # No allocation available: emit NaN
+    def _emit_nan() -> Dict[str, float]:
+        nan_fields: Dict[str, float] = {}
         for func in all_functions:
             for group in pop_group_columns:
-                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
-                fields[f"societal_access_population__{func}__{group}"] = float("nan")
-                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_access_pct__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_access_population__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
+        for group in pop_group_columns:
+            nan_fields[f"societal_total_population__{group}"] = float("nan")
+        for func in all_functions:
             for group in pop_group_columns:
-                fields[f"societal_total_population__{group}"] = float("nan")
-        return fields
+                if group == reference_group:
+                    continue
+                nan_fields[f"societal_equity_absolute_gap__{func}__{group}"] = float("nan")
+                nan_fields[f"societal_equity_relative_gap__{func}__{group}"] = float("nan")
+        return nan_fields
 
-    # Apply population to allocations
-    try:
-        pop_alloc = apply_population_to_allocations(
-            allocation_df=matching_alloc,
-            pop_grid_gdf=pop_grid_gdf,
-            cell_id_column=cell_id_column,
-            pop_group_columns=pop_group_columns,
+    if allocation_df is None:
+        return _emit_nan()
+
+    # Apply population to allocations (skip if pre-built pop_alloc provided)
+    if pop_alloc is None:
+        try:
+            pop_alloc = apply_population_to_allocations(
+                allocation_df=allocation_df,
+                pop_grid_gdf=pop_grid_gdf,
+                cell_id_column=cell_id_column,
+                pop_group_columns=pop_group_columns,
+            )
+        except Exception:
+            return _emit_nan()
+
+    # --- Fix 1: use pre-aggregated island_pop / total_pop when available ---
+    if available_group_cols is None:
+        group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
+        available_group_cols = {
+            label: col for label, col in group_cols.items()
+            if col in pop_alloc.columns
+        }
+
+    if island_pop is None:
+        weighted_col_list = list(available_group_cols.values())
+        island_pop = (
+            pop_alloc.groupby("island_id")[weighted_col_list].sum()
+            if weighted_col_list
+            else pd.DataFrame()
         )
-    except Exception:
-        for func in all_functions:
-            for group in pop_group_columns:
-                fields[f"societal_access_pct__{func}__{group}"] = float("nan")
-                fields[f"societal_access_population__{func}__{group}"] = float("nan")
-                fields[f"societal_no_access_population__{func}__{group}"] = float("nan")
-            for group in pop_group_columns:
-                fields[f"societal_total_population__{group}"] = float("nan")
-        return fields
 
-    # Aggregate weighted population per island
-    group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
-    available_group_cols = {
-        label: col for label, col in group_cols.items()
-        if col in pop_alloc.columns
-    }
+    if total_pop is None:
+        total_pop = {}
+        if not island_pop.empty:
+            for label, col in available_group_cols.items():
+                total_pop[label] = float(island_pop[col].sum())
+        else:
+            for label, col in available_group_cols.items():
+                total_pop[label] = float(pop_alloc[col].sum())
 
-    # Total population per group (all islands, including -1)
-    total_pop: Dict[str, float] = {}
-    for label, col in available_group_cols.items():
-        total_pop[label] = float(pop_alloc[col].sum())
-
-    # Population with access per (function, group)
+    # Population with access per (function, group) — use island_pop for efficiency
     for func in all_functions:
-        islands_with_func = {
+        islands_with_func = [
             iid for iid, cats in frozen_island_function_map.items()
             if func in cats and iid != -1
-        }
-        accessible_mask = pop_alloc["island_id"].isin(islands_with_func)
+        ]
 
         for label, col in available_group_cols.items():
             total = total_pop.get(label, 0.0)
-            with_access = float(pop_alloc.loc[accessible_mask, col].sum())
+            if islands_with_func and not island_pop.empty:
+                valid_ids = [iid for iid in islands_with_func if iid in island_pop.index]
+                with_access = float(island_pop.loc[valid_ids, col].sum()) if valid_ids else 0.0
+            else:
+                with_access = 0.0
             without_access = total - with_access
             pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
 

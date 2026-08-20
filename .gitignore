@@ -24,3 +24,9 @@ data/land_use/Productbeschrijving Bestand Bodemgebruik 2017 (BBG2017) (2017.NL.V
 data/land_use/CBS_Publicatiebestand_BBG2017_v1.gpkg
 /data/test_samples/adaptation/L2_asset_barriers_4326
 /data/test_samples/adaptation/xL1_peilgeb
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+tests/__pycache__/*
