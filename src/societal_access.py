@@ -885,7 +885,7 @@ def _build_service_area_population_maps(
                         )
                     )
 
-                    nearest_idx = cKDTree(provider_xy).query(pop_xy, workers=-1)[1]
+                    nearest_idx = cKDTree(provider_xy).query(pop_xy)[1]
                     assigned_provider_ids = provider_ids[np.asarray(nearest_idx, dtype=int)]
                     sort_order = np.argsort(assigned_provider_ids, kind="stable")
                     sorted_provider_ids = assigned_provider_ids[sort_order]
