@@ -8,6 +8,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from config import get_config
 
 import src.island_analysis as island_analysis
+import src.grid_based_accessibility_hex as grid_hex_module
 import src.simulation as simulation_module
 from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
 from src.caching import (
@@ -1453,7 +1454,7 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
     )
     accessibility_calls = {"count": 0}
     monkeypatch.setattr(
-        simulation_module.grid_hex,
+        grid_hex_module,
         "accessibility_model",
         lambda *args, **kwargs: accessibility_calls.__setitem__(
             "count", accessibility_calls["count"] + 1
