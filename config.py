@@ -97,7 +97,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         #                      service-area/Voronoi assignment instead of island
         #                      connectivity, e.g.
         #                      {'electricity': frozenset({'msls'}),
-        #                       'hospital': frozenset({'hospital', 'clinic'})}
+        #                       'health': frozenset({'hospital', 'clinic'})}
         #                      Provider type strings are exact tokens and must
         #                      match asset "type" values exactly.
         #                      If omitted or None, defaults from
@@ -106,10 +106,10 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'service_node_config': {
             'taxonomy': {
                 # Health
-                'hospital': 'hospital',
-                'clinic': 'hospital',
-                'huisartsenpraktijk': 'hospital',
-                'apotheek': 'hospital',
+                'hospital': 'health',
+                'clinic': 'health',
+                'huisartsenpraktijk': 'health',
+                'apotheek': 'health',
                 # Emergency response
                 'fire_station': 'emergency_response',
                 'brandweerkazerne': 'emergency_response',

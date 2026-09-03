@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import warnings
 
 import geopandas as gpd
 import numpy as np
@@ -425,6 +426,12 @@ def prepare_population_impact_data_multigroup(
     Returns:
         dict: ``{group_label: {asset_id: population_value}}``
     """
+    warnings.warn(
+        "prepare_population_impact_data_multigroup is deprecated for societal "
+        "access workflows; prefer src.societal_access.postprocess_societal_access_results.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if group_columns is None:
         group_columns = {'total': 'aantal_inwoners'}
 
@@ -477,6 +484,13 @@ def calculate_societal_access_impacts(
             ``affected_population``, ``served_population``,
             ``total_population``, ``affected_ratio``.
     """
+    warnings.warn(
+        "calculate_societal_access_impacts is deprecated; prefer "
+        "src.societal_access.postprocess_societal_access_results for canonical "
+        "societal metrics.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     # Gather distinct functions and groups from the maps
     # Support either flat keys like 'electricity:total' or pure group keys
     # combined with asset_function_map.

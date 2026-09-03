@@ -86,9 +86,9 @@ def test_graph_path_access_pipeline():
     origin_access = compute_origin_access(
         {"origin_a": assignment["origin_a"], "origin_b": assignment["origin_b"]},
         island_functions,
-        all_functions=["education", "hospital"],
+        all_functions=["education", "health"],
     )
-    assert bool(origin_access.loc["origin_a", "hospital"])
+    assert bool(origin_access.loc["origin_a", "health"])
     assert not bool(origin_access.loc["origin_a", "education"])
 
     stakeholder_groups = {
@@ -96,11 +96,11 @@ def test_graph_path_access_pipeline():
         "elderly": {"origin_a": 30, "origin_b": 10},
     }
     access_matrix = compute_access_matrix_from_origins(origin_access, stakeholder_groups)
-    assert access_matrix.loc["hospital", "total"] == 60.0
+    assert access_matrix.loc["health", "total"] == 60.0
     assert access_matrix.loc["education", "total"] == 40.0
 
     equity = compute_equity_gaps(access_matrix, reference_group="total")
-    assert equity.loc["hospital", "elderly_absolute_gap"] == -15.0
+    assert equity.loc["health", "elderly_absolute_gap"] == -15.0
 
 
 def test_spatial_access_pipeline_and_wrapper():
@@ -132,9 +132,16 @@ def test_spatial_access_pipeline_and_wrapper():
     )
 
     access_matrix = result["access_matrix"]
-    assert access_matrix.loc["hospital", "total"] == pytest.approx(66.67, abs=0.01)
+    assert access_matrix.loc["health", "total"] == pytest.approx(66.67, abs=0.01)
     assert access_matrix.loc["education", "total"] == pytest.approx(33.33, abs=0.01)
     assert result["origin_access"] is None
+
+
+def test_default_config_uses_health_function_category():
+    config = get_config()
+    taxonomy = config["service_node_config"]["taxonomy"]
+    assert taxonomy["hospital"] == "health"
+    assert taxonomy["clinic"] == "health"
 
 
 def test_compute_access_matrix_handles_explicit_functions():
@@ -1053,12 +1060,23 @@ def test_service_area_function_provider_types_can_override_default_functions():
     )
 
     updated_default, _ = postprocess_societal_access_results(**common_kwargs)
+    assert updated_default[0]["societal_access_pct__hospital__total"] == pytest.approx(100.0)
+
     updated_override, _ = postprocess_societal_access_results(
-        **common_kwargs,
+        **{
+            **common_kwargs,
+            "summary_results": [{"timestep": 0, "map": 0}],
+            "detailed_results": [{
+                "timestep": 0,
+                "map": 0,
+                "road_state_key": "roads_connected_hospital",
+                "operational": np.array([True, False]),
+                "island_id": np.array([1, 1]),
+            }],
+        },
         service_area_function_provider_types={"hospital": frozenset({"hospital"})},
     )
 
-    assert updated_default[0]["societal_access_pct__hospital__total"] == pytest.approx(100.0)
     assert updated_override[0]["societal_access_pct__hospital__total"] == pytest.approx(50.0)
 
 

@@ -6,6 +6,7 @@ adds an explicit graph-aware path for opt-in dependency relationships.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -689,6 +690,7 @@ def evaluate_dependencies_from_graph(
     wait_vectors: dict[str, np.ndarray] | None = None,
     service_area_map: dict[int, list[int]] | None = None,
     previous_dependency_blocked_mask: np.ndarray | None = None,
+    profiler=None,
     return_report: bool = False,
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
@@ -773,15 +775,20 @@ def evaluate_dependencies_from_graph(
         )
 
     # Restore pass first: re-enable assets whose return-to-operational condition is met.
-    operational = restore_operational_from_graph(
-        operational,
-        asset_type,
-        hazard_type,
-        knowledge_graph,
-        flooded_mask=flooded_mask,
-        repair_time=repair_time,
-        wait_vectors=wait_vectors,
-    )
+    with (
+        profiler.section("dependency.restore_pass")
+        if profiler is not None
+        else nullcontext()
+    ):
+        operational = restore_operational_from_graph(
+            operational,
+            asset_type,
+            hazard_type,
+            knowledge_graph,
+            flooded_mask=flooded_mask,
+            repair_time=repair_time,
+            wait_vectors=wait_vectors,
+        )
     dependency_candidate_operational = operational.copy()
 
     blocked_mask = np.zeros(num_assets, dtype=bool)

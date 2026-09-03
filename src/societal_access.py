@@ -52,10 +52,10 @@ import pandas as pd
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
     # Health
-    "hospital": "hospital",
-    "clinic": "hospital",
-    "huisartsenpraktijk": "hospital",
-    "apotheek": "hospital",
+    "hospital": "health",
+    "clinic": "health",
+    "huisartsenpraktijk": "health",
+    "apotheek": "health",
     # Emergency response
     "fire_station": "emergency_response",
     "brandweerkazerne": "emergency_response",
@@ -87,6 +87,16 @@ ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
 }
+_LEGACY_ALLOCATION_LOOKUP_WARNED = False
+_FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
+    "health": frozenset({"health", "hospital"}),
+    "hospital": frozenset({"health", "hospital"}),
+}
+
+
+def _expand_function_category_equivalents(function_name: str) -> FrozenSet[str]:
+    """Return equivalent function-category labels for compatibility outputs."""
+    return _FUNCTION_CATEGORY_EQUIVALENTS.get(function_name, frozenset({function_name}))
 
 
 # ---------------------------------------------------------------------------
@@ -923,7 +933,8 @@ def _build_service_area_population_maps(
                     )
 
         if has_provider:
-            function_maps[function_name] = group_maps
+            for function_alias in _expand_function_category_equivalents(str(function_name)):
+                function_maps[function_alias] = group_maps
 
     return function_maps
 
@@ -1211,9 +1222,10 @@ def postprocess_societal_access_results(
                 atype = asset_types[i] if i < len(asset_types) else "unknown"
                 func_cat = taxonomy.get(str(atype))
                 if func_cat is not None and is_op:
-                    operational_asset_ids_by_function.setdefault(func_cat, set()).add(stable_asset_ids[i])
-                    isl_id_int = int(isl_id)
-                    island_function_map.setdefault(isl_id_int, set()).add(func_cat)
+                    for func_alias in _expand_function_category_equivalents(str(func_cat)):
+                        operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
+                        isl_id_int = int(isl_id)
+                        island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
             frozen_island_function_map: Dict[int, FrozenSet[str]] = {
                 iid: frozenset(cats) for iid, cats in island_function_map.items()
@@ -1415,6 +1427,17 @@ def _find_allocation_in_cache(
     :func:`postprocess_societal_access_results`.  Returns ``None`` when no
     unique matching entry is found.
     """
+    global _LEGACY_ALLOCATION_LOOKUP_WARNED
+    if not _LEGACY_ALLOCATION_LOOKUP_WARNED:
+        warnings.warn(
+            "Using legacy allocation-cache metadata scan path; pass "
+            "'islands_gdf_cache' to postprocess_societal_access_results for "
+            "deterministic road-state-aware allocation lookup.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _LEGACY_ALLOCATION_LOOKUP_WARNED = True
+
     _, allocation_df = _find_allocation_cache_entry(
         allocation_cache,
         pop_grid_gdf,
