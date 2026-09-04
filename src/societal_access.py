@@ -1633,6 +1633,21 @@ def postprocess_societal_access_results(
                 # Build island → functions map from operational providers.
                 # --- Work item 3: iterate only over precomputed provider
                 # positions instead of every asset on every timestep.
+                #
+                # --- Scale-readiness Work item D (measured, not implemented):
+                # profiled at 5400-asset / ~378-provider synthetic scale
+                # (~22x the small-scale asset count), this section costs
+                # ~0.12-0.21 ms/timestep -- statistically indistinguishable
+                # from the ~0.26 ms/timestep measured at small scale (~10-20
+                # providers). This confirms the cost is dominated by fixed
+                # per-timestep Python/loop overhead, not by provider count,
+                # so the proposed array-based (numpy mask + np.unique)
+                # rewrite would not yield a measurable win here and was not
+                # implemented, per the "measure before implementing" policy.
+                # Aggregate contribution at that scale: ~0.03-0.05 s across
+                # 240 timesteps out of a multi-second call dominated by
+                # allocation-geometry building and the one-off service-area
+                # population map build (neither in this work item's scope).
                 island_function_map: Dict[int, Set[str]] = {}
                 operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
                 detail_len = min(len(operational), len(island_ids))
