@@ -1676,3 +1676,231 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
     assert "Successfully resolved islands" not in combined_output
     assert "Loading hazard graph from" not in combined_output
     assert "Saved island cache:" not in combined_output
+
+
+def _build_hospital_msls_scenario(monkeypatch, tmp_path):
+    """Shared scaffolding for a minimal msls+hospital island scenario.
+
+    Mirrors the setup in
+    ``test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema``
+    so both the direct simulation path and the EMA wrapper exercise the same
+    runtime context (hazard/island mocks, knowledge graph, societal config).
+    """
+    hazard_dir = tmp_path / "hazard_case"
+    hazard_dir.mkdir(parents=True, exist_ok=True)
+    config = get_config(root_dir=tmp_path, hazard_dir_override=hazard_dir)
+    config["simulation_config"]["verbose"] = False
+    config["simulation_config"]["accessibility_model"] = None
+    config["dependency_parameters"]["knowledge_graph"] = [
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "repair_complete"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "hospital",
+            "asset_type_b": None,
+            "relationship": "direct",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "repair_complete"},
+            },
+        },
+        {
+            "hazard_type": "flooding",
+            "asset_type_a": "msls",
+            "asset_type_b": "hospital",
+            "relationship": "service_area",
+            "parameters": {
+                "hazard_blocks_operation": False,
+                "return_to_operational": {"trigger": "immediate"},
+            },
+        },
+    ]
+    config["dependency_parameters"]["service_area_map"] = None
+
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["msls", "hospital"]},
+        geometry=[Point(0, 0), Point(5, 0)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["pop_cell"],
+            "aantal_inwoners": [100],
+            "aantal_inwoners_65_jaar_en_ouder": [20],
+            "aantal_inwoners_0_tot_15_jaar": [15],
+            "aantal_inwoners_25_tot_45_jaar": [40],
+        },
+        geometry=[box(-2, -2, 8, 2)],
+        crs="EPSG:28992",
+    )
+
+    monkeypatch.setattr(
+        simulation_module,
+        "find_hazard_value_at_points_optimized",
+        lambda hazard_map, temp_gdf, map_counter, **kwargs: temp_gdf.assign(
+            **{f"EV{map_counter}_ma": 0.0}
+        ),
+    )
+    monkeypatch.setattr(
+        simulation_module,
+        "match_assets_access",
+        lambda *args, **kwargs: (
+            np.array([10, 10]),
+            [],
+            [],
+            {10: 100.0},
+        ),
+    )
+    monkeypatch.setattr(
+        island_analysis,
+        "compute_island_geodataframe_from_graph",
+        lambda *args, **kwargs: gpd.GeoDataFrame(
+            {
+                "rfid": [10],
+                "island_id": [1],
+                "length_m": [100.0],
+            },
+            geometry=[LineString([(0, 0), (10, 0)])],
+            crs="EPSG:28992",
+        ),
+    )
+    monkeypatch.setattr(
+        grid_hex_module,
+        "accessibility_model",
+        lambda *args, **kwargs: [True] * len(args[0]),
+    )
+
+    societal_access_config = {
+        "pop_grid_gdf": pop,
+        "cell_id_column": "cell_id",
+        # Included (unlike the smoke-test fixture above) because the real
+        # notebook configuration always sets this, and it drives EMA outcome
+        # *declaration* independently of the postprocessed DataFrame columns
+        # (see `_configured_societal_metric_names`).
+        "pop_group_columns": {
+            "total": "aantal_inwoners",
+            "elderly": "aantal_inwoners_65_jaar_en_ouder",
+        },
+        "taxonomy": {"hospital": "hospital", "msls": "electricity"},
+        "all_functions": ["hospital"],
+        "allocation_cache": {},
+        "fail_on_missing_allocation": True,
+    }
+    hazard_maps = [hazard_dir / "hazard_0.tif"]
+
+    return config, gdf_assets, societal_access_config, hazard_maps
+
+
+def test_ema_wrapper_preserves_societal_metrics_with_population_impacts(
+    monkeypatch, tmp_path, capsys
+):
+    """Regression test for the EMA-vs-direct-simulation mismatch.
+
+    Previously, ``_add_impact_metrics`` in
+    ``simulate_asset_damage_recovery_access_breakdown_ema`` replaced the
+    wrapper's ``timestep_results`` DataFrame (which carries the
+    ``societal_*`` columns merged in by the direct simulation's societal
+    postprocessing step) with a brand-new DataFrame built solely from
+    per-asset ``detailed_results`` whenever ``asset_population_map`` was
+    supplied. That silently discarded the societal metrics, producing
+    all-NaN ``societal_*`` EMA outcome arrays even though the direct
+    simulation path (and the intermediate ``timestep_results``) held finite
+    values. This test locks in the fix: population impacts and societal
+    access outcomes must both be finite when both inputs are configured.
+    """
+    config, gdf_assets, societal_access_config, hazard_maps = _build_hospital_msls_scenario(
+        monkeypatch, tmp_path
+    )
+
+    # Seed the allocation cache using the known-good direct simulation path,
+    # matching how book/Use_Case_sample_societal_access.ipynb primes the cache.
+    _, _, cache_updated = simulate_asset_damage_recovery_access_breakdown(
+        gdf_assets=gdf_assets.copy(),
+        hazard_maps=hazard_maps,
+        number_repair_crews=1,
+        repair_crew_assignment_method="island",
+        flood_threshold=0.2,
+        root_dir=tmp_path,
+        config=config,
+        major_timestep=1,
+        timestep_output=True,
+        societal_access_config=societal_access_config,
+        verbose=False,
+    )
+    capsys.readouterr()
+
+    # Population impacts keyed by asset position (msls=0, hospital=1), as
+    # produced by prepare_population_impact_data in the real notebook.
+    asset_population_map = {0: 60, 1: 40}
+
+    ema_result = simulate_asset_damage_recovery_access_breakdown_ema(
+        gdf_assets=gdf_assets.copy(),
+        hazard_maps=hazard_maps,
+        number_repair_crews=1,
+        repair_crew_assignment_method="island",
+        flood_threshold=0.2,
+        root_dir=tmp_path,
+        config=config,
+        major_timestep=1,
+        timestep_output=True,
+        societal_access_config={
+            **societal_access_config,
+            "allocation_cache": cache_updated["societal_allocation_cache"],
+        },
+        asset_population_map=asset_population_map,
+        verbose=False,
+    )
+
+    # Population impact postprocessing ran...
+    assert math.isfinite(float(ema_result["affected_population"][0]))
+    assert math.isfinite(float(ema_result["served_population"][0]))
+    # ...without wiping out the societal metrics computed by the direct
+    # simulation's postprocessing step.
+    assert "societal_access_pct__hospital__total" in ema_result
+    assert math.isfinite(float(ema_result["societal_access_pct__hospital__total"][0]))
+    assert float(ema_result["societal_access_pct__hospital__total"][0]) == pytest.approx(100.0)
+
+
+def test_ema_wrapper_without_impact_inputs_returns_core_outcomes(monkeypatch, tmp_path):
+    """Backward-compatibility test matching book/Use_Case_sample.ipynb.
+
+    When ``asset_population_map``, ``asset_to_lu``, and
+    ``societal_access_config`` are all absent, the EMA wrapper must still
+    run and return the core infrastructure outcomes, and must not declare
+    any ``societal_*`` outcomes (since no societal configuration was
+    provided).
+    """
+    config, gdf_assets, _societal_access_config, hazard_maps = _build_hospital_msls_scenario(
+        monkeypatch, tmp_path
+    )
+
+    ema_result = simulate_asset_damage_recovery_access_breakdown_ema(
+        gdf_assets=gdf_assets.copy(),
+        hazard_maps=hazard_maps,
+        number_repair_crews=1,
+        repair_crew_assignment_method="island",
+        flood_threshold=0.2,
+        root_dir=tmp_path,
+        config=config,
+        major_timestep=1,
+        timestep_output=True,
+        keep_2d_vars=["flooded", "operational", "damage_ratio", "repair_time"],
+        verbose=False,
+    )
+
+    for key in ("timesteps", "flooded", "operational", "damage_ratio", "repair_time"):
+        assert key in ema_result
+        assert len(ema_result[key]) > 0
+
+    assert not any(key.startswith("societal_") for key in ema_result)
+    assert "affected_population" not in ema_result
+    assert "monetary_impact_total" in ema_result
+    assert np.all(ema_result["monetary_impact_total"] == 0.0)
