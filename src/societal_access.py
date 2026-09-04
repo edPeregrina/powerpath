@@ -1348,60 +1348,69 @@ def postprocess_societal_access_results(
         ts_detail = detailed_by_ts.get(ts)
 
         with profiler.timestep(ts, loop="societal_postprocess"):
-            if ts_detail is None:
-                # No detailed data → emit NaN
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
-
-            # Read dependency-adjusted operational states
-            operational = np.asarray(ts_detail.get("operational", []))
-            island_ids = np.asarray(ts_detail.get("island_id", []))
-
-            if len(operational) == 0 or len(island_ids) == 0:
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
-
-            # Build island → functions map from operational providers.
-            # --- Work item 3: iterate only over precomputed provider
-            # positions instead of every asset on every timestep.
-            island_function_map: Dict[int, Set[str]] = {}
-            operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
-            detail_len = min(len(operational), len(island_ids))
-            for i in provider_positions:
-                if i >= detail_len or not operational[i]:
+            # --- Instrumentation follow-up: these two early-exit checks were
+            # previously outside any named section (part of the profiler's
+            # "societal_postprocess.unattributed" blind spot). They are cheap
+            # per-timestep validation/state-prep, grouped under the same
+            # section name as the road_state_key resolution below since both
+            # are "prepare this timestep's state" work.
+            with profiler.section("societal_access.prepare_timestep_state"):
+                if ts_detail is None:
+                    # No detailed data → emit NaN
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                     continue
-                isl_id_int = int(island_ids[i])
-                for func_alias in asset_func_aliases[i]:
-                    operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
-                    island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
-            if unknown_func_aliases and detail_len > _num_assets_static:
-                for i in range(_num_assets_static, detail_len):
-                    if not operational[i]:
+                # Read dependency-adjusted operational states
+                operational = np.asarray(ts_detail.get("operational", []))
+                island_ids = np.asarray(ts_detail.get("island_id", []))
+
+                if len(operational) == 0 or len(island_ids) == 0:
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    continue
+
+            with profiler.section("societal_access.build_operational_provider_map"):
+                # Build island → functions map from operational providers.
+                # --- Work item 3: iterate only over precomputed provider
+                # positions instead of every asset on every timestep.
+                island_function_map: Dict[int, Set[str]] = {}
+                operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
+                detail_len = min(len(operational), len(island_ids))
+                for i in provider_positions:
+                    if i >= detail_len or not operational[i]:
                         continue
                     isl_id_int = int(island_ids[i])
-                    for func_alias in unknown_func_aliases:
+                    for func_alias in asset_func_aliases[i]:
                         operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
                         island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
-            frozen_island_function_map: Dict[int, FrozenSet[str]] = {
-                iid: frozenset(cats) for iid, cats in island_function_map.items()
-            }
+                if unknown_func_aliases and detail_len > _num_assets_static:
+                    for i in range(_num_assets_static, detail_len):
+                        if not operational[i]:
+                            continue
+                        isl_id_int = int(island_ids[i])
+                        for func_alias in unknown_func_aliases:
+                            operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
+                            island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
-            # Strict road_state_key resolution — no fallback to map index.
-            # Falling back to the map counter would silently reuse the baseline
-            # topology for adapted states that happen to share the same counter.
-            road_state_key_raw = ts_detail.get("road_state_key")
-            if not road_state_key_raw:
-                warnings.warn(
-                    f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
-                    "Ensure the simulation records road_state_key in its timestep detail.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
-            road_state_key = str(road_state_key_raw)
+                frozen_island_function_map: Dict[int, FrozenSet[str]] = {
+                    iid: frozenset(cats) for iid, cats in island_function_map.items()
+                }
+
+            with profiler.section("societal_access.prepare_timestep_state"):
+                # Strict road_state_key resolution — no fallback to map index.
+                # Falling back to the map counter would silently reuse the baseline
+                # topology for adapted states that happen to share the same counter.
+                road_state_key_raw = ts_detail.get("road_state_key")
+                if not road_state_key_raw:
+                    warnings.warn(
+                        f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
+                        "Ensure the simulation records road_state_key in its timestep detail.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    continue
+                road_state_key = str(road_state_key_raw)
 
             with profiler.section("societal_access.resolve_allocation"):
                 # --- Problem 1: get or populate islands hashes for this road_state_key ---
@@ -1489,40 +1498,46 @@ def postprocess_societal_access_results(
 
             with profiler.section("societal_access.compute_scalars"):
                 # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
-                _cached_entry: Optional[Dict[str, Any]] = None
-                if allocation_cache_key is not None and allocation_df is not None:
-                    if allocation_cache_key not in _pop_alloc_cache:
-                        try:
-                            _pop_alloc_df = apply_population_to_allocations(
-                                allocation_df=allocation_df,
-                                pop_grid_gdf=pop_grid_gdf,
-                                cell_id_column=cell_id_column,
-                                pop_group_columns=pop_group_columns,
-                            )
-                            _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
-                            _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
-                            _wcl = list(_agc.values())
-                            _isl_pop = (
-                                _pop_alloc_df.groupby("island_id")[_wcl].sum()
-                                if _wcl
-                                else pd.DataFrame()
-                            )
-                            _tot_pop: Dict[str, float] = {}
-                            if not _isl_pop.empty:
-                                for _lbl, _col in _agc.items():
-                                    _tot_pop[_lbl] = float(_isl_pop[_col].sum())
-                            else:
-                                for _lbl, _col in _agc.items():
-                                    _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
-                            _pop_alloc_cache[allocation_cache_key] = {
-                                "pop_alloc": _pop_alloc_df,
-                                "island_pop": _isl_pop,
-                                "total_pop": _tot_pop,
-                                "available_group_cols": _agc,
-                            }
-                        except Exception:
-                            pass
-                    _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
+                # --- Investigation follow-up: named as its own subphase so the
+                # allocation (pop_alloc) build work is distinguishable from
+                # cache-key construction and the scalar cache hit/miss paths
+                # below (all previously folded into one "compute_scalars" time).
+                with profiler.section("societal_access.compute_scalars.pop_alloc"):
+                    _cached_entry: Optional[Dict[str, Any]] = None
+                    if allocation_cache_key is not None and allocation_df is not None:
+                        if allocation_cache_key not in _pop_alloc_cache:
+                            with profiler.section("societal_access.compute_scalars.pop_alloc_build"):
+                                try:
+                                    _pop_alloc_df = apply_population_to_allocations(
+                                        allocation_df=allocation_df,
+                                        pop_grid_gdf=pop_grid_gdf,
+                                        cell_id_column=cell_id_column,
+                                        pop_group_columns=pop_group_columns,
+                                    )
+                                    _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
+                                    _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
+                                    _wcl = list(_agc.values())
+                                    _isl_pop = (
+                                        _pop_alloc_df.groupby("island_id")[_wcl].sum()
+                                        if _wcl
+                                        else pd.DataFrame()
+                                    )
+                                    _tot_pop: Dict[str, float] = {}
+                                    if not _isl_pop.empty:
+                                        for _lbl, _col in _agc.items():
+                                            _tot_pop[_lbl] = float(_isl_pop[_col].sum())
+                                    else:
+                                        for _lbl, _col in _agc.items():
+                                            _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
+                                    _pop_alloc_cache[allocation_cache_key] = {
+                                        "pop_alloc": _pop_alloc_df,
+                                        "island_pop": _isl_pop,
+                                        "total_pop": _tot_pop,
+                                        "available_group_cols": _agc,
+                                    }
+                                except Exception:
+                                    pass
+                        _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
 
                 # --- Fix 6 / Work item 4: cache _compute_societal_scalars AND
                 # _apply_service_area_societal_scalars output together, keyed
@@ -1535,47 +1550,53 @@ def postprocess_societal_access_results(
                 # island_id arrays) keeps memory independent of total asset
                 # count. This cache is function-local: it is freed when
                 # postprocess_societal_access_results returns.
-                _frozen_ifm_key = frozenset(frozen_island_function_map.items())
-                _op_signature = tuple(
-                    (func, frozenset(ids))
-                    for func, ids in sorted(operational_asset_ids_by_function.items())
-                )
-                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
-                if _scalar_cache_key in _scalar_fields_cache:
-                    # A cache hit must never hand out the same mutable dict
-                    # twice: _apply_service_area_societal_scalars mutates its
-                    # `fields` argument in place, so always return a copy.
-                    societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
-                else:
-                    societal_fields = _compute_societal_scalars(
-                        frozen_island_function_map=frozen_island_function_map,
-                        allocation_df=allocation_df,
-                        pop_grid_gdf=pop_grid_gdf,
-                        cell_id_column=cell_id_column,
-                        pop_group_columns=pop_group_columns,
-                        all_functions=all_functions,
-                        reference_group=reference_group,
-                        pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
-                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
-                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
-                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                with profiler.section("societal_access.compute_scalars.cache_key"):
+                    _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                    _op_signature = tuple(
+                        (func, frozenset(ids))
+                        for func, ids in sorted(operational_asset_ids_by_function.items())
                     )
-                    # --- Fix 4 / Work item 5: use precomputed numpy arrays +
-                    # provider→position maps for service area computation.
-                    societal_fields = _apply_service_area_societal_scalars(
-                        societal_fields,
-                        operational_asset_ids_by_function=operational_asset_ids_by_function,
-                        service_area_population_maps=service_area_population_maps,
-                        pop_group_columns=pop_group_columns,
-                        reference_group=reference_group,
-                        numpy_maps=_service_area_numpy if _service_area_numpy else None,
-                        position_maps=_service_area_positions if _service_area_positions else None,
-                    )
-                    _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+                    _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
+                    _scalar_cache_hit = _scalar_cache_key in _scalar_fields_cache
 
-            ts_summary.update(societal_fields)
-            ts_summary["allocation_cache_key"] = allocation_cache_key
-            ts_summary["allocation_road_state_key"] = road_state_key
+                if _scalar_cache_hit:
+                    with profiler.section("societal_access.compute_scalars.cache_hit"):
+                        # A cache hit must never hand out the same mutable dict
+                        # twice: _apply_service_area_societal_scalars mutates its
+                        # `fields` argument in place, so always return a copy.
+                        societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
+                else:
+                    with profiler.section("societal_access.compute_scalars.cache_miss"):
+                        societal_fields = _compute_societal_scalars(
+                            frozen_island_function_map=frozen_island_function_map,
+                            allocation_df=allocation_df,
+                            pop_grid_gdf=pop_grid_gdf,
+                            cell_id_column=cell_id_column,
+                            pop_group_columns=pop_group_columns,
+                            all_functions=all_functions,
+                            reference_group=reference_group,
+                            pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
+                            island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                            total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                            available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                        )
+                        # --- Fix 4 / Work item 5: use precomputed numpy arrays +
+                        # provider→position maps for service area computation.
+                        societal_fields = _apply_service_area_societal_scalars(
+                            societal_fields,
+                            operational_asset_ids_by_function=operational_asset_ids_by_function,
+                            service_area_population_maps=service_area_population_maps,
+                            pop_group_columns=pop_group_columns,
+                            reference_group=reference_group,
+                            numpy_maps=_service_area_numpy if _service_area_numpy else None,
+                            position_maps=_service_area_positions if _service_area_positions else None,
+                        )
+                        _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+
+            with profiler.section("societal_access.merge_fields"):
+                ts_summary.update(societal_fields)
+                ts_summary["allocation_cache_key"] = allocation_cache_key
+                ts_summary["allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
 
