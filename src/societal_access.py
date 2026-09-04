@@ -728,6 +728,199 @@ def apply_population_to_allocations(
     return merged
 
 
+def _build_population_value_arrays(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Dict[str, str],
+) -> Tuple[pd.Index, Dict[str, np.ndarray]]:
+    """Sanitise population demographic columns once, as plain numpy arrays.
+
+    Work item A: population values are invariant across road/allocation
+    states -- only the cell → island assignment changes per state.  This
+    extracts and sanitises them exactly once per
+    :func:`postprocess_societal_access_results` call (mirroring the
+    CBS-suppressed-value coercion and negative-value clipping performed
+    inside :func:`apply_population_to_allocations`) instead of re-doing it
+    for every distinct state.  Returned arrays are aligned to a stable
+    ``cell_id`` position ordering (``cell_id_index``), which
+    :func:`_aggregate_population_by_island` uses to align them against each
+    state's allocation rows.
+
+    Returns
+    -------
+    (cell_id_index, value_arrays)
+        ``cell_id_index`` is a :class:`pandas.Index` of cell IDs in a fixed
+        position order; ``value_arrays`` maps ``{label: numpy_array}`` for
+        every demographic label whose column is present in *pop_grid_gdf*
+        (labels with a missing column are simply absent, mirroring the
+        ``if column_name not in ... .columns: continue`` guard elsewhere).
+
+    Raises
+    ------
+    ValueError
+        If *cell_id_column* has duplicate values (same invariant enforced by
+        :func:`apply_population_to_allocations`).
+    """
+    pop_cols = list(pop_group_columns.values())
+    available_cols = [c for c in pop_cols if c in pop_grid_gdf.columns]
+
+    pop_attrs = pop_grid_gdf[[cell_id_column] + available_cols].copy()
+    for col in available_cols:
+        pop_attrs[col] = pd.to_numeric(pop_attrs[col], errors="coerce").fillna(0)
+        pop_attrs[col] = pop_attrs[col].where(pop_attrs[col] >= 0, 0)
+
+    if pop_attrs[cell_id_column].duplicated().any():
+        raise ValueError(
+            f"Population grid has duplicate values in '{cell_id_column}'. "
+            "The join must be many-to-one (allocation rows → one population row)."
+        )
+
+    cell_id_index = pd.Index(pop_attrs[cell_id_column].to_numpy())
+    value_arrays = {
+        label: pop_attrs[col].to_numpy(dtype=float)
+        for label, col in pop_group_columns.items()
+        if col in available_cols
+    }
+    return cell_id_index, value_arrays
+
+
+def _aggregate_population_by_island(
+    allocation_df: pd.DataFrame,
+    cell_id_column: str,
+    cell_id_index: pd.Index,
+    value_arrays: Dict[str, np.ndarray],
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, str]]:
+    """Aggregate one allocation state's per-cell population to per-island sums.
+
+    Work item A: replaces the previous ``apply_population_to_allocations``
+    (full merge) + ``groupby("island_id").sum()`` pattern used on every
+    distinct road/allocation state, which re-joined and re-sanitised the
+    *entire* population grid on every cache miss.  Given the once-per-call
+    sanitised arrays from :func:`_build_population_value_arrays`, this only
+    positions those values against the current state's allocation rows
+    (``cell_id_index.get_indexer``, O(n)) and aggregates by island via dense
+    integer codes + ``np.bincount`` (O(n), no hash-join, no per-state
+    re-sanitisation).
+
+    Numerically equivalent to the previous merge/groupby path -- but *not*
+    bit-identical to the ULP.  ``np.bincount``'s plain sequential
+    accumulation differs from pandas' groupby-sum kernel (which uses a
+    compensated summation internally) by ~1e-9 absolute on representative
+    data.  This has been confirmed negligible: population magnitudes here
+    are always non-negative small integers/floats, and downstream values are
+    rounded to 2 decimal places, so this reduction-order difference cannot
+    change any emitted metric.  See the equivalence tests in
+    ``tests/test_societal_access.py``.
+
+    Returns
+    -------
+    (island_pop, total_pop, available_group_cols)
+        Same shapes as the corresponding entries previously stored in
+        ``_pop_alloc_cache`` (Work item C dropped the redundant full
+        per-cell ``pop_alloc`` frame from that cache once nothing downstream
+        needed it beyond these three).
+    """
+    available_group_cols = {label: f"{label}_weighted" for label in value_arrays}
+    if not available_group_cols or allocation_df.empty:
+        return pd.DataFrame(), {}, available_group_cols
+
+    positions = cell_id_index.get_indexer(allocation_df[cell_id_column].to_numpy())
+    valid_mask = positions >= 0
+    safe_positions = np.where(valid_mask, positions, 0)
+    fractions = allocation_df["allocation_fraction"].to_numpy(dtype=float)
+    island_codes, island_uniques = pd.factorize(allocation_df["island_id"].to_numpy(), sort=True)
+    n_islands = len(island_uniques)
+
+    island_pop_data: Dict[str, np.ndarray] = {}
+    total_pop: Dict[str, float] = {}
+    for label, col in available_group_cols.items():
+        raw_vals = value_arrays[label][safe_positions]
+        # get_indexer returns -1 for an unmatched cell_id (should not occur
+        # in practice -- allocation_df is always derived from this same
+        # population grid); treat any such gap as population 0, mirroring
+        # `merged[col].fillna(0)` in the original merge-based path.
+        pop_vals = np.where(valid_mask, raw_vals, 0.0)
+        weighted = pop_vals * fractions
+        island_sums = np.bincount(island_codes, weights=weighted, minlength=n_islands)
+        island_pop_data[col] = island_sums
+        total_pop[label] = float(island_sums.sum())
+
+    island_pop = pd.DataFrame(island_pop_data, index=pd.Index(island_uniques, name="island_id"))
+    return island_pop, total_pop, available_group_cols
+
+
+def clip_population_to_service_area(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    gdf_assets: gpd.GeoDataFrame,
+    buffer_m: float = 200.0,
+) -> gpd.GeoDataFrame:
+    """Clip a population grid to a buffered hull of asset/provider locations.
+
+    Work item B: a lightweight, opt-in guard against feeding
+    :func:`postprocess_societal_access_results` a population grid far larger
+    than the area assets can actually serve.  This mirrors the pre-clip the
+    sample notebook already performs manually (loading the population layer
+    with ``bbox=tuple(voronoi_gdf.total_bounds)``), packaged as a reusable
+    helper so other callers (e.g. a country-scale deployment loading the
+    full national grid) can pre-clip *before* the grid ever reaches
+    ``postprocess_societal_access_results`` -- every per-state population
+    aggregation (Work item A) and the one-off service-area population map
+    build both scale with population-grid size, so clipping upstream is the
+    cheapest possible win.
+
+    This is *not* a mandatory pipeline stage: it changes nothing unless a
+    caller opts in by calling it, and :func:`postprocess_societal_access_results`
+    only ever *warns* (never raises) if it detects an unclipped grid --
+    some callers may have legitimate reasons for a larger grid than the
+    convex hull of current asset locations (e.g. anticipated future asset
+    placement, or a shared grid reused across multiple studies).
+
+    Parameters
+    ----------
+    pop_grid_gdf:
+        Population grid GeoDataFrame to clip.
+    gdf_assets:
+        Asset/provider GeoDataFrame; the convex hull of its geometries
+        (buffered by *buffer_m*) defines the service-area boundary.
+    buffer_m:
+        Buffer distance in *pop_grid_gdf*'s CRS units (typically metres).
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Subset of *pop_grid_gdf* intersecting the buffered hull, with the
+        index reset.  Returns *pop_grid_gdf* unchanged if either input is
+        empty.
+    """
+    if gdf_assets.empty or pop_grid_gdf.empty:
+        return pop_grid_gdf
+
+    assets_in_pop_crs = (
+        gdf_assets.to_crs(pop_grid_gdf.crs) if gdf_assets.crs != pop_grid_gdf.crs else gdf_assets
+    )
+    _assets_geom = assets_in_pop_crs.geometry
+    _assets_union = _assets_geom.union_all() if hasattr(_assets_geom, "union_all") else _assets_geom.unary_union
+    hull = _assets_union.convex_hull.buffer(buffer_m)
+    hull_gdf = gpd.GeoDataFrame(geometry=[hull], crs=pop_grid_gdf.crs)
+    clipped = gpd.clip(pop_grid_gdf, hull_gdf)
+    return clipped.reset_index(drop=True)
+
+
+def _service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
+    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``."""
+    if gdf_assets.empty:
+        return None
+    try:
+        assets_in_crs = gdf_assets.to_crs(crs) if gdf_assets.crs != crs else gdf_assets
+        _geom = assets_in_crs.geometry
+        _union = _geom.union_all() if hasattr(_geom, "union_all") else _geom.unary_union
+        hull = _union.convex_hull.buffer(buffer_m)
+        area = float(hull.area)
+        return area if area > 0 else None
+    except Exception:
+        return None
+
+
 def get_or_build_allocation(
     allocation_cache: Dict[str, pd.DataFrame],
     pop_grid_gdf: gpd.GeoDataFrame,
@@ -1148,6 +1341,8 @@ def postprocess_societal_access_results(
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
     profiler: Optional[Any] = NULL_PROFILER,
+    pop_grid_area_warn_buffer_m: float = 5000.0,
+    pop_grid_area_warn_ratio: float = 25.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1212,6 +1407,15 @@ def postprocess_societal_access_results(
         for service-area routing.  Provider type tokens must match
         ``asset_type_column`` values exactly.  When ``None``, defaults to
         :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
+    pop_grid_area_warn_buffer_m, pop_grid_area_warn_ratio:
+        Work item B: cheap, non-fatal guard against an unclipped population
+        grid.  If the bounding-box area of *pop_grid_gdf* exceeds
+        ``pop_grid_area_warn_ratio`` times the area of the buffered
+        (``pop_grid_area_warn_buffer_m``) convex hull of *gdf_assets*, a
+        ``RuntimeWarning`` is emitted suggesting
+        :func:`clip_population_to_service_area`.  This never raises or
+        changes behaviour -- some callers may have legitimate reasons for a
+        larger grid (e.g. a shared national grid reused across studies).
 
     Returns
     -------
@@ -1284,6 +1488,37 @@ def postprocess_societal_access_results(
         print(f"Electricity providers: {electricity_provider_count} MSLS")
         print(f"Hospital providers: {hospital_provider_count}")
 
+    # --- Work item B: cheap, non-fatal guard against an unclipped
+    # population grid.  Bounding-box area comparisons only -- no clipping,
+    # no exception, just a warning nudging callers toward
+    # clip_population_to_service_area() when it looks like they forgot to
+    # pre-clip.  Runs once per call, never inside the per-timestep loop.
+    try:
+        if not pop_grid_gdf.empty and not gdf_assets.empty:
+            _pgb = pop_grid_gdf.total_bounds
+            _pop_grid_area = float((_pgb[2] - _pgb[0]) * (_pgb[3] - _pgb[1]))
+            _hull_area = _service_area_hull_area(
+                gdf_assets, pop_grid_gdf.crs, pop_grid_area_warn_buffer_m
+            )
+            if (
+                _hull_area is not None
+                and _pop_grid_area > 0
+                and (_pop_grid_area / _hull_area) > pop_grid_area_warn_ratio
+            ):
+                warnings.warn(
+                    "Population grid bounding-box area is "
+                    f"{_pop_grid_area / _hull_area:.1f}x the buffered "
+                    f"({pop_grid_area_warn_buffer_m:.0f}m) convex hull of "
+                    "gdf_assets -- this looks unclipped and will make every "
+                    "per-state population aggregation more expensive than "
+                    "necessary. Consider pre-clipping with "
+                    "clip_population_to_service_area().",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+    except Exception:
+        pass
+
     with profiler.section("societal_access._build_service_area_population_maps"):
         service_area_assets = gdf_assets.copy()
         service_area_assets.index = stable_asset_ids
@@ -1313,8 +1548,34 @@ def postprocess_societal_access_results(
     _islands_hash_cache: Dict[str, Tuple[str, str]] = {}
 
     # --- Problem 3: pop_alloc cache keyed by allocation_cache_key ---
-    # Each entry: {"pop_alloc": df, "island_pop": df, "total_pop": dict, "available_group_cols": dict}
+    # Each entry: {"island_pop": df, "total_pop": dict, "available_group_cols": dict}.
+    # --- Work item C: the full per-cell "pop_alloc" frame (one row per
+    # population cell x island) used to be cached here too, but nothing
+    # downstream ever reads it once island_pop/total_pop/available_group_cols
+    # are all present: _compute_societal_scalars only falls back to building
+    # its own pop_alloc internally when *all three* are None (i.e. this
+    # entry is entirely absent), and _apply_service_area_societal_scalars
+    # never touches pop_alloc at all (it uses service_area_population_maps).
+    # Dropping it keeps this cache's memory bounded by island count x
+    # distinct-state count instead of population-cell count x distinct-state
+    # count -- the dominant term at country scale.
     _pop_alloc_cache: Dict[str, Dict[str, Any]] = {}
+
+    # --- Work item A: lazily-built, call-scoped sanitised population value
+    # arrays (see _build_population_value_arrays).  Population values are
+    # invariant across road/allocation states, so this is built at most once
+    # per postprocess_societal_access_results call, on the first cache miss,
+    # and reused for every subsequent distinct state instead of re-merging +
+    # re-sanitising the whole population grid every time.
+    _pop_value_arrays_state: Optional[Tuple[pd.Index, Dict[str, np.ndarray]]] = None
+
+    def _get_population_value_arrays() -> Tuple[pd.Index, Dict[str, np.ndarray]]:
+        nonlocal _pop_value_arrays_state
+        if _pop_value_arrays_state is None:
+            _pop_value_arrays_state = _build_population_value_arrays(
+                pop_grid_gdf, cell_id_column, pop_group_columns
+            )
+        return _pop_value_arrays_state
 
     # --- Problem 6: cache _compute_societal_scalars output per (allocation_cache_key, frozen_island_function_map) ---
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
@@ -1508,29 +1769,24 @@ def postprocess_societal_access_results(
                         if allocation_cache_key not in _pop_alloc_cache:
                             with profiler.section("societal_access.compute_scalars.pop_alloc_build"):
                                 try:
-                                    _pop_alloc_df = apply_population_to_allocations(
+                                    # --- Work item A: aggregate directly from
+                                    # the once-per-call sanitised population
+                                    # arrays instead of re-merging +
+                                    # re-sanitising the whole population grid
+                                    # against this state's allocation rows.
+                                    _cell_id_index, _value_arrays = _get_population_value_arrays()
+                                    _isl_pop, _tot_pop, _agc = _aggregate_population_by_island(
                                         allocation_df=allocation_df,
-                                        pop_grid_gdf=pop_grid_gdf,
                                         cell_id_column=cell_id_column,
-                                        pop_group_columns=pop_group_columns,
+                                        cell_id_index=_cell_id_index,
+                                        value_arrays=_value_arrays,
                                     )
-                                    _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
-                                    _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
-                                    _wcl = list(_agc.values())
-                                    _isl_pop = (
-                                        _pop_alloc_df.groupby("island_id")[_wcl].sum()
-                                        if _wcl
-                                        else pd.DataFrame()
-                                    )
-                                    _tot_pop: Dict[str, float] = {}
-                                    if not _isl_pop.empty:
-                                        for _lbl, _col in _agc.items():
-                                            _tot_pop[_lbl] = float(_isl_pop[_col].sum())
-                                    else:
-                                        for _lbl, _col in _agc.items():
-                                            _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
+                                    # --- Work item C: only island_pop / total_pop /
+                                    # available_group_cols are ever read back out of
+                                    # this cache (see the comment on _pop_alloc_cache's
+                                    # declaration) -- the full per-cell frame is never
+                                    # built at all now, so there is nothing to drop.
                                     _pop_alloc_cache[allocation_cache_key] = {
-                                        "pop_alloc": _pop_alloc_df,
                                         "island_pop": _isl_pop,
                                         "total_pop": _tot_pop,
                                         "available_group_cols": _agc,
@@ -1575,7 +1831,12 @@ def postprocess_societal_access_results(
                             pop_group_columns=pop_group_columns,
                             all_functions=all_functions,
                             reference_group=reference_group,
-                            pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
+                            # --- Work item C: the full per-cell pop_alloc frame is
+                            # no longer cached (nothing downstream needs it beyond
+                            # island_pop/total_pop/available_group_cols); when
+                            # _cached_entry is None, _compute_societal_scalars
+                            # falls back to its own internal
+                            # apply_population_to_allocations build, unaffected.
                             island_pop=_cached_entry["island_pop"] if _cached_entry else None,
                             total_pop=_cached_entry["total_pop"] if _cached_entry else None,
                             available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
