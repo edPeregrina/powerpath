@@ -402,9 +402,36 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     def _add_impact_metrics(timestep_results, detailed_results, asset_population_map, 
                             asset_to_lu, monetary_categories):
         """Calculate and add population and monetary impacts to timestep results."""
-        # Add population impacts
+        # Add population impacts.
+        # NOTE: `calculate_population_impacts` returns a brand-new DataFrame built
+        # solely from `detailed_results` (per-asset arrays). It does NOT know about
+        # any columns already present on `timestep_results` (e.g. `societal_*`
+        # columns merged in by the direct-simulation postprocessing step). We must
+        # therefore merge the population columns onto `timestep_results` rather
+        # than replacing it wholesale, or previously computed columns are lost.
         if asset_population_map:
-            timestep_results = calculate_population_impacts(detailed_results, asset_population_map)
+            population_results = calculate_population_impacts(detailed_results, asset_population_map)
+            population_cols = [
+                col for col in (
+                    'affected_population', 'served_population',
+                    'total_population', 'affected_population_ratio',
+                )
+                if col in population_results.columns
+            ]
+            if (
+                'timestep' in timestep_results.columns
+                and 'timestep' in population_results.columns
+            ):
+                merge_cols = ['timestep'] + population_cols
+                timestep_results = timestep_results.merge(
+                    population_results[merge_cols], on='timestep', how='left'
+                )
+            else:
+                # Fall back to positional alignment when there is no shared
+                # 'timestep' key to merge on (both lists are built in lockstep
+                # per timestep during the simulation loop).
+                for col in population_cols:
+                    timestep_results[col] = population_results[col].to_numpy()
         
         # Add monetary impacts
         if asset_to_lu:
