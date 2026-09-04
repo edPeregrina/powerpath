@@ -1418,7 +1418,10 @@ def simulate_asset_damage_recovery_access_breakdown(
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
 
-    with profiler.section("simulation.total"):
+    # Named distinctly from the per-timestep "simulation.total" aggregate produced by
+    # profiler.timestep(loop="simulation") below -- both would otherwise share the
+    # literal phase name "simulation.total" and silently double-count into one row.
+    with profiler.section("simulation.loop_wrapper"):
         for timestep in timesteps:
             day_counter = timestep // 24
             map_counter = int(timestep / major_timestep)
