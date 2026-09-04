@@ -34,7 +34,6 @@ E — Allocation layer: geometry-only cell→island fraction caching plus
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 import hashlib
 import json
 import warnings
@@ -43,6 +42,8 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequ
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
+from src.timing_profiler import NULL_PROFILER
 
 
 # ---------------------------------------------------------------------------
@@ -824,6 +825,59 @@ def _find_allocation_cache_entry(
     return matching[0]
 
 
+# ---------------------------------------------------------------------------
+# Module-level memo cache for `_build_service_area_population_maps`.
+#
+# The function is a pure function of (asset centroids, population grid
+# geometry + group columns, provider-type spec, asset-type column), yet
+# ``gdf_assets`` and the population grid are EMA ``Constant``s across an
+# experiment set — so recomputing it once per experiment (rather than once
+# per process) wastes the entire Voronoi/nearest-provider construction and
+# accumulation cost.  Mirrors the ``_VORONOI_CACHE`` pattern in
+# ``impacts.py``: cache-key-then-check-then-copy-on-hit-then-store-copy.
+# ---------------------------------------------------------------------------
+_SERVICE_AREA_POP_MAP_CACHE: Dict[Any, Dict[str, Dict[str, Dict[Any, float]]]] = {}
+_SERVICE_AREA_POP_MAP_CACHE_VERSION = "1.0.0"
+
+
+def _canonicalize_service_area_provider_types(
+    spec: Mapping[str, Iterable[str]],
+) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    """Return a hashable, order-independent form of a provider-types spec."""
+    return tuple(
+        (str(function_name), tuple(sorted(str(provider_type) for provider_type in provider_types)))
+        for function_name, provider_types in sorted(spec.items(), key=lambda kv: str(kv[0]))
+    )
+
+
+def _service_area_pop_map_cache_key(
+    asset_cache_key: str,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    pop_group_columns: Dict[str, str],
+    service_area_function_provider_types: Dict[str, FrozenSet[str]],
+    asset_type_column: str,
+) -> Tuple[Any, ...]:
+    """Build the memo key for :func:`_build_service_area_population_maps`."""
+    return (
+        _SERVICE_AREA_POP_MAP_CACHE_VERSION,
+        asset_cache_key,
+        _geometry_hash(pop_grid_gdf),
+        tuple(sorted(pop_group_columns.items())),
+        _canonicalize_service_area_provider_types(service_area_function_provider_types),
+        asset_type_column,
+    )
+
+
+def _copy_service_area_population_maps(
+    function_maps: Dict[str, Dict[str, Dict[Any, float]]],
+) -> Dict[str, Dict[str, Dict[Any, float]]]:
+    """Return an independent copy so callers can never mutate the cached value."""
+    return {
+        function_alias: {label: dict(pop_map) for label, pop_map in group_maps.items()}
+        for function_alias, group_maps in function_maps.items()
+    }
+
+
 def _build_service_area_population_maps(
     gdf_assets: gpd.GeoDataFrame,
     pop_grid_gdf: gpd.GeoDataFrame,
@@ -831,7 +885,15 @@ def _build_service_area_population_maps(
     asset_type_column: str = "type",
     service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
 ) -> Dict[str, Dict[str, Dict[Any, float]]]:
-    """Pre-compute provider→population service-area assignments for special functions."""
+    """Pre-compute provider→population service-area assignments for special functions.
+
+    Memoised at module scope (``_SERVICE_AREA_POP_MAP_CACHE``): this is a pure
+    function of (asset centroids, population grid geometry + group columns,
+    provider-type spec, asset-type column), and both ``gdf_assets`` and the
+    population grid are EMA ``Constant``s across an experiment set.  The
+    returned value is always a fresh copy — a cache hit never hands out the
+    same mutable dict twice.
+    """
     from src.caching import get_asset_centroid_hash
     from src.impacts import create_voronoi_for_asset_type
     from src.utils import build_voronoi_service_area_map
@@ -849,6 +911,20 @@ def _build_service_area_population_maps(
     )
     asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
 
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+
+    cache_key = _service_area_pop_map_cache_key(
+        asset_cache_key,
+        pop_grid_gdf,
+        pop_group_columns,
+        service_area_function_provider_types,
+        asset_type_column,
+    )
+    cached_maps = _SERVICE_AREA_POP_MAP_CACHE.get(cache_key)
+    if cached_maps is not None:
+        return _copy_service_area_population_maps(cached_maps)
+
     available_cols = [col for col in pop_group_columns.values() if col in pop_grid_gdf.columns]
     pop_values = pop_grid_gdf[available_cols].copy()
     for col in available_cols:
@@ -861,9 +937,6 @@ def _build_service_area_population_maps(
         and pop_assets.crs != working_assets.crs
     ):
         pop_assets = pop_assets.to_crs(working_assets.crs)
-
-    if service_area_function_provider_types is None:
-        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
 
     function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
     for function_name, provider_types in service_area_function_provider_types.items():
@@ -924,18 +997,42 @@ def _build_service_area_population_maps(
                         pop_assets[["geometry"]].copy(),
                     )
 
-            for provider_id, pop_indices in provider_map.items():
-                for label, column_name in pop_group_columns.items():
-                    if column_name not in pop_assets.columns:
-                        continue
-                    group_maps[label][provider_id] = group_maps[label].get(provider_id, 0.0) + float(
-                        pop_assets.loc[list(pop_indices), column_name].sum()
+            # --- Problem 2: invert provider_map into a provider-label series
+            # aligned with pop_assets.index, then do a single groupby(...).sum()
+            # over all available columns at once instead of O(providers × groups)
+            # per-provider `.loc[...]` fancy-indexing sums. Providers with no
+            # assigned pop cells contribute nothing; pop cells not covered by
+            # any provider in *this* provider_map (e.g. clipped Voronoi edge
+            # effects) are excluded, matching the original behaviour exactly.
+            valid_label_cols = [
+                (label, column_name)
+                for label, column_name in pop_group_columns.items()
+                if column_name in pop_assets.columns
+            ]
+            if valid_label_cols and provider_map:
+                provider_label = pd.Series(np.nan, index=pop_assets.index, dtype=object)
+                for provider_id, pop_indices in provider_map.items():
+                    provider_label.loc[list(pop_indices)] = provider_id
+                assigned_mask = provider_label.notna()
+                if assigned_mask.any():
+                    cols = [column_name for _, column_name in valid_label_cols]
+                    grouped_sums = (
+                        pop_assets.loc[assigned_mask, cols]
+                        .groupby(provider_label[assigned_mask])
+                        .sum()
                     )
+                    for label, column_name in valid_label_cols:
+                        col_sums = grouped_sums[column_name]
+                        for provider_id, value in col_sums.items():
+                            group_maps[label][provider_id] = group_maps[label].get(
+                                provider_id, 0.0
+                            ) + float(value)
 
         if has_provider:
             for function_alias in _expand_function_category_equivalents(str(function_name)):
                 function_maps[function_alias] = group_maps
 
+    _SERVICE_AREA_POP_MAP_CACHE[cache_key] = _copy_service_area_population_maps(function_maps)
     return function_maps
 
 
@@ -946,6 +1043,7 @@ def _apply_service_area_societal_scalars(
     pop_group_columns: Dict[str, str],
     reference_group: str,
     numpy_maps: Optional[Dict[str, Dict[str, Tuple[Any, Any]]]] = None,
+    position_maps: Optional[Dict[str, Dict[str, Dict[Any, int]]]] = None,
 ) -> Dict[str, float]:
     """Override function metrics for service-area-based services such as electricity.
 
@@ -955,6 +1053,12 @@ def _apply_service_area_societal_scalars(
         Optional precomputed numpy arrays per function/label.  Each entry is
         ``{func: {label: (ids_array, pops_array)}}``.  When provided, the
         O(N×G) Python generator sums are replaced by O(N) masked numpy sums.
+    position_maps:
+        Optional precomputed ``{func: {label: {provider_id: position}}}``
+        mapping, aligned with *numpy_maps*' ``ids_array``.  When provided,
+        the operational-provider membership mask is built via O(len(
+        operational_ids)) position lookups instead of rebuilding a list from
+        *operational_ids* and sorting it on every call via ``np.isin``.
     """
     if not service_area_population_maps:
         return fields
@@ -963,12 +1067,21 @@ def _apply_service_area_societal_scalars(
     for function_name, group_maps in service_area_population_maps.items():
         operational_ids = operational_asset_ids_by_function.get(function_name, set())
         func_numpy = numpy_maps.get(function_name) if numpy_maps is not None else None
+        func_positions = position_maps.get(function_name) if position_maps is not None else None
         for label in pop_group_columns:
             if func_numpy is not None and label in func_numpy:
                 ids_arr, pops_arr = func_numpy[label]
                 total = float(pops_arr.sum())
                 if len(ids_arr) > 0 and operational_ids:
-                    mask = np.isin(ids_arr, list(operational_ids))
+                    label_positions = func_positions.get(label) if func_positions is not None else None
+                    if label_positions is not None:
+                        mask = np.zeros(len(ids_arr), dtype=bool)
+                        for provider_id in operational_ids:
+                            position = label_positions.get(provider_id)
+                            if position is not None:
+                                mask[position] = True
+                    else:
+                        mask = np.isin(ids_arr, list(operational_ids))
                     with_access = float(pops_arr[mask].sum())
                 else:
                     with_access = 0.0
@@ -1034,7 +1147,7 @@ def postprocess_societal_access_results(
     service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
-    profiler: Optional[Any] = None,
+    profiler: Optional[Any] = NULL_PROFILER,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1106,6 +1219,8 @@ def postprocess_societal_access_results(
         *summary_results* is returned with societal fields merged in-place.
         *updated_allocation_cache* contains any newly built allocations.
     """
+    if profiler is None:
+        profiler = NULL_PROFILER
     if pop_group_columns is None:
         pop_group_columns = POPULATION_GROUP_COLUMNS
     if taxonomy is None:
@@ -1121,6 +1236,33 @@ def postprocess_societal_access_results(
         stable_asset_ids = gdf_assets[asset_id_column].values
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
+
+    # --- Work item 3: hoist per-asset taxonomy work out of the timestep loop.
+    # `asset_types` and `taxonomy` are fixed for the whole call, so the
+    # function-category → alias expansion (previously repeated for every
+    # asset on every timestep) is computed once here.  `asset_func_aliases[i]`
+    # is the tuple of function aliases for asset `i` (empty for
+    # non-providers); `provider_positions` lists only the positions with a
+    # non-empty alias tuple, so the per-timestep loop below need only visit
+    # actual providers instead of every asset.
+    _num_assets_static = len(asset_types)
+    asset_func_aliases: List[Tuple[str, ...]] = [()] * _num_assets_static
+    for _i in range(_num_assets_static):
+        _func_cat = taxonomy.get(str(asset_types[_i]))
+        if _func_cat is not None:
+            asset_func_aliases[_i] = tuple(_expand_function_category_equivalents(str(_func_cat)))
+    provider_positions: List[int] = [
+        _i for _i, _aliases in enumerate(asset_func_aliases) if _aliases
+    ]
+    # Preserve the `i >= len(asset_types) -> "unknown"` fallback semantics for
+    # the (essentially never triggered) case where the per-timestep detail
+    # arrays are longer than the static asset arrays.
+    _unknown_func_cat = taxonomy.get("unknown")
+    unknown_func_aliases: Tuple[str, ...] = (
+        tuple(_expand_function_category_equivalents(str(_unknown_func_cat)))
+        if _unknown_func_cat is not None
+        else ()
+    )
 
     if verbose:
         if asset_type_column in gdf_assets.columns:
@@ -1142,11 +1284,7 @@ def postprocess_societal_access_results(
         print(f"Electricity providers: {electricity_provider_count} MSLS")
         print(f"Hospital providers: {hospital_provider_count}")
 
-    with (
-        profiler.section("societal_access._build_service_area_population_maps")
-        if profiler is not None
-        else nullcontext()
-    ):
+    with profiler.section("societal_access._build_service_area_population_maps"):
         service_area_assets = gdf_assets.copy()
         service_area_assets.index = stable_asset_ids
         service_area_population_maps = _build_service_area_population_maps(
@@ -1182,9 +1320,16 @@ def postprocess_societal_access_results(
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
 
     # --- Problem 4: precompute numpy arrays for _apply_service_area_societal_scalars ---
+    # --- Work item 5: also precompute a {provider_id: position} mapping per
+    # function/label, aligned with the ids array, so the operational-provider
+    # membership mask can be built via O(len(operational_ids)) position
+    # lookups instead of rebuilding a list from operational_ids and sorting
+    # it on every call (np.isin) -- ids_arr is fixed for the whole run.
     _service_area_numpy: Dict[str, Dict[str, Any]] = {}
+    _service_area_positions: Dict[str, Dict[str, Dict[Any, int]]] = {}
     for _func, _group_maps in service_area_population_maps.items():
         _service_area_numpy[_func] = {}
+        _service_area_positions[_func] = {}
         for _label, _provider_pop in _group_maps.items():
             if _provider_pop:
                 _ids = np.array(list(_provider_pop.keys()))
@@ -1193,15 +1338,16 @@ def postprocess_societal_access_results(
                 _ids = np.array([])
                 _pops = np.array([], dtype=float)
             _service_area_numpy[_func][_label] = (_ids, _pops)
+            _service_area_positions[_func][_label] = {
+                _provider_id: _position for _position, _provider_id in enumerate(_ids)
+            }
 
     # Process each timestep that has detailed output
     for ts_idx, ts_summary in enumerate(summary_results):
         ts = ts_summary["timestep"]
         ts_detail = detailed_by_ts.get(ts)
 
-        with (
-            profiler.timestep(ts) if profiler is not None else nullcontext()
-        ):
+        with profiler.timestep(ts, loop="societal_postprocess"):
             if ts_detail is None:
                 # No detailed data → emit NaN
                 _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
@@ -1215,16 +1361,27 @@ def postprocess_societal_access_results(
                 _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                 continue
 
-            # Build island → functions map from operational providers
+            # Build island → functions map from operational providers.
+            # --- Work item 3: iterate only over precomputed provider
+            # positions instead of every asset on every timestep.
             island_function_map: Dict[int, Set[str]] = {}
             operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
-            for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
-                atype = asset_types[i] if i < len(asset_types) else "unknown"
-                func_cat = taxonomy.get(str(atype))
-                if func_cat is not None and is_op:
-                    for func_alias in _expand_function_category_equivalents(str(func_cat)):
+            detail_len = min(len(operational), len(island_ids))
+            for i in provider_positions:
+                if i >= detail_len or not operational[i]:
+                    continue
+                isl_id_int = int(island_ids[i])
+                for func_alias in asset_func_aliases[i]:
+                    operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
+                    island_function_map.setdefault(isl_id_int, set()).add(func_alias)
+
+            if unknown_func_aliases and detail_len > _num_assets_static:
+                for i in range(_num_assets_static, detail_len):
+                    if not operational[i]:
+                        continue
+                    isl_id_int = int(island_ids[i])
+                    for func_alias in unknown_func_aliases:
                         operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
-                        isl_id_int = int(isl_id)
                         island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
             frozen_island_function_map: Dict[int, FrozenSet[str]] = {
@@ -1246,11 +1403,7 @@ def postprocess_societal_access_results(
                 continue
             road_state_key = str(road_state_key_raw)
 
-            with (
-                profiler.section("societal_access.resolve_allocation", include_in_timestep=True)
-                if profiler is not None
-                else nullcontext()
-            ):
+            with profiler.section("societal_access.resolve_allocation"):
                 # --- Problem 1: get or populate islands hashes for this road_state_key ---
                 if road_state_key not in _islands_hash_cache and islands_gdf_cache is not None:
                     islands_gdf_tmp = islands_gdf_cache.get(road_state_key)
@@ -1334,11 +1487,7 @@ def postprocess_societal_access_results(
                         _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                         continue
 
-            with (
-                profiler.section("societal_access.compute_scalars", include_in_timestep=True)
-                if profiler is not None
-                else nullcontext()
-            ):
+            with profiler.section("societal_access.compute_scalars"):
                 # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
                 _cached_entry: Optional[Dict[str, Any]] = None
                 if allocation_cache_key is not None and allocation_df is not None:
@@ -1375,10 +1524,27 @@ def postprocess_societal_access_results(
                             pass
                     _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
 
-                # --- Fix 6: cache _compute_societal_scalars per (allocation_cache_key, frozen_island_function_map) ---
+                # --- Fix 6 / Work item 4: cache _compute_societal_scalars AND
+                # _apply_service_area_societal_scalars output together, keyed
+                # by (allocation_cache_key, frozen_island_function_map,
+                # op_signature). op_signature captures the operational
+                # provider set per function -- the missing determinant for
+                # _apply_service_area_societal_scalars, which used to be
+                # re-run unconditionally on every timestep even on a cache
+                # hit. Keying on providers only (never the full operational /
+                # island_id arrays) keeps memory independent of total asset
+                # count. This cache is function-local: it is freed when
+                # postprocess_societal_access_results returns.
                 _frozen_ifm_key = frozenset(frozen_island_function_map.items())
-                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key)
+                _op_signature = tuple(
+                    (func, frozenset(ids))
+                    for func, ids in sorted(operational_asset_ids_by_function.items())
+                )
+                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
                 if _scalar_cache_key in _scalar_fields_cache:
+                    # A cache hit must never hand out the same mutable dict
+                    # twice: _apply_service_area_societal_scalars mutates its
+                    # `fields` argument in place, so always return a copy.
                     societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
                 else:
                     societal_fields = _compute_societal_scalars(
@@ -1394,17 +1560,18 @@ def postprocess_societal_access_results(
                         total_pop=_cached_entry["total_pop"] if _cached_entry else None,
                         available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
                     )
+                    # --- Fix 4 / Work item 5: use precomputed numpy arrays +
+                    # provider→position maps for service area computation.
+                    societal_fields = _apply_service_area_societal_scalars(
+                        societal_fields,
+                        operational_asset_ids_by_function=operational_asset_ids_by_function,
+                        service_area_population_maps=service_area_population_maps,
+                        pop_group_columns=pop_group_columns,
+                        reference_group=reference_group,
+                        numpy_maps=_service_area_numpy if _service_area_numpy else None,
+                        position_maps=_service_area_positions if _service_area_positions else None,
+                    )
                     _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
-
-                # --- Fix 4: use precomputed numpy arrays for service area computation ---
-                societal_fields = _apply_service_area_societal_scalars(
-                    societal_fields,
-                    operational_asset_ids_by_function=operational_asset_ids_by_function,
-                    service_area_population_maps=service_area_population_maps,
-                    pop_group_columns=pop_group_columns,
-                    reference_group=reference_group,
-                    numpy_maps=_service_area_numpy if _service_area_numpy else None,
-                )
 
             ts_summary.update(societal_fields)
             ts_summary["allocation_cache_key"] = allocation_cache_key
