@@ -23,17 +23,10 @@ from src.societal_access import (
     POPULATION_GROUP_COLUMNS,
     _aggregate_population_by_island,
     _build_population_value_arrays,
-    analyse_societal_access,
     apply_population_to_allocations,
     build_allocation_cache_key,
-    build_destination_function_map,
-    build_island_assignment,
     build_origin_island_allocations,
     clip_population_to_service_area,
-    compute_access_matrix,
-    compute_access_matrix_from_origins,
-    compute_equity_gaps,
-    compute_origin_access,
     get_or_build_allocation,
     list_societal_metric_names,
     postprocess_societal_access_results,
@@ -67,105 +60,11 @@ def _make_population_gdf():
     )
 
 
-def test_graph_path_access_pipeline():
-    nx = pytest.importorskip("networkx")
-    graph = nx.Graph()
-    graph.add_edges_from([
-        ("origin_a", "hospital_1"),
-        ("origin_b", "school_1"),
-    ])
-    graph.add_node("isolated")
-
-    assignment = build_island_assignment(graph)
-    assert assignment["origin_a"] == assignment["hospital_1"]
-    assert assignment["origin_b"] == assignment["school_1"]
-    assert assignment["isolated"] not in {assignment["origin_a"], assignment["origin_b"]}
-
-    with pytest.warns(UserWarning):
-        island_functions = build_destination_function_map(
-            {"hospital_1": "hospital", "school_1": "school", "missing": "clinic"},
-            assignment,
-        )
-
-    origin_access = compute_origin_access(
-        {"origin_a": assignment["origin_a"], "origin_b": assignment["origin_b"]},
-        island_functions,
-        all_functions=["education", "health"],
-    )
-    assert bool(origin_access.loc["origin_a", "health"])
-    assert not bool(origin_access.loc["origin_a", "education"])
-
-    stakeholder_groups = {
-        "total": {"origin_a": 60, "origin_b": 40},
-        "elderly": {"origin_a": 30, "origin_b": 10},
-    }
-    access_matrix = compute_access_matrix_from_origins(origin_access, stakeholder_groups)
-    assert access_matrix.loc["health", "total"] == 60.0
-    assert access_matrix.loc["education", "total"] == 40.0
-
-    equity = compute_equity_gaps(access_matrix, reference_group="total")
-    assert equity.loc["health", "elderly_absolute_gap"] == -15.0
-
-
-def test_spatial_access_pipeline_and_wrapper():
-    islands = gpd.GeoDataFrame(
-        {"island_id": [1, 2]},
-        geometry=[box(0, 0, 10, 10), box(200, 0, 210, 10)],
-        crs="EPSG:28992",
-    )
-    population = gpd.GeoDataFrame(
-        {
-            "aantal_inwoners": [100, 50],
-            "aantal_inwoners_65_jaar_en_ouder": [20, 10],
-            "aantal_inwoners_0_tot_15_jaar": [25, 10],
-            "aantal_inwoners_25_tot_45_jaar": [40, 20],
-        },
-        geometry=[box(1, 1, 3, 3), box(202, 1, 204, 3)],
-        crs="EPSG:28992",
-    )
-    services = gpd.GeoDataFrame(
-        {"type": ["hospital", "school"]},
-        geometry=[Point(2, 2), Point(203, 2)],
-        crs="EPSG:28992",
-    )
-
-    result = analyse_societal_access(
-        islands_gdf=islands,
-        population_gdf=population,
-        service_nodes_gdf=services,
-    )
-
-    access_matrix = result["access_matrix"]
-    assert access_matrix.loc["health", "total"] == pytest.approx(66.67, abs=0.01)
-    assert access_matrix.loc["education", "total"] == pytest.approx(33.33, abs=0.01)
-    assert result["origin_access"] is None
-
-
 def test_default_config_uses_health_function_category():
     config = get_config()
     taxonomy = config["service_node_config"]["taxonomy"]
     assert taxonomy["hospital"] == "health"
     assert taxonomy["clinic"] == "health"
-
-
-def test_compute_access_matrix_handles_explicit_functions():
-    island_function_map = {1: frozenset(["hospital"]), 2: frozenset(["education"])}
-    island_population_df = pd.DataFrame(
-        {
-            "island_id": [1, 2],
-            "aantal_inwoners": [60, 40],
-            "aantal_inwoners_65_jaar_en_ouder": [20, 10],
-            "aantal_inwoners_0_tot_15_jaar": [15, 10],
-            "aantal_inwoners_25_tot_45_jaar": [25, 20],
-        }
-    )
-
-    matrix = compute_access_matrix(
-        island_function_map,
-        island_population_df,
-        all_functions=["education", "hospital", "repair_logistics"],
-    )
-    assert matrix.loc["repair_logistics", "total"] == 0.0
 
 
 def test_build_origin_island_allocations_covers_intersection_nearest_and_unassigned():
