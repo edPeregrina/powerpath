@@ -4,7 +4,6 @@ Functions to run the damage and recovery simulation.
 
 import sys
 import pickle
-from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +50,7 @@ from src.recovery_scheduler import (
     decrement_recovery_wait_vectors,
     initialize_recovery_wait_vectors,
 )
+from src.timing_profiler import NULL_PROFILER
 from src.utils import build_service_area_map_from_rules
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -1249,7 +1249,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     l2_active_timesteps=None,
     repair_crews_by_asset_type=None,
     societal_access_config=None,
-    profiler=None,
+    profiler=NULL_PROFILER,
     ):
     """
     Runs a time-stepped simulation of asset damage and recovery, considering hazard exposure, accessibility, and repair crew assignment.
@@ -1313,6 +1313,9 @@ def simulate_asset_damage_recovery_access_breakdown(
                 'repair_crews_assigned': np.ndarray, last crew assignment status for each asset.
             - dict: Updated caches for the caller to save.
     """
+    if profiler is None:
+        profiler = NULL_PROFILER
+
     # --- Initialization ---
     init = _initialize_simulation(
         gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,
@@ -1415,14 +1418,17 @@ def simulate_asset_damage_recovery_access_breakdown(
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
 
-    with (profiler.section("simulation.total") if profiler is not None else nullcontext()):
+    # Named distinctly from the per-timestep "simulation.total" aggregate produced by
+    # profiler.timestep(loop="simulation") below -- both would otherwise share the
+    # literal phase name "simulation.total" and silently double-count into one row.
+    with profiler.section("simulation.loop_wrapper"):
         for timestep in timesteps:
             day_counter = timestep // 24
             map_counter = int(timestep / major_timestep)
 
-            with (profiler.timestep(timestep) if profiler is not None else nullcontext()):
+            with profiler.timestep(timestep, loop="simulation"):
                 # 1. Process hazard map and update state if on major timestep
-                with (profiler.section("simulation._process_timestep", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._process_timestep"):
                     available_repair_crews, previous_rfids_islands, previous_map_counter, flooded_mask, timestep_cache_updated = _process_timestep(
                         state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, hazard_dir_name, _config,
                         accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
@@ -1443,7 +1449,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                     cache_updated[cache_name] = cache_content
 
                 if _knowledge_graph is not None:
-                    with (profiler.section("simulation.activate_delayed_trigger_waits", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    with profiler.section("simulation.activate_delayed_trigger_waits"):
                         activate_delayed_trigger_waits(
                             state.operational,
                             asset_type,
@@ -1455,7 +1461,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                         )
 
                 # 2. Repair crew assignment
-                with (profiler.section("simulation._assign_repair_crews", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._assign_repair_crews"):
                     available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
                         timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
                         flooded_mask, state.recovery_wait_vectors["repair_time"], state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map,
@@ -1463,7 +1469,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                     )
                 
                 # 3. Update repair progress
-                with (profiler.section("simulation._update_repair_progress", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._update_repair_progress"):
                     _update_repair_progress(
                         state,
                         flooded_mask,
@@ -1473,19 +1479,19 @@ def simulate_asset_damage_recovery_access_breakdown(
                     )
                 
                 # 4. Handle completed repairs
-                with (profiler.section("simulation._handle_completed_repairs", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._handle_completed_repairs"):
                     available_repair_crews = _handle_completed_repairs(
                         state, available_repair_crews, verbose, timestep,
                         asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
                     )
 
                 # 5. Evaluate dependencies using current repair/hazard state
-                with (profiler.section("simulation._update_operational_state", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._update_operational_state"):
                     _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
 
                 # 6. Update unreachable assets (island method)
                 if island_method_active:
-                    with (profiler.section("simulation._update_unreachable_assets", include_in_timestep=True) if profiler is not None else nullcontext()):
+                    with profiler.section("simulation._update_unreachable_assets"):
                         _update_unreachable_assets(
                             state,
                             available_repair_crews,
@@ -1496,7 +1502,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                         )
 
                 # 7. Collect timestep metrics
-                with (profiler.section("simulation._collect_timestep_metrics", include_in_timestep=True) if profiler is not None else nullcontext()):
+                with profiler.section("simulation._collect_timestep_metrics"):
                     if timestep_output:
                         timestep_data, metrics = _collect_timestep_metrics(
                             state, timestep, map_counter, day_counter, num_assets, flooded_mask,

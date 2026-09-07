@@ -6,11 +6,12 @@ adds an explicit graph-aware path for opt-in dependency relationships.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
+
+from src.timing_profiler import NULL_PROFILER, NullProfiler
 
 DependencyContext = dict[str, Any]
 DependencyReport = dict[str, Any]
@@ -690,7 +691,7 @@ def evaluate_dependencies_from_graph(
     wait_vectors: dict[str, np.ndarray] | None = None,
     service_area_map: dict[int, list[int]] | None = None,
     previous_dependency_blocked_mask: np.ndarray | None = None,
-    profiler=None,
+    profiler=NULL_PROFILER,
     return_report: bool = False,
 ):
     """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
@@ -742,6 +743,8 @@ def evaluate_dependencies_from_graph(
         ``True``).
     """
     num_assets = len(asset_type)
+    if profiler is None:
+        profiler = NullProfiler()
     if flooded_mask is None:
         flooded_mask = np.zeros(num_assets, dtype=bool)
     else:
@@ -775,11 +778,7 @@ def evaluate_dependencies_from_graph(
         )
 
     # Restore pass first: re-enable assets whose return-to-operational condition is met.
-    with (
-        profiler.section("dependency.restore_pass")
-        if profiler is not None
-        else nullcontext()
-    ):
+    with profiler.section("dependency.restore_pass"):
         operational = restore_operational_from_graph(
             operational,
             asset_type,

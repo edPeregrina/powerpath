@@ -14,6 +14,8 @@ from pathlib import Path
 import os
 import shutil
 
+from src.dependency_knowledge_graph import build_default_knowledge_graph
+
 
 def get_config(root_dir=None, hazard_dir_override=None):
     """
@@ -155,8 +157,15 @@ def get_config(root_dir=None, hazard_dir_override=None):
         # road-graph exposure filtering and is not part of this dependency model.
         # Substation/hospital structural damage remains governed by fragility
         # and repair completion in the simulation loop.
-        # Provide explicit knowledge-graph rules only when modelling additional
-        # downstream dependencies (for example msls -> hospital).
+        #
+        # 'knowledge_graph' below defaults to
+        # ``src.dependency_knowledge_graph.build_default_knowledge_graph()`` --
+        # i.e. the msls/ms/ls/hospital return-to-operational rules plus the
+        # msls -> hospital service-area rule are wired in automatically
+        # whenever this key is not explicitly overridden. Pass an explicit
+        # list (including ``[]`` to opt out entirely) to take control of the
+        # rules yourself; see ``book/Use_Case_sample_knowledge_graph.ipynb``
+        # for a worked example of doing so.
         'dependency_parameters': {
             'hazard_type': 'flooding',  # active hazard type for graph look-up
             'enable_default_rules': True,
@@ -166,19 +175,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'dependency_map': {},
             'area_dependencies': [],
             'pairwise_dependencies': [],
-            'knowledge_graph': [
-                # Template: service-area rule (A supplies B within its service area)
-                # {
-                #     'hazard_type': 'flooding',
-                #     'asset_type_a': 'msls',
-                #     'asset_type_b': 'hospital',
-                #     'relationship': 'service_area',
-                #     'parameters': {
-                #         'hazard_blocks_operation': False,
-                #         'return_to_operational': {'trigger': 'immediate'},
-                #     },
-                # },
-            ],
+            'knowledge_graph': build_default_knowledge_graph().to_config(),
             # Optional: mapping of asset index (A) → list of asset indices (B)
             # for service_area rules. When left as None and service-area rules
             # are configured, the simulation precomputes this from gdf_assets.

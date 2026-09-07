@@ -1,28 +1,48 @@
 """Lightweight timing utilities for simulation profiling.
 
 The profiler is intentionally simple and notebook-friendly:
-- phase-level counters/totals/averages
-- optional per-timestep timing aggregation
+- phase-level counters/totals/averages (inclusive *and* exclusive/self time)
+- optional per-timestep timing aggregation, labelled by loop
 - optional repeated-run execution with warmup
+
+Attribution is structural rather than opt-in: any :meth:`SimulationTimingProfiler.section`
+active while a :meth:`SimulationTimingProfiler.timestep` is open automatically
+contributes its *self* time (its own elapsed time minus any nested sections) to
+that timestep, and whatever time is left over is recorded as a first-class
+``<loop>.unattributed`` phase.  This removes the previous ``include_in_timestep``
+opt-in flag, which was the direct cause of unattributed "blind spots" in
+profiled runs.
+
+When no profiler is supplied, callers should default to :class:`NullProfiler`,
+which is a shared, allocation-free stand-in so that unprofiled runs pay
+essentially no overhead.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+import warnings
 
 import pandas as pd
 
 
 @dataclass
 class PhaseTiming:
-    """Aggregated timing for a single named phase."""
+    """Aggregated timing for a single named phase.
+
+    ``total_seconds`` is the *inclusive* time spent in the phase (including any
+    nested sections); ``self_seconds`` is the *exclusive* time spent directly
+    in the phase, i.e. ``total_seconds`` minus the inclusive time of any
+    nested sections encountered while this phase was active.
+    """
 
     call_count: int = 0
     total_seconds: float = 0.0
+    self_seconds: float = 0.0
 
     @property
     def avg_seconds(self) -> float:
@@ -30,9 +50,23 @@ class PhaseTiming:
             return 0.0
         return self.total_seconds / self.call_count
 
+    @property
+    def avg_self_seconds(self) -> float:
+        if self.call_count == 0:
+            return 0.0
+        return self.self_seconds / self.call_count
+
 
 class SimulationTimingProfiler:
-    """Collect named wall-clock timings with optional per-timestep detail."""
+    """Collect named wall-clock timings with optional per-timestep detail.
+
+    Sections form a stack: whichever section is innermost accrues elapsed
+    time as usual, and when it completes it reports its inclusive elapsed
+    time to its parent (section or timestep) so the parent's *self* time can
+    be computed as ``elapsed - children_elapsed``.  Any section active while
+    a timestep is open automatically contributes its self time to that
+    timestep — there is no opt-in flag.
+    """
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
@@ -40,87 +74,157 @@ class SimulationTimingProfiler:
         self._timestep_records: list[dict[str, Any]] = []
         self._active_timestep: dict[str, Any] | None = None
         self._active_starts: dict[str, float] = {}
+        # Stack of "children elapsed" accumulators, one per currently-open
+        # section/timestep frame, used to derive self (exclusive) time.
+        self._active_stack: list[float] = []
 
-    def _record(self, phase_name: str, elapsed_seconds: float) -> None:
-        timing = self._phase_timings.setdefault(phase_name, PhaseTiming())
+    def _record(self, phase_name: str, elapsed_seconds: float, self_seconds: float) -> None:
+        timing = self._phase_timings.get(phase_name)
+        if timing is None:
+            timing = PhaseTiming()
+            self._phase_timings[phase_name] = timing
         timing.call_count += 1
         timing.total_seconds += elapsed_seconds
+        timing.self_seconds += self_seconds
+        if self_seconds < 0:
+            warnings.warn(
+                f"Negative self time ({self_seconds:.9f}s) recorded for phase "
+                f"'{phase_name}'; this indicates mismatched profiler section nesting.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
+    def _enter_frame(self) -> float:
+        """Push a new frame on the active stack and return its start time."""
+        self._active_stack.append(0.0)
+        return perf_counter()
+
+    def _exit_frame(self, start: float) -> tuple[float, float]:
+        """Pop the active frame, returning ``(elapsed, self_elapsed)``.
+
+        Also reports this frame's inclusive elapsed time to its parent frame
+        (if any) so the parent can subtract it when computing its own self
+        time.
+        """
+        elapsed = perf_counter() - start
+        children_seconds = self._active_stack.pop()
+        self_elapsed = elapsed - children_seconds
+        if self._active_stack:
+            self._active_stack[-1] += elapsed
+        return elapsed, self_elapsed
 
     def start_timer(self, phase_name: str) -> None:
         """Start a named timer to be stopped with :meth:`stop_timer`."""
         if not self.enabled:
             return
-        self._active_starts[phase_name] = perf_counter()
+        self._active_starts[phase_name] = self._enter_frame()
 
-    def stop_timer(self, phase_name: str, *, include_in_timestep: bool = False) -> None:
-        """Stop a named timer and record elapsed time."""
+    def stop_timer(self, phase_name: str) -> None:
+        """Stop a named timer and record elapsed/self time."""
         if not self.enabled:
             return
         start = self._active_starts.pop(phase_name, None)
         if start is None:
             raise KeyError(f"Timer '{phase_name}' was not started.")
-        elapsed = perf_counter() - start
-        self._record(phase_name, elapsed)
-        if include_in_timestep and self._active_timestep is not None:
-            self._active_timestep["phase_seconds"][phase_name] += elapsed
+        elapsed, self_elapsed = self._exit_frame(start)
+        self._record(phase_name, elapsed, self_elapsed)
+        active_timestep = self._active_timestep
+        if active_timestep is not None:
+            active_timestep["phase_seconds"][phase_name] += self_elapsed
 
     @contextmanager
-    def section(self, phase_name: str, *, include_in_timestep: bool = False):
-        """Context manager for a named timed section."""
+    def section(self, phase_name: str) -> Iterator[None]:
+        """Context manager for a named timed section.
+
+        Any section active while a timestep is open automatically
+        contributes its *self* time to that timestep's phase totals.
+        """
         if not self.enabled:
             yield
             return
 
-        start = perf_counter()
+        start = self._enter_frame()
         try:
             yield
         finally:
-            elapsed = perf_counter() - start
-            self._record(phase_name, elapsed)
-            if include_in_timestep and self._active_timestep is not None:
-                self._active_timestep["phase_seconds"][phase_name] += elapsed
+            elapsed, self_elapsed = self._exit_frame(start)
+            self._record(phase_name, elapsed, self_elapsed)
+            active_timestep = self._active_timestep
+            if active_timestep is not None:
+                active_timestep["phase_seconds"][phase_name] += self_elapsed
 
     @contextmanager
-    def timestep(self, timestep: int):
-        """Context manager for one simulation timestep total."""
+    def timestep(self, timestep: int, *, loop: str = "simulation") -> Iterator[None]:
+        """Context manager for one timestep total, labelled by *loop*.
+
+        *loop* distinguishes concurrent per-timestep loops (e.g. the
+        simulation loop vs. the societal-access postprocessing loop) so they
+        do not merge into a single ``timestep.total`` row.  On exit, whatever
+        elapsed time was not attributed to any nested section is recorded as
+        a first-class ``<loop>.unattributed`` phase.
+        """
         if not self.enabled:
             yield
             return
 
         previous_timestep = self._active_timestep
+        phase_seconds: dict[str, float] = defaultdict(float)
         self._active_timestep = {
             "timestep": int(timestep),
-            "phase_seconds": defaultdict(float),
+            "loop": loop,
+            "phase_seconds": phase_seconds,
         }
-        start = perf_counter()
+        start = self._enter_frame()
         try:
             yield
         finally:
-            elapsed = perf_counter() - start
-            self._record("timestep.total", elapsed)
+            elapsed, self_elapsed = self._exit_frame(start)
+            total_phase_name = f"{loop}.total"
+            self._record(total_phase_name, elapsed, self_elapsed)
+
+            unattributed_phase_name = f"{loop}.unattributed"
+            unattributed = elapsed - sum(phase_seconds.values())
+            self._record(unattributed_phase_name, unattributed, unattributed)
+
             record = {
                 "timestep": int(timestep),
+                "loop": loop,
                 "total_seconds": elapsed,
             }
-            record.update(dict(self._active_timestep["phase_seconds"]))
+            record.update(dict(phase_seconds))
+            record[unattributed_phase_name] = unattributed
             self._timestep_records.append(record)
             self._active_timestep = previous_timestep
 
     def phase_summary(self, sort_desc: bool = True) -> pd.DataFrame:
-        """Return phase summary with call count, total, and average time."""
+        """Return phase summary with call count, total, average, and self time."""
+        columns = [
+            "phase",
+            "call_count",
+            "total_seconds",
+            "avg_seconds",
+            "self_seconds",
+            "self_pct",
+        ]
+        if not self._phase_timings:
+            return pd.DataFrame(columns=columns)
+
+        total_self_seconds = sum(t.self_seconds for t in self._phase_timings.values())
         rows = [
             {
                 "phase": phase_name,
                 "call_count": timing.call_count,
                 "total_seconds": timing.total_seconds,
                 "avg_seconds": timing.avg_seconds,
+                "self_seconds": timing.self_seconds,
+                "self_pct": (
+                    100.0 * timing.self_seconds / total_self_seconds
+                    if total_self_seconds > 0
+                    else 0.0
+                ),
             }
             for phase_name, timing in self._phase_timings.items()
         ]
-        if not rows:
-            return pd.DataFrame(
-                columns=["phase", "call_count", "total_seconds", "avg_seconds"]
-            )
         summary = pd.DataFrame(rows)
         return summary.sort_values("total_seconds", ascending=not sort_desc).reset_index(
             drop=True
@@ -143,7 +247,7 @@ class SimulationTimingProfiler:
                 columns=["phase", "call_count", "total_seconds", "avg_seconds"]
             )
 
-        excluded = {"timestep", "total_seconds"}
+        excluded = {"timestep", "total_seconds", "loop"}
         phase_columns = [c for c in ts.columns if c not in excluded]
         rows = []
         for phase in phase_columns:
@@ -176,15 +280,56 @@ class SimulationTimingProfiler:
         print("\n=== Phase timing summary ===")
         print(phase_df.to_string(index=False))
 
+        print("\n=== Unattributed time (blind spots) ===")
+        if phase_df.empty:
+            unattributed_df = phase_df
+        else:
+            unattributed_df = phase_df[phase_df["phase"].str.endswith(".unattributed")]
+        if unattributed_df.empty:
+            print("(no unattributed time recorded)")
+        else:
+            print(unattributed_df.to_string(index=False))
+
         print("\n=== Per-timestep total timing ===")
         if ts_df.empty:
             print("(no timestep data)")
         else:
-            cols = [c for c in ["timestep", "total_seconds"] if c in ts_df.columns]
+            cols = [c for c in ["timestep", "loop", "total_seconds"] if c in ts_df.columns]
             print(ts_df[cols].to_string(index=False))
 
         print("\n=== Per-timestep phase aggregate ===")
         print(ts_phase_df.to_string(index=False))
+
+
+class NullProfiler:
+    """No-op stand-in for :class:`SimulationTimingProfiler`.
+
+    Keeps unprofiled runs essentially free: ``section()`` and ``timestep()``
+    return the same pre-built, allocation-free reusable context manager on
+    every call (no timer reads, no dict writes, no per-call object
+    construction).  This is the default ``profiler`` value throughout the
+    codebase so callers no longer need an ``if profiler is not None``
+    branch around every profiled section.
+    """
+
+    #: Shared, stateless, reentrant-safe context manager instance.
+    _CONTEXT = nullcontext()
+
+    def section(self, phase_name: str) -> nullcontext:
+        return self._CONTEXT
+
+    def timestep(self, timestep: int, *, loop: str = "simulation") -> nullcontext:
+        return self._CONTEXT
+
+    def start_timer(self, phase_name: str) -> None:
+        return None
+
+    def stop_timer(self, phase_name: str) -> None:
+        return None
+
+
+#: Shared singleton used as the default ``profiler`` argument value.
+NULL_PROFILER = NullProfiler()
 
 
 def run_profiled_runs(
@@ -229,6 +374,7 @@ def summarize_profiled_runs(profiled_runs: list[dict[str, Any]]) -> pd.DataFrame
                 "total_seconds_max",
                 "avg_seconds_mean",
                 "call_count_mean",
+                "self_seconds_mean",
             ]
         )
 
@@ -252,6 +398,7 @@ def summarize_profiled_runs(profiled_runs: list[dict[str, Any]]) -> pd.DataFrame
                 "total_seconds_max",
                 "avg_seconds_mean",
                 "call_count_mean",
+                "self_seconds_mean",
             ]
         )
 
@@ -265,6 +412,7 @@ def summarize_profiled_runs(profiled_runs: list[dict[str, Any]]) -> pd.DataFrame
             total_seconds_max=("total_seconds", "max"),
             avg_seconds_mean=("avg_seconds", "mean"),
             call_count_mean=("call_count", "mean"),
+            self_seconds_mean=("self_seconds", "mean"),
         )
         .sort_values("total_seconds_mean", ascending=False)
         .reset_index(drop=True)

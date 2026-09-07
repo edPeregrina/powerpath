@@ -20,16 +20,13 @@ from src.caching import (
 )
 from src.simulation import simulate_asset_damage_recovery_access_breakdown
 from src.societal_access import (
-    analyse_societal_access,
+    POPULATION_GROUP_COLUMNS,
+    _aggregate_population_by_island,
+    _build_population_value_arrays,
     apply_population_to_allocations,
     build_allocation_cache_key,
-    build_destination_function_map,
-    build_island_assignment,
     build_origin_island_allocations,
-    compute_access_matrix,
-    compute_access_matrix_from_origins,
-    compute_equity_gaps,
-    compute_origin_access,
+    clip_population_to_service_area,
     get_or_build_allocation,
     list_societal_metric_names,
     postprocess_societal_access_results,
@@ -63,105 +60,11 @@ def _make_population_gdf():
     )
 
 
-def test_graph_path_access_pipeline():
-    nx = pytest.importorskip("networkx")
-    graph = nx.Graph()
-    graph.add_edges_from([
-        ("origin_a", "hospital_1"),
-        ("origin_b", "school_1"),
-    ])
-    graph.add_node("isolated")
-
-    assignment = build_island_assignment(graph)
-    assert assignment["origin_a"] == assignment["hospital_1"]
-    assert assignment["origin_b"] == assignment["school_1"]
-    assert assignment["isolated"] not in {assignment["origin_a"], assignment["origin_b"]}
-
-    with pytest.warns(UserWarning):
-        island_functions = build_destination_function_map(
-            {"hospital_1": "hospital", "school_1": "school", "missing": "clinic"},
-            assignment,
-        )
-
-    origin_access = compute_origin_access(
-        {"origin_a": assignment["origin_a"], "origin_b": assignment["origin_b"]},
-        island_functions,
-        all_functions=["education", "health"],
-    )
-    assert bool(origin_access.loc["origin_a", "health"])
-    assert not bool(origin_access.loc["origin_a", "education"])
-
-    stakeholder_groups = {
-        "total": {"origin_a": 60, "origin_b": 40},
-        "elderly": {"origin_a": 30, "origin_b": 10},
-    }
-    access_matrix = compute_access_matrix_from_origins(origin_access, stakeholder_groups)
-    assert access_matrix.loc["health", "total"] == 60.0
-    assert access_matrix.loc["education", "total"] == 40.0
-
-    equity = compute_equity_gaps(access_matrix, reference_group="total")
-    assert equity.loc["health", "elderly_absolute_gap"] == -15.0
-
-
-def test_spatial_access_pipeline_and_wrapper():
-    islands = gpd.GeoDataFrame(
-        {"island_id": [1, 2]},
-        geometry=[box(0, 0, 10, 10), box(200, 0, 210, 10)],
-        crs="EPSG:28992",
-    )
-    population = gpd.GeoDataFrame(
-        {
-            "aantal_inwoners": [100, 50],
-            "aantal_inwoners_65_jaar_en_ouder": [20, 10],
-            "aantal_inwoners_0_tot_15_jaar": [25, 10],
-            "aantal_inwoners_25_tot_45_jaar": [40, 20],
-        },
-        geometry=[box(1, 1, 3, 3), box(202, 1, 204, 3)],
-        crs="EPSG:28992",
-    )
-    services = gpd.GeoDataFrame(
-        {"type": ["hospital", "school"]},
-        geometry=[Point(2, 2), Point(203, 2)],
-        crs="EPSG:28992",
-    )
-
-    result = analyse_societal_access(
-        islands_gdf=islands,
-        population_gdf=population,
-        service_nodes_gdf=services,
-    )
-
-    access_matrix = result["access_matrix"]
-    assert access_matrix.loc["health", "total"] == pytest.approx(66.67, abs=0.01)
-    assert access_matrix.loc["education", "total"] == pytest.approx(33.33, abs=0.01)
-    assert result["origin_access"] is None
-
-
 def test_default_config_uses_health_function_category():
     config = get_config()
     taxonomy = config["service_node_config"]["taxonomy"]
     assert taxonomy["hospital"] == "health"
     assert taxonomy["clinic"] == "health"
-
-
-def test_compute_access_matrix_handles_explicit_functions():
-    island_function_map = {1: frozenset(["hospital"]), 2: frozenset(["education"])}
-    island_population_df = pd.DataFrame(
-        {
-            "island_id": [1, 2],
-            "aantal_inwoners": [60, 40],
-            "aantal_inwoners_65_jaar_en_ouder": [20, 10],
-            "aantal_inwoners_0_tot_15_jaar": [15, 10],
-            "aantal_inwoners_25_tot_45_jaar": [25, 20],
-        }
-    )
-
-    matrix = compute_access_matrix(
-        island_function_map,
-        island_population_df,
-        all_functions=["education", "hospital", "repair_logistics"],
-    )
-    assert matrix.loc["repair_logistics", "total"] == 0.0
 
 
 def test_build_origin_island_allocations_covers_intersection_nearest_and_unassigned():
@@ -1904,3 +1807,236 @@ def test_ema_wrapper_without_impact_inputs_returns_core_outcomes(monkeypatch, tm
     assert "affected_population" not in ema_result
     assert "monetary_impact_total" in ema_result
     assert np.all(ema_result["monetary_impact_total"] == 0.0)
+
+
+def _old_path_island_pop_total_pop(allocation_df, pop, cell_id_column, pop_group_columns):
+    """Reference implementation: the pre-Work-item-A merge + groupby path."""
+    merged = apply_population_to_allocations(allocation_df, pop, cell_id_column, pop_group_columns)
+    group_cols = {label: f"{label}_weighted" for label in pop_group_columns}
+    available_group_cols = {label: col for label, col in group_cols.items() if col in merged.columns}
+    weighted_col_list = list(available_group_cols.values())
+    island_pop = (
+        merged.groupby("island_id")[weighted_col_list].sum() if weighted_col_list else pd.DataFrame()
+    )
+    total_pop = {}
+    if not island_pop.empty:
+        for label, col in available_group_cols.items():
+            total_pop[label] = float(island_pop[col].sum())
+    else:
+        for label, col in available_group_cols.items():
+            total_pop[label] = float(merged[col].sum())
+    return island_pop, total_pop, available_group_cols
+
+
+def test_aggregate_population_by_island_matches_merge_groupby_small_fixture():
+    """Work item A: bincount-based aggregation vs the original merge/groupby path.
+
+    Not required to be bit-identical (np.bincount and pandas' groupby-sum
+    kernel differ by ~1e-9 absolute due to summation-order/compensation
+    differences) but must agree to a tight tolerance.
+    """
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf()
+    allocation_df = build_origin_island_allocations(
+        pop, cell_id_column="cell_id", islands_gdf=islands, nearest_max_distance=2.0,
+        road_state_key="roads_a",
+    )
+
+    old_island_pop, old_total_pop, old_agc = _old_path_island_pop_total_pop(
+        allocation_df, pop, "cell_id", POPULATION_GROUP_COLUMNS
+    )
+
+    cell_id_index, value_arrays = _build_population_value_arrays(pop, "cell_id", POPULATION_GROUP_COLUMNS)
+    new_island_pop, new_total_pop, new_agc = _aggregate_population_by_island(
+        allocation_df, "cell_id", cell_id_index, value_arrays
+    )
+
+    assert new_agc == old_agc
+    assert set(new_total_pop) == set(old_total_pop)
+    for label in old_total_pop:
+        assert new_total_pop[label] == pytest.approx(old_total_pop[label], abs=1e-6)
+
+    old_sorted = old_island_pop.sort_index()
+    new_sorted = new_island_pop.sort_index()
+    assert list(old_sorted.index) == list(new_sorted.index)
+    for col in old_agc.values():
+        np.testing.assert_allclose(
+            new_sorted[col].to_numpy(), old_sorted[col].to_numpy(), atol=1e-6, rtol=0
+        )
+
+
+def test_aggregate_population_by_island_matches_merge_groupby_large_random_fixture():
+    """Same equivalence check at a larger, randomised scale (multiple islands,
+    duplicate cell_ids fanning out across islands with fractional weights)."""
+    rng = np.random.default_rng(12345)
+    n_cells = 800
+    n_islands = 12
+
+    cell_ids = [f"cell_{i}" for i in range(n_cells)]
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": cell_ids,
+            "aantal_inwoners": rng.integers(0, 500, size=n_cells).astype(float),
+            "aantal_inwoners_65_jaar_en_ouder": rng.integers(0, 100, size=n_cells).astype(float),
+            "aantal_inwoners_0_tot_15_jaar": rng.integers(0, 120, size=n_cells).astype(float),
+            "aantal_inwoners_25_tot_45_jaar": rng.integers(0, 200, size=n_cells).astype(float),
+        },
+        geometry=[Point(i, 0) for i in range(n_cells)],
+        crs="EPSG:28992",
+    )
+    # Introduce some CBS-suppressed / negative values to exercise sanitisation.
+    pop["aantal_inwoners"] = pop["aantal_inwoners"].astype(object)
+    pop.loc[3, "aantal_inwoners"] = "suppressed"
+    pop.loc[7, "aantal_inwoners_65_jaar_en_ouder"] = -12
+
+    # Build an allocation_df where most cells map 1:1 to a random island, but
+    # ~15% fan out across two islands with fractional weights (mirrors the
+    # "intersection" allocation method's multi-row-per-cell behaviour).
+    rows = []
+    for i, cid in enumerate(cell_ids):
+        primary_island = int(rng.integers(0, n_islands))
+        if rng.random() < 0.15:
+            other_island = (primary_island + 1) % n_islands
+            frac = float(rng.uniform(0.1, 0.9))
+            rows.append((cid, primary_island, frac, "intersection"))
+            rows.append((cid, other_island, 1.0 - frac, "intersection"))
+        else:
+            rows.append((cid, primary_island, 1.0, "nearest_island"))
+    allocation_df = pd.DataFrame(rows, columns=["cell_id", "island_id", "allocation_fraction", "allocation_method"])
+
+    old_island_pop, old_total_pop, old_agc = _old_path_island_pop_total_pop(
+        allocation_df, pop, "cell_id", POPULATION_GROUP_COLUMNS
+    )
+
+    cell_id_index, value_arrays = _build_population_value_arrays(pop, "cell_id", POPULATION_GROUP_COLUMNS)
+    new_island_pop, new_total_pop, new_agc = _aggregate_population_by_island(
+        allocation_df, "cell_id", cell_id_index, value_arrays
+    )
+
+    assert new_agc == old_agc
+    for label in old_total_pop:
+        assert new_total_pop[label] == pytest.approx(old_total_pop[label], abs=1e-6)
+
+    old_sorted = old_island_pop.sort_index()
+    new_sorted = new_island_pop.sort_index()
+    assert list(old_sorted.index) == list(new_sorted.index)
+    for col in old_agc.values():
+        np.testing.assert_allclose(
+            new_sorted[col].to_numpy(), old_sorted[col].to_numpy(), atol=1e-6, rtol=0
+        )
+
+
+def test_aggregate_population_by_island_handles_empty_allocation():
+    pop = _make_population_gdf()
+    cell_id_index, value_arrays = _build_population_value_arrays(pop, "cell_id", POPULATION_GROUP_COLUMNS)
+    empty_allocation = pd.DataFrame(columns=["cell_id", "island_id", "allocation_fraction"])
+    island_pop, total_pop, available_group_cols = _aggregate_population_by_island(
+        empty_allocation, "cell_id", cell_id_index, value_arrays
+    )
+    assert island_pop.empty
+    assert total_pop == {}
+    assert set(available_group_cols) == set(POPULATION_GROUP_COLUMNS)
+
+
+def test_clip_population_to_service_area_drops_distant_cells():
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls"]},
+        geometry=[Point(5, 5)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {"cell_id": ["near", "far"], "aantal_inwoners": [10, 20]},
+        geometry=[box(4, 4, 6, 6), box(10000, 10000, 10001, 10001)],
+        crs="EPSG:28992",
+    )
+    clipped = clip_population_to_service_area(pop, assets, buffer_m=50.0)
+    assert set(clipped["cell_id"]) == {"near"}
+    assert "far" not in set(clipped["cell_id"])
+
+
+def test_clip_population_to_service_area_empty_inputs_are_noop():
+    assets = gpd.GeoDataFrame({"type": []}, geometry=[], crs="EPSG:28992")
+    pop = _make_population_gdf()
+    assert clip_population_to_service_area(pop, assets, buffer_m=50.0) is pop
+    empty_pop = gpd.GeoDataFrame({"cell_id": []}, geometry=[], crs="EPSG:28992")
+    assert clip_population_to_service_area(empty_pop, _make_islands_gdf(), buffer_m=50.0) is empty_pop
+
+
+def test_postprocess_warns_on_disproportionate_population_grid():
+    """Work item B: an unclipped/oversized population grid should trigger a
+    non-fatal warning, but must not change any computed societal metric."""
+    islands = _make_islands_gdf()
+    # Population grid: one small cell near the assets, plus a very distant
+    # cell that inflates the grid's bounding-box area far beyond the assets'
+    # buffered hull.
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["near", "far"],
+            "aantal_inwoners": [100, 50],
+            "aantal_inwoners_65_jaar_en_ouder": [20, 10],
+            "aantal_inwoners_0_tot_15_jaar": [25, 10],
+            "aantal_inwoners_25_tot_45_jaar": [40, 20],
+        },
+        geometry=[box(1, 1, 3, 3), box(500000, 500000, 500010, 500010)],
+        crs="EPSG:28992",
+    )
+    allocation_cache = {}
+    get_or_build_allocation(allocation_cache, pop, "cell_id", islands, road_state_key="roads_warn")
+
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls"]},
+        geometry=[Point(2, 2)],
+        crs="EPSG:28992",
+    )
+
+    with pytest.warns(RuntimeWarning, match="Population grid bounding-box area"):
+        updated, _ = postprocess_societal_access_results(
+            summary_results=[{"timestep": 0, "map": 0}],
+            detailed_results=[{
+                "timestep": 0,
+                "map": 0,
+                "road_state_key": "roads_warn",
+                "operational": np.array([True]),
+                "island_id": np.array([1]),
+            }],
+            gdf_assets=assets,
+            pop_grid_gdf=pop,
+            cell_id_column="cell_id",
+            allocation_cache=allocation_cache,
+            taxonomy={"msls": "electricity"},
+            all_functions=["electricity"],
+        )
+    assert "societal_access_pct__electricity__total" in updated[0]
+
+
+def test_postprocess_does_not_warn_on_proportionate_population_grid(recwarn):
+    islands = _make_islands_gdf()
+    pop = _make_population_gdf().iloc[:2].copy()
+    allocation_cache = {}
+    get_or_build_allocation(allocation_cache, pop, "cell_id", islands, road_state_key="roads_no_warn")
+
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls"]},
+        geometry=[Point(2, 2)],
+        crs="EPSG:28992",
+    )
+    postprocess_societal_access_results(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads_no_warn",
+            "operational": np.array([True]),
+            "island_id": np.array([1]),
+        }],
+        gdf_assets=assets,
+        pop_grid_gdf=pop,
+        cell_id_column="cell_id",
+        allocation_cache=allocation_cache,
+        taxonomy={"msls": "electricity"},
+        all_functions=["electricity"],
+    )
+    assert not any(
+        issubclass(w.category, RuntimeWarning) and "Population grid bounding-box area" in str(w.message)
+        for w in recwarn.list
+    )

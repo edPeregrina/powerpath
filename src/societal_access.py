@@ -1,9 +1,9 @@
-"""Generalised access-to-critical-societal-functions analysis.
+"""Societal-access postprocessing: population access to critical functions.
 
 Conceptual model
-----------------
-This module operationalises access as **shared island membership** in a
-disrupted graph, following the set-theoretic framework of Paper 4:
+-----------------
+Access is evaluated as **shared island membership** in the disrupted road
+network, following the set-theoretic framework of Paper 4:
 
 - ``V``  — the complete set of graph nodes (entities).
 - ``G = (V, E)``  — the infrastructure graph before disruption.
@@ -19,30 +19,36 @@ Access of origin ``o ∈ O`` to function ``f``:
     ``∃ d ∈ D_f : island_id[o] == island_id[d]``
 
 where ``D_f ⊆ D`` is the subset of destinations providing function ``f``.
+Functions listed in ``SERVICE_AREA_FUNCTION_PROVIDER_TYPES`` (electricity)
+instead use Voronoi service areas built from provider centroids, because
+shared-island membership is too coarse a proxy for who a substation actually
+serves; see ``_build_service_area_population_maps`` and
+``_apply_service_area_societal_scalars``.
 
-Implementation layers
----------------------
-A — Graph-native (preferred): nodes are simulation entities directly
-    embedded in the graph; island assignment is read from graph connectivity.
-B — Spatial preprocessing: service nodes and population zones are geographic
-    objects spatially joined to island polygons.
-C — Aggregate metrics: shared by both paths.
-D — High-level wrapper: ``analyse_societal_access``.
-E — Allocation layer: geometry-only cell→island fraction caching plus
-    population application and realization-aware postprocessing.
+Production use
+---------------
+This module is called exactly once per experiment, after
+``simulate_asset_damage_recovery_access_breakdown``'s timestep loop
+completes: ``simulation.py`` hands the per-timestep ``detailed_results``
+(``island_id`` + ``operational`` arrays) to
+``postprocess_societal_access_results``, which returns ``summary_results``
+merged with ``societal_*`` fields. Everything else in this module —
+allocation caching, Voronoi service-area maps, scalar caches — exists to
+make that one call fast and repeatable across EMA experiments. 
 """
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 import hashlib
 import json
 import warnings
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+
+from src.timing_profiler import NULL_PROFILER
 
 
 # ---------------------------------------------------------------------------
@@ -51,25 +57,16 @@ import pandas as pd
 
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
-    # Health
+    # Healthcare infrastructure
     "hospital": "health",
     "clinic": "health",
     "huisartsenpraktijk": "health",
     "apotheek": "health",
     # Emergency response
     "fire_station": "emergency_response",
-    "brandweerkazerne": "emergency_response",
-    "emergency_operations_centre": "emergency_response",
-    # Climate resilience
-    "cooling_centre": "climate_resilience",
-    "water_supply_point": "climate_resilience",
-    "drinking_water": "climate_resilience",
-    # Social continuity
+    # Education infrastructure
     "school": "education",
-    "basisonderwijs": "education",
-    "voortgezet_onderwijs": "education",
-    "repair_depot": "repair_logistics",
-    # Electricity
+    # Electricity infrastructure
     "msls": "electricity",
 }
 
@@ -78,346 +75,21 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
     "total": "aantal_inwoners",
     "elderly": "aantal_inwoners_65_jaar_en_ouder",
     "children": "aantal_inwoners_0_tot_15_jaar",
-    "working_age": "aantal_inwoners_25_tot_45_jaar",
 }
 
-#: Current version of the allocation algorithm — increment when the
-#: spatial logic changes so cached allocations are automatically invalidated.
 ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
 }
-_LEGACY_ALLOCATION_LOOKUP_WARNED = False
 _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
 }
 
-
 def _expand_function_category_equivalents(function_name: str) -> FrozenSet[str]:
     """Return equivalent function-category labels for compatibility outputs."""
     return _FUNCTION_CATEGORY_EQUIVALENTS.get(function_name, frozenset({function_name}))
 
-
-# ---------------------------------------------------------------------------
-# Layer A — node-level, graph-based (primary path)
-# ---------------------------------------------------------------------------
-
-def build_island_assignment(graph) -> Dict[Any, int]:
-    """Compute the island partition of a disrupted graph."""
-    try:
-        import networkx as nx
-    except ImportError as exc:
-        raise ImportError(
-            "NetworkX is required for graph-based island assignment. "
-            "Install it with: pip install networkx"
-        ) from exc
-
-    if graph.is_directed():
-        components = list(nx.weakly_connected_components(graph))
-    else:
-        components = list(nx.connected_components(graph))
-
-    assignment: Dict[Any, int] = {}
-    for island_id, component in enumerate(components):
-        for node in component:
-            assignment[node] = island_id
-
-    return assignment
-
-
-def build_destination_function_map(
-    destination_nodes: Mapping[Any, str],
-    node_island_assignment: Mapping[Any, int],
-    taxonomy: Optional[Dict[str, str]] = None,
-) -> Dict[int, FrozenSet[str]]:
-    """Map each island to the set of societal functions it contains."""
-    if taxonomy is None:
-        taxonomy = SERVICE_NODE_TAXONOMY
-
-    island_functions: Dict[int, Set[str]] = {}
-    missing: List[Any] = []
-
-    for node_id, node_type in destination_nodes.items():
-        island_id = node_island_assignment.get(node_id)
-        if island_id is None:
-            missing.append(node_id)
-            continue
-        func_cat = taxonomy.get(str(node_type))
-        if func_cat is not None:
-            island_functions.setdefault(island_id, set()).add(func_cat)
-
-    if missing:
-        warnings.warn(
-            f"{len(missing)} destination node(s) not found in island assignment "
-            f"(likely removed by disruption): {missing[:5]}"
-            + (" …" if len(missing) > 5 else ""),
-            UserWarning,
-            stacklevel=2,
-        )
-
-    return {iid: frozenset(cats) for iid, cats in island_functions.items()}
-
-
-def compute_origin_access(
-    origin_island_ids: Mapping[Any, int],
-    island_function_map: Mapping[int, FrozenSet[str]],
-    all_functions: Optional[Iterable[str]] = None,
-) -> pd.DataFrame:
-    """Evaluate per-origin access for every societal function."""
-    if all_functions is None:
-        all_functions = sorted(
-            {f for cats in island_function_map.values() for f in cats}
-        )
-    else:
-        all_functions = sorted(all_functions)
-
-    records = {}
-    for origin_id, island_id in origin_island_ids.items():
-        island_cats = island_function_map.get(island_id, frozenset())
-        records[origin_id] = {f: (f in island_cats) for f in all_functions}
-
-    df = pd.DataFrame.from_dict(records, orient="index", columns=all_functions)
-    df.index.name = "origin_id"
-    df.columns.name = "function"
-    return df
-
-
-def compute_access_matrix_from_origins(
-    origin_access_df: pd.DataFrame,
-    stakeholder_groups: Mapping[str, Mapping[Any, float]],
-) -> pd.DataFrame:
-    """Aggregate per-origin access flags into group-level percentage metrics."""
-    functions = list(origin_access_df.columns)
-    groups = list(stakeholder_groups.keys())
-
-    result = pd.DataFrame(
-        index=pd.Index(functions, name="function"),
-        columns=pd.Index(groups, name="population_group"),
-        dtype=float,
-    )
-
-    for group_label, members in stakeholder_groups.items():
-        valid_ids = [oid for oid in members if oid in origin_access_df.index]
-        if not valid_ids:
-            result[group_label] = np.nan
-            continue
-        weights = pd.Series({oid: members[oid] for oid in valid_ids}, dtype=float)
-        total_weight = weights.sum()
-        if total_weight == 0:
-            result[group_label] = np.nan
-            continue
-        sub_access = origin_access_df.loc[valid_ids]
-        weighted_access = sub_access.mul(weights, axis=0).sum(axis=0)
-        result[group_label] = (weighted_access / total_weight * 100).round(2)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Layer B — spatial preprocessing helpers (optional)
-# ---------------------------------------------------------------------------
-
-def assign_destinations_to_islands_spatial(
-    service_nodes_gdf: gpd.GeoDataFrame,
-    islands_gdf: gpd.GeoDataFrame,
-    taxonomy: Optional[Dict[str, str]] = None,
-    node_type_column: str = "type",
-    island_id_column: str = "island_id",
-    buffer_m: float = 50.0,
-) -> Dict[int, FrozenSet[str]]:
-    """Return the set of function categories reachable within each island (spatial path)."""
-    if taxonomy is None:
-        taxonomy = SERVICE_NODE_TAXONOMY
-
-    if service_nodes_gdf is None or service_nodes_gdf.empty:
-        return {}
-
-    target_crs = islands_gdf.crs or "EPSG:28992"
-    service_nodes = service_nodes_gdf.copy().to_crs(target_crs)
-    islands = islands_gdf[[island_id_column, "geometry"]].copy()
-
-    islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
-
-    if buffer_m > 0:
-        service_nodes = service_nodes.copy()
-        service_nodes["geometry"] = service_nodes.geometry.centroid.buffer(buffer_m)
-
-    joined = gpd.sjoin(
-        service_nodes[[node_type_column, "geometry"]],
-        islands_dissolved[[island_id_column, "geometry"]],
-        how="left",
-        predicate="intersects",
-    )
-
-    island_functions: Dict[int, Set[str]] = {}
-    for _, row in joined.iterrows():
-        if pd.isna(row.get(island_id_column)):
-            continue
-        island_id = int(row[island_id_column])
-        node_type = row[node_type_column]
-        func_cat = taxonomy.get(str(node_type))
-        if func_cat is not None:
-            island_functions.setdefault(island_id, set()).add(func_cat)
-
-    return {iid: frozenset(cats) for iid, cats in island_functions.items()}
-
-
-# Backward-compatibility alias
-compute_function_access_per_island = assign_destinations_to_islands_spatial
-
-
-def assign_origins_to_islands_spatial(
-    population_gdf: gpd.GeoDataFrame,
-    islands_gdf: gpd.GeoDataFrame,
-    pop_columns: Optional[Sequence[str]] = None,
-    island_id_column: str = "island_id",
-) -> pd.DataFrame:
-    """Spatially assign each population zone to an island (spatial path)."""
-    if pop_columns is None:
-        pop_columns = list(POPULATION_GROUP_COLUMNS.values())
-
-    target_crs = islands_gdf.crs or "EPSG:28992"
-    pop = population_gdf[list(pop_columns) + ["geometry"]].copy().to_crs(target_crs)
-    islands = islands_gdf[[island_id_column, "geometry"]].copy()
-
-    islands_dissolved = islands.dissolve(by=island_id_column).reset_index()
-
-    joined = gpd.sjoin_nearest(
-        pop,
-        islands_dissolved[[island_id_column, "geometry"]],
-        how="left",
-        max_distance=200,
-    )
-
-    if joined.index.duplicated().any():
-        joined = joined.reset_index(drop=False)
-        joined["_inter_area"] = joined.apply(
-            lambda r: pop.loc[r["index"], "geometry"].intersection(
-                islands_dissolved.loc[
-                    islands_dissolved[island_id_column] == r[island_id_column],
-                    "geometry",
-                ].iloc[0]
-                if not islands_dissolved[
-                    islands_dissolved[island_id_column] == r[island_id_column]
-                ].empty
-                else pop.loc[r["index"], "geometry"]
-            ).area,
-            axis=1,
-        )
-        joined = (
-            joined.sort_values("_inter_area", ascending=False)
-            .drop_duplicates(subset=["index"])
-            .set_index("index")
-        )
-
-    joined[island_id_column] = joined[island_id_column].fillna(-1).astype(int)
-
-    result = joined[list(pop_columns) + [island_id_column]].copy()
-    for col in pop_columns:
-        if col in result.columns:
-            result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
-            result[col] = result[col].where(result[col] >= 0, 0)
-
-    return result
-
-
-# Backward-compatibility alias
-join_population_to_islands = assign_origins_to_islands_spatial
-
-
-# ---------------------------------------------------------------------------
-# Layer C — aggregate metrics (shared by both paths)
-# ---------------------------------------------------------------------------
-
-def compute_access_matrix(
-    island_function_map: Dict[int, FrozenSet[str]],
-    island_population_df: pd.DataFrame,
-    pop_columns: Optional[Dict[str, str]] = None,
-    island_id_column: str = "island_id",
-    all_functions: Optional[Iterable[str]] = None,
-) -> pd.DataFrame:
-    """Compute percentage access for every (function, population group) pair (spatial path)."""
-    if pop_columns is None:
-        pop_columns = POPULATION_GROUP_COLUMNS
-
-    if all_functions is None:
-        all_functions = sorted(
-            {f for cats in island_function_map.values() for f in cats}
-        )
-    else:
-        all_functions = sorted(all_functions)
-
-    if not all_functions:
-        return pd.DataFrame(
-            index=pd.Index([], name="function"),
-            columns=list(pop_columns.keys()),
-            dtype=float,
-        )
-
-    df = island_population_df.copy()
-    col_names = list(pop_columns.values())
-    totals = df[col_names].sum()
-
-    rows = []
-    for func in all_functions:
-        islands_with_func = {
-            iid for iid, cats in island_function_map.items() if func in cats
-        }
-        mask = df[island_id_column].isin(islands_with_func)
-        accessible_pop = df.loc[mask, col_names].sum()
-        pct = {}
-        for label, col in pop_columns.items():
-            total = totals.get(col, 0)
-            acc = accessible_pop.get(col, 0)
-            pct[label] = round(100.0 * acc / total, 2) if total > 0 else np.nan
-        rows.append(pct)
-
-    result = pd.DataFrame(rows, index=pd.Index(all_functions, name="function"))
-    result.columns.name = "population_group"
-    return result
-
-
-def compute_equity_gaps(
-    access_matrix: pd.DataFrame,
-    reference_group: str = "total",
-) -> pd.DataFrame:
-    """Surface the equity gap between a reference group and all other groups."""
-    if reference_group not in access_matrix.columns:
-        raise ValueError(
-            f"Reference group '{reference_group}' not found in access_matrix columns: "
-            f"{list(access_matrix.columns)}"
-        )
-
-    ref = access_matrix[reference_group]
-    other_groups = [c for c in access_matrix.columns if c != reference_group]
-
-    result = pd.DataFrame(index=access_matrix.index)
-
-    for group in other_groups:
-        result[f"{group}_absolute_gap"] = (ref - access_matrix[group]).round(2)
-        result[f"{group}_relative_gap"] = (
-            (access_matrix[group] / ref).where(ref > 0).round(4)
-        )
-
-    if other_groups:
-        abs_gap_cols = [f"{g}_absolute_gap" for g in other_groups]
-        result["most_disadvantaged_group"] = (
-            result[abs_gap_cols]
-            .idxmax(axis=1)
-            .str.replace("_absolute_gap", "", regex=False)
-        )
-        result["max_absolute_gap"] = result[abs_gap_cols].max(axis=1).round(2)
-    else:
-        result["most_disadvantaged_group"] = np.nan
-        result["max_absolute_gap"] = np.nan
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Layer E — allocation caching + realization-aware postprocessor
-# ---------------------------------------------------------------------------
 
 def _geometry_hash(gdf: gpd.GeoDataFrame) -> str:
     """Deterministic hash of a GeoDataFrame geometry column."""
@@ -453,8 +125,7 @@ def build_allocation_cache_key(
     """Build a deterministic cache key for the geometry-only allocation.
 
     The key covers all deterministic inputs that affect the road partition or
-    grid geometry.  It does **not** include population attribute values,
-    selected demographic columns, stochastic seed, or provider outcomes.
+    grid geometry.
 
     Optional pre-computed hash strings (``pop_grid_geom_hash``,
     ``pop_cell_id_hash``, ``islands_geom_hash``, ``islands_id_hash``) may be
@@ -647,7 +318,7 @@ def build_origin_island_allocations(
 
     allocation_df = pd.DataFrame(rows)
 
-    # Resolve hashes — use pre-computed values when available (Problem 1)
+    # Resolve hashes — use pre-computed values when available
     _pop_geom_hash = pop_grid_geom_hash if pop_grid_geom_hash is not None else _geometry_hash(pop_grid_gdf)
     _pop_id_hash = pop_cell_id_hash if pop_cell_id_hash is not None else _column_hash(pop_grid_gdf, cell_id_column)
     _isl_geom_hash = islands_geom_hash if islands_geom_hash is not None else _geometry_hash(islands_gdf)
@@ -725,6 +396,199 @@ def apply_population_to_allocations(
             )
 
     return merged
+
+
+def _build_population_value_arrays(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    pop_group_columns: Dict[str, str],
+) -> Tuple[pd.Index, Dict[str, np.ndarray]]:
+    """Sanitise population demographic columns once, as plain numpy arrays.
+
+    Work item A: population values are invariant across road/allocation
+    states -- only the cell → island assignment changes per state.  This
+    extracts and sanitises them exactly once per
+    :func:`postprocess_societal_access_results` call (mirroring the
+    CBS-suppressed-value coercion and negative-value clipping performed
+    inside :func:`apply_population_to_allocations`) instead of re-doing it
+    for every distinct state.  Returned arrays are aligned to a stable
+    ``cell_id`` position ordering (``cell_id_index``), which
+    :func:`_aggregate_population_by_island` uses to align them against each
+    state's allocation rows.
+
+    Returns
+    -------
+    (cell_id_index, value_arrays)
+        ``cell_id_index`` is a :class:`pandas.Index` of cell IDs in a fixed
+        position order; ``value_arrays`` maps ``{label: numpy_array}`` for
+        every demographic label whose column is present in *pop_grid_gdf*
+        (labels with a missing column are simply absent, mirroring the
+        ``if column_name not in ... .columns: continue`` guard elsewhere).
+
+    Raises
+    ------
+    ValueError
+        If *cell_id_column* has duplicate values (same invariant enforced by
+        :func:`apply_population_to_allocations`).
+    """
+    pop_cols = list(pop_group_columns.values())
+    available_cols = [c for c in pop_cols if c in pop_grid_gdf.columns]
+
+    pop_attrs = pop_grid_gdf[[cell_id_column] + available_cols].copy()
+    for col in available_cols:
+        pop_attrs[col] = pd.to_numeric(pop_attrs[col], errors="coerce").fillna(0)
+        pop_attrs[col] = pop_attrs[col].where(pop_attrs[col] >= 0, 0)
+
+    if pop_attrs[cell_id_column].duplicated().any():
+        raise ValueError(
+            f"Population grid has duplicate values in '{cell_id_column}'. "
+            "The join must be many-to-one (allocation rows → one population row)."
+        )
+
+    cell_id_index = pd.Index(pop_attrs[cell_id_column].to_numpy())
+    value_arrays = {
+        label: pop_attrs[col].to_numpy(dtype=float)
+        for label, col in pop_group_columns.items()
+        if col in available_cols
+    }
+    return cell_id_index, value_arrays
+
+
+def _aggregate_population_by_island(
+    allocation_df: pd.DataFrame,
+    cell_id_column: str,
+    cell_id_index: pd.Index,
+    value_arrays: Dict[str, np.ndarray],
+) -> Tuple[pd.DataFrame, Dict[str, float], Dict[str, str]]:
+    """Aggregate one allocation state's per-cell population to per-island sums.
+
+    Work item A: replaces the previous ``apply_population_to_allocations``
+    (full merge) + ``groupby("island_id").sum()`` pattern used on every
+    distinct road/allocation state, which re-joined and re-sanitised the
+    *entire* population grid on every cache miss.  Given the once-per-call
+    sanitised arrays from :func:`_build_population_value_arrays`, this only
+    positions those values against the current state's allocation rows
+    (``cell_id_index.get_indexer``, O(n)) and aggregates by island via dense
+    integer codes + ``np.bincount`` (O(n), no hash-join, no per-state
+    re-sanitisation).
+
+    Numerically equivalent to the previous merge/groupby path -- but *not*
+    bit-identical to the ULP.  ``np.bincount``'s plain sequential
+    accumulation differs from pandas' groupby-sum kernel (which uses a
+    compensated summation internally) by ~1e-9 absolute on representative
+    data.  This has been confirmed negligible: population magnitudes here
+    are always non-negative small integers/floats, and downstream values are
+    rounded to 2 decimal places, so this reduction-order difference cannot
+    change any emitted metric.  See the equivalence tests in
+    ``tests/test_societal_access.py``.
+
+    Returns
+    -------
+    (island_pop, total_pop, available_group_cols)
+        Same shapes as the corresponding entries previously stored in
+        ``_pop_alloc_cache`` (Work item C dropped the redundant full
+        per-cell ``pop_alloc`` frame from that cache once nothing downstream
+        needed it beyond these three).
+    """
+    available_group_cols = {label: f"{label}_weighted" for label in value_arrays}
+    if not available_group_cols or allocation_df.empty:
+        return pd.DataFrame(), {}, available_group_cols
+
+    positions = cell_id_index.get_indexer(allocation_df[cell_id_column].to_numpy())
+    valid_mask = positions >= 0
+    safe_positions = np.where(valid_mask, positions, 0)
+    fractions = allocation_df["allocation_fraction"].to_numpy(dtype=float)
+    island_codes, island_uniques = pd.factorize(allocation_df["island_id"].to_numpy(), sort=True)
+    n_islands = len(island_uniques)
+
+    island_pop_data: Dict[str, np.ndarray] = {}
+    total_pop: Dict[str, float] = {}
+    for label, col in available_group_cols.items():
+        raw_vals = value_arrays[label][safe_positions]
+        # get_indexer returns -1 for an unmatched cell_id (should not occur
+        # in practice -- allocation_df is always derived from this same
+        # population grid); treat any such gap as population 0, mirroring
+        # `merged[col].fillna(0)` in the original merge-based path.
+        pop_vals = np.where(valid_mask, raw_vals, 0.0)
+        weighted = pop_vals * fractions
+        island_sums = np.bincount(island_codes, weights=weighted, minlength=n_islands)
+        island_pop_data[col] = island_sums
+        total_pop[label] = float(island_sums.sum())
+
+    island_pop = pd.DataFrame(island_pop_data, index=pd.Index(island_uniques, name="island_id"))
+    return island_pop, total_pop, available_group_cols
+
+
+def clip_population_to_service_area(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    gdf_assets: gpd.GeoDataFrame,
+    buffer_m: float = 200.0,
+) -> gpd.GeoDataFrame:
+    """Clip a population grid to a buffered hull of asset/provider locations.
+
+    Work item B: a lightweight, opt-in guard against feeding
+    :func:`postprocess_societal_access_results` a population grid far larger
+    than the area assets can actually serve.  This mirrors the pre-clip the
+    sample notebook already performs manually (loading the population layer
+    with ``bbox=tuple(voronoi_gdf.total_bounds)``), packaged as a reusable
+    helper so other callers (e.g. a country-scale deployment loading the
+    full national grid) can pre-clip *before* the grid ever reaches
+    ``postprocess_societal_access_results`` -- every per-state population
+    aggregation (Work item A) and the one-off service-area population map
+    build both scale with population-grid size, so clipping upstream is the
+    cheapest possible win.
+
+    This is *not* a mandatory pipeline stage: it changes nothing unless a
+    caller opts in by calling it, and :func:`postprocess_societal_access_results`
+    only ever *warns* (never raises) if it detects an unclipped grid --
+    some callers may have legitimate reasons for a larger grid than the
+    convex hull of current asset locations (e.g. anticipated future asset
+    placement, or a shared grid reused across multiple studies).
+
+    Parameters
+    ----------
+    pop_grid_gdf:
+        Population grid GeoDataFrame to clip.
+    gdf_assets:
+        Asset/provider GeoDataFrame; the convex hull of its geometries
+        (buffered by *buffer_m*) defines the service-area boundary.
+    buffer_m:
+        Buffer distance in *pop_grid_gdf*'s CRS units (typically metres).
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Subset of *pop_grid_gdf* intersecting the buffered hull, with the
+        index reset.  Returns *pop_grid_gdf* unchanged if either input is
+        empty.
+    """
+    if gdf_assets.empty or pop_grid_gdf.empty:
+        return pop_grid_gdf
+
+    assets_in_pop_crs = (
+        gdf_assets.to_crs(pop_grid_gdf.crs) if gdf_assets.crs != pop_grid_gdf.crs else gdf_assets
+    )
+    _assets_geom = assets_in_pop_crs.geometry
+    _assets_union = _assets_geom.union_all() if hasattr(_assets_geom, "union_all") else _assets_geom.unary_union
+    hull = _assets_union.convex_hull.buffer(buffer_m)
+    hull_gdf = gpd.GeoDataFrame(geometry=[hull], crs=pop_grid_gdf.crs)
+    clipped = gpd.clip(pop_grid_gdf, hull_gdf)
+    return clipped.reset_index(drop=True)
+
+
+def _service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
+    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``."""
+    if gdf_assets.empty:
+        return None
+    try:
+        assets_in_crs = gdf_assets.to_crs(crs) if gdf_assets.crs != crs else gdf_assets
+        _geom = assets_in_crs.geometry
+        _union = _geom.union_all() if hasattr(_geom, "union_all") else _geom.unary_union
+        hull = _union.convex_hull.buffer(buffer_m)
+        area = float(hull.area)
+        return area if area > 0 else None
+    except Exception:
+        return None
 
 
 def get_or_build_allocation(
@@ -824,6 +688,59 @@ def _find_allocation_cache_entry(
     return matching[0]
 
 
+# ---------------------------------------------------------------------------
+# Module-level memo cache for `_build_service_area_population_maps`.
+#
+# The function is a pure function of (asset centroids, population grid
+# geometry + group columns, provider-type spec, asset-type column), yet
+# ``gdf_assets`` and the population grid are EMA ``Constant``s across an
+# experiment set — so recomputing it once per experiment (rather than once
+# per process) wastes the entire Voronoi/nearest-provider construction and
+# accumulation cost.  Mirrors the ``_VORONOI_CACHE`` pattern in
+# ``impacts.py``: cache-key-then-check-then-copy-on-hit-then-store-copy.
+# ---------------------------------------------------------------------------
+_SERVICE_AREA_POP_MAP_CACHE: Dict[Any, Dict[str, Dict[str, Dict[Any, float]]]] = {}
+_SERVICE_AREA_POP_MAP_CACHE_VERSION = "1.0.0"
+
+
+def _canonicalize_service_area_provider_types(
+    spec: Mapping[str, Iterable[str]],
+) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    """Return a hashable, order-independent form of a provider-types spec."""
+    return tuple(
+        (str(function_name), tuple(sorted(str(provider_type) for provider_type in provider_types)))
+        for function_name, provider_types in sorted(spec.items(), key=lambda kv: str(kv[0]))
+    )
+
+
+def _service_area_pop_map_cache_key(
+    asset_cache_key: str,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    pop_group_columns: Dict[str, str],
+    service_area_function_provider_types: Dict[str, FrozenSet[str]],
+    asset_type_column: str,
+) -> Tuple[Any, ...]:
+    """Build the memo key for :func:`_build_service_area_population_maps`."""
+    return (
+        _SERVICE_AREA_POP_MAP_CACHE_VERSION,
+        asset_cache_key,
+        _geometry_hash(pop_grid_gdf),
+        tuple(sorted(pop_group_columns.items())),
+        _canonicalize_service_area_provider_types(service_area_function_provider_types),
+        asset_type_column,
+    )
+
+
+def _copy_service_area_population_maps(
+    function_maps: Dict[str, Dict[str, Dict[Any, float]]],
+) -> Dict[str, Dict[str, Dict[Any, float]]]:
+    """Return an independent copy so callers can never mutate the cached value."""
+    return {
+        function_alias: {label: dict(pop_map) for label, pop_map in group_maps.items()}
+        for function_alias, group_maps in function_maps.items()
+    }
+
+
 def _build_service_area_population_maps(
     gdf_assets: gpd.GeoDataFrame,
     pop_grid_gdf: gpd.GeoDataFrame,
@@ -831,7 +748,15 @@ def _build_service_area_population_maps(
     asset_type_column: str = "type",
     service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
 ) -> Dict[str, Dict[str, Dict[Any, float]]]:
-    """Pre-compute provider→population service-area assignments for special functions."""
+    """Pre-compute provider→population service-area assignments for special functions.
+
+    Memoised at module scope (``_SERVICE_AREA_POP_MAP_CACHE``): this is a pure
+    function of (asset centroids, population grid geometry + group columns,
+    provider-type spec, asset-type column), and both ``gdf_assets`` and the
+    population grid are EMA ``Constant``s across an experiment set.  The
+    returned value is always a fresh copy — a cache hit never hands out the
+    same mutable dict twice.
+    """
     from src.caching import get_asset_centroid_hash
     from src.impacts import create_voronoi_for_asset_type
     from src.utils import build_voronoi_service_area_map
@@ -849,6 +774,20 @@ def _build_service_area_population_maps(
     )
     asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
 
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+
+    cache_key = _service_area_pop_map_cache_key(
+        asset_cache_key,
+        pop_grid_gdf,
+        pop_group_columns,
+        service_area_function_provider_types,
+        asset_type_column,
+    )
+    cached_maps = _SERVICE_AREA_POP_MAP_CACHE.get(cache_key)
+    if cached_maps is not None:
+        return _copy_service_area_population_maps(cached_maps)
+
     available_cols = [col for col in pop_group_columns.values() if col in pop_grid_gdf.columns]
     pop_values = pop_grid_gdf[available_cols].copy()
     for col in available_cols:
@@ -861,9 +800,6 @@ def _build_service_area_population_maps(
         and pop_assets.crs != working_assets.crs
     ):
         pop_assets = pop_assets.to_crs(working_assets.crs)
-
-    if service_area_function_provider_types is None:
-        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
 
     function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
     for function_name, provider_types in service_area_function_provider_types.items():
@@ -924,18 +860,42 @@ def _build_service_area_population_maps(
                         pop_assets[["geometry"]].copy(),
                     )
 
-            for provider_id, pop_indices in provider_map.items():
-                for label, column_name in pop_group_columns.items():
-                    if column_name not in pop_assets.columns:
-                        continue
-                    group_maps[label][provider_id] = group_maps[label].get(provider_id, 0.0) + float(
-                        pop_assets.loc[list(pop_indices), column_name].sum()
+            # --- Problem 2: invert provider_map into a provider-label series
+            # aligned with pop_assets.index, then do a single groupby(...).sum()
+            # over all available columns at once instead of O(providers × groups)
+            # per-provider `.loc[...]` fancy-indexing sums. Providers with no
+            # assigned pop cells contribute nothing; pop cells not covered by
+            # any provider in *this* provider_map (e.g. clipped Voronoi edge
+            # effects) are excluded, matching the original behaviour exactly.
+            valid_label_cols = [
+                (label, column_name)
+                for label, column_name in pop_group_columns.items()
+                if column_name in pop_assets.columns
+            ]
+            if valid_label_cols and provider_map:
+                provider_label = pd.Series(np.nan, index=pop_assets.index, dtype=object)
+                for provider_id, pop_indices in provider_map.items():
+                    provider_label.loc[list(pop_indices)] = provider_id
+                assigned_mask = provider_label.notna()
+                if assigned_mask.any():
+                    cols = [column_name for _, column_name in valid_label_cols]
+                    grouped_sums = (
+                        pop_assets.loc[assigned_mask, cols]
+                        .groupby(provider_label[assigned_mask])
+                        .sum()
                     )
+                    for label, column_name in valid_label_cols:
+                        col_sums = grouped_sums[column_name]
+                        for provider_id, value in col_sums.items():
+                            group_maps[label][provider_id] = group_maps[label].get(
+                                provider_id, 0.0
+                            ) + float(value)
 
         if has_provider:
             for function_alias in _expand_function_category_equivalents(str(function_name)):
                 function_maps[function_alias] = group_maps
 
+    _SERVICE_AREA_POP_MAP_CACHE[cache_key] = _copy_service_area_population_maps(function_maps)
     return function_maps
 
 
@@ -946,6 +906,7 @@ def _apply_service_area_societal_scalars(
     pop_group_columns: Dict[str, str],
     reference_group: str,
     numpy_maps: Optional[Dict[str, Dict[str, Tuple[Any, Any]]]] = None,
+    position_maps: Optional[Dict[str, Dict[str, Dict[Any, int]]]] = None,
 ) -> Dict[str, float]:
     """Override function metrics for service-area-based services such as electricity.
 
@@ -955,6 +916,12 @@ def _apply_service_area_societal_scalars(
         Optional precomputed numpy arrays per function/label.  Each entry is
         ``{func: {label: (ids_array, pops_array)}}``.  When provided, the
         O(N×G) Python generator sums are replaced by O(N) masked numpy sums.
+    position_maps:
+        Optional precomputed ``{func: {label: {provider_id: position}}}``
+        mapping, aligned with *numpy_maps*' ``ids_array``.  When provided,
+        the operational-provider membership mask is built via O(len(
+        operational_ids)) position lookups instead of rebuilding a list from
+        *operational_ids* and sorting it on every call via ``np.isin``.
     """
     if not service_area_population_maps:
         return fields
@@ -963,12 +930,21 @@ def _apply_service_area_societal_scalars(
     for function_name, group_maps in service_area_population_maps.items():
         operational_ids = operational_asset_ids_by_function.get(function_name, set())
         func_numpy = numpy_maps.get(function_name) if numpy_maps is not None else None
+        func_positions = position_maps.get(function_name) if position_maps is not None else None
         for label in pop_group_columns:
             if func_numpy is not None and label in func_numpy:
                 ids_arr, pops_arr = func_numpy[label]
                 total = float(pops_arr.sum())
                 if len(ids_arr) > 0 and operational_ids:
-                    mask = np.isin(ids_arr, list(operational_ids))
+                    label_positions = func_positions.get(label) if func_positions is not None else None
+                    if label_positions is not None:
+                        mask = np.zeros(len(ids_arr), dtype=bool)
+                        for provider_id in operational_ids:
+                            position = label_positions.get(provider_id)
+                            if position is not None:
+                                mask[position] = True
+                    else:
+                        mask = np.isin(ids_arr, list(operational_ids))
                     with_access = float(pops_arr[mask].sum())
                 else:
                     with_access = 0.0
@@ -1034,7 +1010,9 @@ def postprocess_societal_access_results(
     service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
-    profiler: Optional[Any] = None,
+    profiler: Optional[Any] = NULL_PROFILER,
+    pop_grid_area_warn_buffer_m: float = 5000.0,
+    pop_grid_area_warn_ratio: float = 25.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1099,6 +1077,15 @@ def postprocess_societal_access_results(
         for service-area routing.  Provider type tokens must match
         ``asset_type_column`` values exactly.  When ``None``, defaults to
         :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
+    pop_grid_area_warn_buffer_m, pop_grid_area_warn_ratio:
+        Work item B: cheap, non-fatal guard against an unclipped population
+        grid.  If the bounding-box area of *pop_grid_gdf* exceeds
+        ``pop_grid_area_warn_ratio`` times the area of the buffered
+        (``pop_grid_area_warn_buffer_m``) convex hull of *gdf_assets*, a
+        ``RuntimeWarning`` is emitted suggesting
+        :func:`clip_population_to_service_area`.  This never raises or
+        changes behaviour -- some callers may have legitimate reasons for a
+        larger grid (e.g. a shared national grid reused across studies).
 
     Returns
     -------
@@ -1106,6 +1093,8 @@ def postprocess_societal_access_results(
         *summary_results* is returned with societal fields merged in-place.
         *updated_allocation_cache* contains any newly built allocations.
     """
+    if profiler is None:
+        profiler = NULL_PROFILER
     if pop_group_columns is None:
         pop_group_columns = POPULATION_GROUP_COLUMNS
     if taxonomy is None:
@@ -1121,6 +1110,24 @@ def postprocess_societal_access_results(
         stable_asset_ids = gdf_assets[asset_id_column].values
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
+
+    # Asset taxonomy and function alias preparation
+    _num_assets_static = len(asset_types)
+    asset_func_aliases: List[Tuple[str, ...]] = [()] * _num_assets_static
+    for _i in range(_num_assets_static):
+        _func_cat = taxonomy.get(str(asset_types[_i]))
+        if _func_cat is not None:
+            asset_func_aliases[_i] = tuple(_expand_function_category_equivalents(str(_func_cat)))
+    provider_positions: List[int] = [
+        _i for _i, _aliases in enumerate(asset_func_aliases) if _aliases
+    ]
+
+    _unknown_func_cat = taxonomy.get("unknown")
+    unknown_func_aliases: Tuple[str, ...] = (
+        tuple(_expand_function_category_equivalents(str(_unknown_func_cat)))
+        if _unknown_func_cat is not None
+        else ()
+    )
 
     if verbose:
         if asset_type_column in gdf_assets.columns:
@@ -1142,11 +1149,35 @@ def postprocess_societal_access_results(
         print(f"Electricity providers: {electricity_provider_count} MSLS")
         print(f"Hospital providers: {hospital_provider_count}")
 
-    with (
-        profiler.section("societal_access._build_service_area_population_maps")
-        if profiler is not None
-        else nullcontext()
-    ):
+    try:
+        # Clip population grid to the service area defined by the assets
+        if not pop_grid_gdf.empty and not gdf_assets.empty:
+            _pgb = pop_grid_gdf.total_bounds
+            _pop_grid_area = float((_pgb[2] - _pgb[0]) * (_pgb[3] - _pgb[1]))
+            _hull_area = _service_area_hull_area(
+                gdf_assets, pop_grid_gdf.crs, pop_grid_area_warn_buffer_m
+            )
+            if (
+                _hull_area is not None
+                and _pop_grid_area > 0
+                and (_pop_grid_area / _hull_area) > pop_grid_area_warn_ratio
+            ):
+                warnings.warn(
+                    "Population grid bounding-box area is "
+                    f"{_pop_grid_area / _hull_area:.1f}x the buffered "
+                    f"({pop_grid_area_warn_buffer_m:.0f}m) convex hull of "
+                    "gdf_assets -- this looks unclipped and will make every "
+                    "per-state population aggregation more expensive than "
+                    "necessary. Consider pre-clipping with "
+                    "clip_population_to_service_area().",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+    except Exception:
+        pass
+
+    # Build service area population maps for the assets
+    with profiler.section("societal_access._build_service_area_population_maps"):
         service_area_assets = gdf_assets.copy()
         service_area_assets.index = stable_asset_ids
         service_area_population_maps = _build_service_area_population_maps(
@@ -1167,24 +1198,30 @@ def postprocess_societal_access_results(
     # Group detailed results by timestep
     detailed_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in detailed_results}
 
-    # --- Problem 1: Pre-compute population grid hashes once ---
+    # Pre-compute population grid hashes once
     pop_grid_geom_hash: str = _geometry_hash(pop_grid_gdf)
     pop_cell_id_hash: str = _column_hash(pop_grid_gdf, cell_id_column)
 
-    # Per road_state_key islands hash cache (populated on first encounter)
+    # Caches for islands and population allocations
     _islands_hash_cache: Dict[str, Tuple[str, str]] = {}
-
-    # --- Problem 3: pop_alloc cache keyed by allocation_cache_key ---
-    # Each entry: {"pop_alloc": df, "island_pop": df, "total_pop": dict, "available_group_cols": dict}
     _pop_alloc_cache: Dict[str, Dict[str, Any]] = {}
+    _pop_value_arrays_state: Optional[Tuple[pd.Index, Dict[str, np.ndarray]]] = None
 
-    # --- Problem 6: cache _compute_societal_scalars output per (allocation_cache_key, frozen_island_function_map) ---
+    def _get_population_value_arrays() -> Tuple[pd.Index, Dict[str, np.ndarray]]:
+        nonlocal _pop_value_arrays_state
+        if _pop_value_arrays_state is None:
+            _pop_value_arrays_state = _build_population_value_arrays(
+                pop_grid_gdf, cell_id_column, pop_group_columns
+            )
+        return _pop_value_arrays_state
+
+    # Precompute numpy arrays and positions for service area population maps
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
-
-    # --- Problem 4: precompute numpy arrays for _apply_service_area_societal_scalars ---
     _service_area_numpy: Dict[str, Dict[str, Any]] = {}
+    _service_area_positions: Dict[str, Dict[str, Dict[Any, int]]] = {}
     for _func, _group_maps in service_area_population_maps.items():
         _service_area_numpy[_func] = {}
+        _service_area_positions[_func] = {}
         for _label, _provider_pop in _group_maps.items():
             if _provider_pop:
                 _ids = np.array(list(_provider_pop.keys()))
@@ -1193,65 +1230,74 @@ def postprocess_societal_access_results(
                 _ids = np.array([])
                 _pops = np.array([], dtype=float)
             _service_area_numpy[_func][_label] = (_ids, _pops)
+            _service_area_positions[_func][_label] = {
+                _provider_id: _position for _position, _provider_id in enumerate(_ids)
+            }
 
     # Process each timestep that has detailed output
     for ts_idx, ts_summary in enumerate(summary_results):
         ts = ts_summary["timestep"]
         ts_detail = detailed_by_ts.get(ts)
 
-        with (
-            profiler.timestep(ts) if profiler is not None else nullcontext()
-        ):
-            if ts_detail is None:
-                # No detailed data → emit NaN
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
+        # Process the current timestep
+        with profiler.timestep(ts, loop="societal_postprocess"):
+            with profiler.section("societal_access.prepare_timestep_state"):
+                # Prepare the state for this timestep, including early-exit checks and reading operational data
+                if ts_detail is None:
+                    # No detailed data → emit NaN
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    continue
 
-            # Read dependency-adjusted operational states
-            operational = np.asarray(ts_detail.get("operational", []))
-            island_ids = np.asarray(ts_detail.get("island_id", []))
+                # Read dependency-adjusted operational states
+                operational = np.asarray(ts_detail.get("operational", []))
+                island_ids = np.asarray(ts_detail.get("island_id", []))
 
-            if len(operational) == 0 or len(island_ids) == 0:
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
+                if len(operational) == 0 or len(island_ids) == 0:
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    continue
 
-            # Build island → functions map from operational providers
-            island_function_map: Dict[int, Set[str]] = {}
-            operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
-            for i, (is_op, isl_id) in enumerate(zip(operational, island_ids)):
-                atype = asset_types[i] if i < len(asset_types) else "unknown"
-                func_cat = taxonomy.get(str(atype))
-                if func_cat is not None and is_op:
-                    for func_alias in _expand_function_category_equivalents(str(func_cat)):
+            with profiler.section("societal_access.build_operational_provider_map"):
+                # Build maps of operational assets by function and islands by function
+                island_function_map: Dict[int, Set[str]] = {}
+                operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
+                detail_len = min(len(operational), len(island_ids))
+                for i in provider_positions:
+                    if i >= detail_len or not operational[i]:
+                        continue
+                    isl_id_int = int(island_ids[i])
+                    for func_alias in asset_func_aliases[i]:
                         operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
-                        isl_id_int = int(isl_id)
                         island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
-            frozen_island_function_map: Dict[int, FrozenSet[str]] = {
-                iid: frozenset(cats) for iid, cats in island_function_map.items()
-            }
+                if unknown_func_aliases and detail_len > _num_assets_static:
+                    for i in range(_num_assets_static, detail_len):
+                        if not operational[i]:
+                            continue
+                        isl_id_int = int(island_ids[i])
+                        for func_alias in unknown_func_aliases:
+                            operational_asset_ids_by_function.setdefault(func_alias, set()).add(stable_asset_ids[i])
+                            island_function_map.setdefault(isl_id_int, set()).add(func_alias)
 
-            # Strict road_state_key resolution — no fallback to map index.
-            # Falling back to the map counter would silently reuse the baseline
-            # topology for adapted states that happen to share the same counter.
-            road_state_key_raw = ts_detail.get("road_state_key")
-            if not road_state_key_raw:
-                warnings.warn(
-                    f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
-                    "Ensure the simulation records road_state_key in its timestep detail.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
-                continue
-            road_state_key = str(road_state_key_raw)
+                frozen_island_function_map: Dict[int, FrozenSet[str]] = {
+                    iid: frozenset(cats) for iid, cats in island_function_map.items()
+                }
 
-            with (
-                profiler.section("societal_access.resolve_allocation", include_in_timestep=True)
-                if profiler is not None
-                else nullcontext()
-            ):
-                # --- Problem 1: get or populate islands hashes for this road_state_key ---
+            with profiler.section("societal_access.prepare_timestep_state"):
+                # Extract the road_state_key from the timestep detail and handle missing keys.
+                road_state_key_raw = ts_detail.get("road_state_key")
+                if not road_state_key_raw:
+                    warnings.warn(
+                        f"Timestep {ts}: road_state_key is absent; emitting NaN societal metrics. "
+                        "Ensure the simulation records road_state_key in its timestep detail.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    continue
+                road_state_key = str(road_state_key_raw)
+
+            with profiler.section("societal_access.resolve_allocation"):
+                # Get or populate islands hashes for this road_state_key ---
                 if road_state_key not in _islands_hash_cache and islands_gdf_cache is not None:
                     islands_gdf_tmp = islands_gdf_cache.get(road_state_key)
                     if islands_gdf_tmp is not None:
@@ -1296,7 +1342,7 @@ def postprocess_societal_access_results(
                         islands_id_hash=_cur_islands_id_hash,
                     )
                 else:
-                    # --- Problem 5: pass pre-computed pop grid hashes ---
+                    # Pass pre-computed pop grid hashes ---
                     allocation_cache_key, allocation_df = _find_allocation_cache_entry(
                         allocation_cache,
                         pop_grid_gdf,
@@ -1334,118 +1380,80 @@ def postprocess_societal_access_results(
                         _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
                         continue
 
-            with (
-                profiler.section("societal_access.compute_scalars", include_in_timestep=True)
-                if profiler is not None
-                else nullcontext()
-            ):
-                # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
-                _cached_entry: Optional[Dict[str, Any]] = None
-                if allocation_cache_key is not None and allocation_df is not None:
-                    if allocation_cache_key not in _pop_alloc_cache:
-                        try:
-                            _pop_alloc_df = apply_population_to_allocations(
-                                allocation_df=allocation_df,
-                                pop_grid_gdf=pop_grid_gdf,
-                                cell_id_column=cell_id_column,
-                                pop_group_columns=pop_group_columns,
-                            )
-                            _gc = {lbl: f"{lbl}_weighted" for lbl in pop_group_columns}
-                            _agc = {lbl: col for lbl, col in _gc.items() if col in _pop_alloc_df.columns}
-                            _wcl = list(_agc.values())
-                            _isl_pop = (
-                                _pop_alloc_df.groupby("island_id")[_wcl].sum()
-                                if _wcl
-                                else pd.DataFrame()
-                            )
-                            _tot_pop: Dict[str, float] = {}
-                            if not _isl_pop.empty:
-                                for _lbl, _col in _agc.items():
-                                    _tot_pop[_lbl] = float(_isl_pop[_col].sum())
-                            else:
-                                for _lbl, _col in _agc.items():
-                                    _tot_pop[_lbl] = float(_pop_alloc_df[_col].sum())
-                            _pop_alloc_cache[allocation_cache_key] = {
-                                "pop_alloc": _pop_alloc_df,
-                                "island_pop": _isl_pop,
-                                "total_pop": _tot_pop,
-                                "available_group_cols": _agc,
-                            }
-                        except Exception:
-                            pass
-                    _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
+            with profiler.section("societal_access.compute_scalars"):
+                # Compute societal access scalars (i.e. the metrics that quantify societal access) for the current timestep.
+                with profiler.section("societal_access.compute_scalars.pop_alloc"):
+                    _cached_entry: Optional[Dict[str, Any]] = None
+                    if allocation_cache_key is not None and allocation_df is not None:
+                        if allocation_cache_key not in _pop_alloc_cache:
+                            with profiler.section("societal_access.compute_scalars.pop_alloc_build"):
+                                try:
+                                    _cell_id_index, _value_arrays = _get_population_value_arrays()
+                                    _isl_pop, _tot_pop, _agc = _aggregate_population_by_island(
+                                        allocation_df=allocation_df,
+                                        cell_id_column=cell_id_column,
+                                        cell_id_index=_cell_id_index,
+                                        value_arrays=_value_arrays,
+                                    )
 
-                # --- Fix 6: cache _compute_societal_scalars per (allocation_cache_key, frozen_island_function_map) ---
-                _frozen_ifm_key = frozenset(frozen_island_function_map.items())
-                _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key)
-                if _scalar_cache_key in _scalar_fields_cache:
-                    societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
-                else:
-                    societal_fields = _compute_societal_scalars(
-                        frozen_island_function_map=frozen_island_function_map,
-                        allocation_df=allocation_df,
-                        pop_grid_gdf=pop_grid_gdf,
-                        cell_id_column=cell_id_column,
-                        pop_group_columns=pop_group_columns,
-                        all_functions=all_functions,
-                        reference_group=reference_group,
-                        pop_alloc=_cached_entry["pop_alloc"] if _cached_entry else None,
-                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
-                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
-                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                                    _pop_alloc_cache[allocation_cache_key] = {
+                                        "island_pop": _isl_pop,
+                                        "total_pop": _tot_pop,
+                                        "available_group_cols": _agc,
+                                    }
+                                except Exception:
+                                    pass
+                        _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
+
+                # Compute the cache key for the scalar fields and compute scalar values if cache miss.
+                with profiler.section("societal_access.compute_scalars.cache_key"):
+                    _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                    _op_signature = tuple(
+                        (func, frozenset(ids))
+                        for func, ids in sorted(operational_asset_ids_by_function.items())
                     )
-                    _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+                    _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
+                    _scalar_cache_hit = _scalar_cache_key in _scalar_fields_cache
 
-                # --- Fix 4: use precomputed numpy arrays for service area computation ---
-                societal_fields = _apply_service_area_societal_scalars(
-                    societal_fields,
-                    operational_asset_ids_by_function=operational_asset_ids_by_function,
-                    service_area_population_maps=service_area_population_maps,
-                    pop_group_columns=pop_group_columns,
-                    reference_group=reference_group,
-                    numpy_maps=_service_area_numpy if _service_area_numpy else None,
-                )
+                if _scalar_cache_hit:
+                    with profiler.section("societal_access.compute_scalars.cache_hit"):
+                        # A cache hit must never hand out the same mutable dict twice:
+                        # _apply_service_area_societal_scalars mutates its
+                        # `fields` argument in place, so always return a copy.
+                        societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
+                else:
+                    with profiler.section("societal_access.compute_scalars.cache_miss"):
+                        societal_fields = _compute_societal_scalars(
+                            frozen_island_function_map=frozen_island_function_map,
+                            allocation_df=allocation_df,
+                            pop_grid_gdf=pop_grid_gdf,
+                            cell_id_column=cell_id_column,
+                            pop_group_columns=pop_group_columns,
+                            all_functions=all_functions,
+                            reference_group=reference_group,
+                            island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                            total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                            available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                        )
 
-            ts_summary.update(societal_fields)
-            ts_summary["allocation_cache_key"] = allocation_cache_key
-            ts_summary["allocation_road_state_key"] = road_state_key
+                        # Apply service area societal scalars to the computed societal fields.
+                        societal_fields = _apply_service_area_societal_scalars(
+                            societal_fields,
+                            operational_asset_ids_by_function=operational_asset_ids_by_function,
+                            service_area_population_maps=service_area_population_maps,
+                            pop_group_columns=pop_group_columns,
+                            reference_group=reference_group,
+                            numpy_maps=_service_area_numpy if _service_area_numpy else None,
+                            position_maps=_service_area_positions if _service_area_positions else None,
+                        )
+                        _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+
+            with profiler.section("societal_access.merge_fields"):
+                ts_summary.update(societal_fields)
+                ts_summary["allocation_cache_key"] = allocation_cache_key
+                ts_summary["allocation_road_state_key"] = road_state_key
 
     return summary_results, allocation_cache
-
-
-def _find_allocation_in_cache(
-    allocation_cache: Dict[str, pd.DataFrame],
-    pop_grid_gdf: gpd.GeoDataFrame,
-    cell_id_column: str,
-    road_state_key: str,
-    nearest_max_distance: float,
-) -> Optional[pd.DataFrame]:
-    """Scan *allocation_cache* for an entry matching all metadata fields.
-
-    This is the legacy (backward-compatible) lookup path used when no
-    ``islands_gdf_cache`` is provided to
-    :func:`postprocess_societal_access_results`.  Returns ``None`` when no
-    unique matching entry is found.
-    """
-    global _LEGACY_ALLOCATION_LOOKUP_WARNED
-    if not _LEGACY_ALLOCATION_LOOKUP_WARNED:
-        warnings.warn(
-            "Using legacy allocation-cache metadata scan path; pass "
-            "'islands_gdf_cache' to postprocess_societal_access_results for "
-            "deterministic road-state-aware allocation lookup.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        _LEGACY_ALLOCATION_LOOKUP_WARNED = True
-
-    _, allocation_df = _find_allocation_cache_entry(
-        allocation_cache,
-        pop_grid_gdf,
-        cell_id_column,
-        road_state_key,
-        nearest_max_distance,
-    )
-    return allocation_df
 
 
 def _compute_societal_scalars(
@@ -1461,7 +1469,7 @@ def _compute_societal_scalars(
     total_pop: Optional[Dict[str, float]] = None,
     available_group_cols: Optional[Dict[str, str]] = None,
 ) -> Dict[str, float]:
-    """Compute flat societal metric scalars for one timestep.
+    """Compute societal metric scalars for one timestep.
 
     Parameters
     ----------
@@ -1646,81 +1654,3 @@ def list_societal_metric_names(
             names.append(f"societal_equity_relative_gap__{func}__{group}")
     return names
 
-
-# ---------------------------------------------------------------------------
-# Layer D — high-level convenience wrapper
-# ---------------------------------------------------------------------------
-
-def analyse_societal_access(
-    islands_gdf: gpd.GeoDataFrame,
-    population_gdf: gpd.GeoDataFrame,
-    service_nodes_gdf: Optional[gpd.GeoDataFrame] = None,
-    taxonomy: Optional[Dict[str, str]] = None,
-    pop_columns: Optional[Dict[str, str]] = None,
-    node_type_column: str = "type",
-    island_id_column: str = "island_id",
-    reference_group: str = "total",
-    graph=None,
-    destination_nodes: Optional[Mapping[Any, str]] = None,
-    origin_island_ids: Optional[Mapping[Any, int]] = None,
-    stakeholder_groups: Optional[Mapping[str, Mapping[Any, float]]] = None,
-) -> Dict[str, Any]:
-    """Run the full societal access pipeline and return all result tables."""
-    use_graph_path = (
-        graph is not None
-        and destination_nodes is not None
-        and stakeholder_groups is not None
-    )
-
-    if use_graph_path:
-        full_assignment = build_island_assignment(graph)
-
-        if origin_island_ids is None:
-            origin_ids: Set[Any] = set()
-            for grp in stakeholder_groups.values():
-                origin_ids |= set(grp.keys())
-            origin_island_ids = {
-                oid: full_assignment[oid]
-                for oid in origin_ids
-                if oid in full_assignment
-            }
-
-        island_function_map = build_destination_function_map(
-            destination_nodes, full_assignment, taxonomy=taxonomy
-        )
-        origin_access_df = compute_origin_access(origin_island_ids, island_function_map)
-        access_matrix = compute_access_matrix_from_origins(origin_access_df, stakeholder_groups)
-        equity_gaps = compute_equity_gaps(access_matrix, reference_group=reference_group)
-
-        return {
-            "island_functions": island_function_map,
-            "island_population": None,
-            "origin_access": origin_access_df,
-            "access_matrix": access_matrix,
-            "equity_gaps": equity_gaps,
-        }
-
-    else:
-        island_function_map = assign_destinations_to_islands_spatial(
-            service_nodes_gdf, islands_gdf,
-            taxonomy=taxonomy, node_type_column=node_type_column,
-            island_id_column=island_id_column,
-        )
-        island_population_df = assign_origins_to_islands_spatial(
-            population_gdf, islands_gdf,
-            pop_columns=list(pop_columns.values()) if pop_columns else None,
-            island_id_column=island_id_column,
-        )
-        access_matrix = compute_access_matrix(
-            island_function_map, island_population_df,
-            pop_columns=pop_columns, island_id_column=island_id_column,
-        )
-        equity_gaps = compute_equity_gaps(access_matrix, reference_group=reference_group)
-
-        return {
-            "island_functions": island_function_map,
-            "island_population": island_population_df,
-            "origin_access": None,
-            "access_matrix": access_matrix,
-            "equity_gaps": equity_gaps,
-        }
