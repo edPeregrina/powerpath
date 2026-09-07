@@ -34,13 +34,7 @@ completes: ``simulation.py`` hands the per-timestep ``detailed_results``
 ``postprocess_societal_access_results``, which returns ``summary_results``
 merged with ``societal_*`` fields. Everything else in this module —
 allocation caching, Voronoi service-area maps, scalar caches — exists to
-make that one call fast and repeatable across EMA experiments. There is no
-alternate production entry point into societal-access metrics.
-
-An earlier graph/spatial-join based implementation of the same conceptual
-model (used only by tests and one notebook demo cell, never by
-``simulation.py``) has been moved to ``societal_access_obsolete.py``; see
-that module's docstring for what it did and why it was superseded.
+make that one call fast and repeatable across EMA experiments. 
 """
 
 from __future__ import annotations
@@ -63,25 +57,16 @@ from src.timing_profiler import NULL_PROFILER
 
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
-    # Health
+    # Healthcare infrastructure
     "hospital": "health",
     "clinic": "health",
     "huisartsenpraktijk": "health",
     "apotheek": "health",
     # Emergency response
     "fire_station": "emergency_response",
-    "brandweerkazerne": "emergency_response",
-    "emergency_operations_centre": "emergency_response",
-    # Climate resilience
-    "cooling_centre": "climate_resilience",
-    "water_supply_point": "climate_resilience",
-    "drinking_water": "climate_resilience",
-    # Social continuity
+    # Education infrastructure
     "school": "education",
-    "basisonderwijs": "education",
-    "voortgezet_onderwijs": "education",
-    "repair_depot": "repair_logistics",
-    # Electricity
+    # Electricity infrastructure
     "msls": "electricity",
 }
 
@@ -90,11 +75,8 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
     "total": "aantal_inwoners",
     "elderly": "aantal_inwoners_65_jaar_en_ouder",
     "children": "aantal_inwoners_0_tot_15_jaar",
-    "working_age": "aantal_inwoners_25_tot_45_jaar",
 }
 
-#: Current version of the allocation algorithm — increment when the
-#: spatial logic changes so cached allocations are automatically invalidated.
 ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
@@ -105,15 +87,10 @@ _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "hospital": frozenset({"health", "hospital"}),
 }
 
-
 def _expand_function_category_equivalents(function_name: str) -> FrozenSet[str]:
     """Return equivalent function-category labels for compatibility outputs."""
     return _FUNCTION_CATEGORY_EQUIVALENTS.get(function_name, frozenset({function_name}))
 
-
-# ---------------------------------------------------------------------------
-# Layer E — allocation caching + realization-aware postprocessor
-# ---------------------------------------------------------------------------
 
 def _geometry_hash(gdf: gpd.GeoDataFrame) -> str:
     """Deterministic hash of a GeoDataFrame geometry column."""
@@ -149,8 +126,7 @@ def build_allocation_cache_key(
     """Build a deterministic cache key for the geometry-only allocation.
 
     The key covers all deterministic inputs that affect the road partition or
-    grid geometry.  It does **not** include population attribute values,
-    selected demographic columns, stochastic seed, or provider outcomes.
+    grid geometry.
 
     Optional pre-computed hash strings (``pop_grid_geom_hash``,
     ``pop_cell_id_hash``, ``islands_geom_hash``, ``islands_id_hash``) may be
@@ -343,7 +319,7 @@ def build_origin_island_allocations(
 
     allocation_df = pd.DataFrame(rows)
 
-    # Resolve hashes — use pre-computed values when available (Problem 1)
+    # Resolve hashes — use pre-computed values when available
     _pop_geom_hash = pop_grid_geom_hash if pop_grid_geom_hash is not None else _geometry_hash(pop_grid_gdf)
     _pop_id_hash = pop_cell_id_hash if pop_cell_id_hash is not None else _column_hash(pop_grid_gdf, cell_id_column)
     _isl_geom_hash = islands_geom_hash if islands_geom_hash is not None else _geometry_hash(islands_gdf)
@@ -1136,14 +1112,7 @@ def postprocess_societal_access_results(
     else:
         stable_asset_ids = np.arange(len(gdf_assets))
 
-    # --- Work item 3: hoist per-asset taxonomy work out of the timestep loop.
-    # `asset_types` and `taxonomy` are fixed for the whole call, so the
-    # function-category → alias expansion (previously repeated for every
-    # asset on every timestep) is computed once here.  `asset_func_aliases[i]`
-    # is the tuple of function aliases for asset `i` (empty for
-    # non-providers); `provider_positions` lists only the positions with a
-    # non-empty alias tuple, so the per-timestep loop below need only visit
-    # actual providers instead of every asset.
+    # Asset taxonomy and function alias preparation
     _num_assets_static = len(asset_types)
     asset_func_aliases: List[Tuple[str, ...]] = [()] * _num_assets_static
     for _i in range(_num_assets_static):
@@ -1153,9 +1122,7 @@ def postprocess_societal_access_results(
     provider_positions: List[int] = [
         _i for _i, _aliases in enumerate(asset_func_aliases) if _aliases
     ]
-    # Preserve the `i >= len(asset_types) -> "unknown"` fallback semantics for
-    # the (essentially never triggered) case where the per-timestep detail
-    # arrays are longer than the static asset arrays.
+
     _unknown_func_cat = taxonomy.get("unknown")
     unknown_func_aliases: Tuple[str, ...] = (
         tuple(_expand_function_category_equivalents(str(_unknown_func_cat)))
@@ -1183,12 +1150,8 @@ def postprocess_societal_access_results(
         print(f"Electricity providers: {electricity_provider_count} MSLS")
         print(f"Hospital providers: {hospital_provider_count}")
 
-    # --- Work item B: cheap, non-fatal guard against an unclipped
-    # population grid.  Bounding-box area comparisons only -- no clipping,
-    # no exception, just a warning nudging callers toward
-    # clip_population_to_service_area() when it looks like they forgot to
-    # pre-clip.  Runs once per call, never inside the per-timestep loop.
     try:
+        # Clip population grid to the service area defined by the assets
         if not pop_grid_gdf.empty and not gdf_assets.empty:
             _pgb = pop_grid_gdf.total_bounds
             _pop_grid_area = float((_pgb[2] - _pgb[0]) * (_pgb[3] - _pgb[1]))
@@ -1214,6 +1177,7 @@ def postprocess_societal_access_results(
     except Exception:
         pass
 
+    # Build service area population maps for the assets
     with profiler.section("societal_access._build_service_area_population_maps"):
         service_area_assets = gdf_assets.copy()
         service_area_assets.index = stable_asset_ids
@@ -1235,33 +1199,13 @@ def postprocess_societal_access_results(
     # Group detailed results by timestep
     detailed_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in detailed_results}
 
-    # --- Problem 1: Pre-compute population grid hashes once ---
+    # Pre-compute population grid hashes once
     pop_grid_geom_hash: str = _geometry_hash(pop_grid_gdf)
     pop_cell_id_hash: str = _column_hash(pop_grid_gdf, cell_id_column)
 
-    # Per road_state_key islands hash cache (populated on first encounter)
+    # Caches for islands and population allocations
     _islands_hash_cache: Dict[str, Tuple[str, str]] = {}
-
-    # --- Problem 3: pop_alloc cache keyed by allocation_cache_key ---
-    # Each entry: {"island_pop": df, "total_pop": dict, "available_group_cols": dict}.
-    # --- Work item C: the full per-cell "pop_alloc" frame (one row per
-    # population cell x island) used to be cached here too, but nothing
-    # downstream ever reads it once island_pop/total_pop/available_group_cols
-    # are all present: _compute_societal_scalars only falls back to building
-    # its own pop_alloc internally when *all three* are None (i.e. this
-    # entry is entirely absent), and _apply_service_area_societal_scalars
-    # never touches pop_alloc at all (it uses service_area_population_maps).
-    # Dropping it keeps this cache's memory bounded by island count x
-    # distinct-state count instead of population-cell count x distinct-state
-    # count -- the dominant term at country scale.
     _pop_alloc_cache: Dict[str, Dict[str, Any]] = {}
-
-    # --- Work item A: lazily-built, call-scoped sanitised population value
-    # arrays (see _build_population_value_arrays).  Population values are
-    # invariant across road/allocation states, so this is built at most once
-    # per postprocess_societal_access_results call, on the first cache miss,
-    # and reused for every subsequent distinct state instead of re-merging +
-    # re-sanitising the whole population grid every time.
     _pop_value_arrays_state: Optional[Tuple[pd.Index, Dict[str, np.ndarray]]] = None
 
     def _get_population_value_arrays() -> Tuple[pd.Index, Dict[str, np.ndarray]]:
@@ -1272,15 +1216,8 @@ def postprocess_societal_access_results(
             )
         return _pop_value_arrays_state
 
-    # --- Problem 6: cache _compute_societal_scalars output per (allocation_cache_key, frozen_island_function_map) ---
+    # Precompute numpy arrays and positions for service area population maps
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
-
-    # --- Problem 4: precompute numpy arrays for _apply_service_area_societal_scalars ---
-    # --- Work item 5: also precompute a {provider_id: position} mapping per
-    # function/label, aligned with the ids array, so the operational-provider
-    # membership mask can be built via O(len(operational_ids)) position
-    # lookups instead of rebuilding a list from operational_ids and sorting
-    # it on every call (np.isin) -- ids_arr is fixed for the whole run.
     _service_area_numpy: Dict[str, Dict[str, Any]] = {}
     _service_area_positions: Dict[str, Dict[str, Dict[Any, int]]] = {}
     for _func, _group_maps in service_area_population_maps.items():
@@ -1303,14 +1240,10 @@ def postprocess_societal_access_results(
         ts = ts_summary["timestep"]
         ts_detail = detailed_by_ts.get(ts)
 
+        # Process the current timestep
         with profiler.timestep(ts, loop="societal_postprocess"):
-            # --- Instrumentation follow-up: these two early-exit checks were
-            # previously outside any named section (part of the profiler's
-            # "societal_postprocess.unattributed" blind spot). They are cheap
-            # per-timestep validation/state-prep, grouped under the same
-            # section name as the road_state_key resolution below since both
-            # are "prepare this timestep's state" work.
             with profiler.section("societal_access.prepare_timestep_state"):
+                # Prepare the state for this timestep, including early-exit checks and reading operational data
                 if ts_detail is None:
                     # No detailed data → emit NaN
                     _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
@@ -1325,24 +1258,7 @@ def postprocess_societal_access_results(
                     continue
 
             with profiler.section("societal_access.build_operational_provider_map"):
-                # Build island → functions map from operational providers.
-                # --- Work item 3: iterate only over precomputed provider
-                # positions instead of every asset on every timestep.
-                #
-                # --- Scale-readiness Work item D (measured, not implemented):
-                # profiled at 5400-asset / ~378-provider synthetic scale
-                # (~22x the small-scale asset count), this section costs
-                # ~0.12-0.21 ms/timestep -- statistically indistinguishable
-                # from the ~0.26 ms/timestep measured at small scale (~10-20
-                # providers). This confirms the cost is dominated by fixed
-                # per-timestep Python/loop overhead, not by provider count,
-                # so the proposed array-based (numpy mask + np.unique)
-                # rewrite would not yield a measurable win here and was not
-                # implemented, per the "measure before implementing" policy.
-                # Aggregate contribution at that scale: ~0.03-0.05 s across
-                # 240 timesteps out of a multi-second call dominated by
-                # allocation-geometry building and the one-off service-area
-                # population map build (neither in this work item's scope).
+                # Build maps of operational assets by function and islands by function
                 island_function_map: Dict[int, Set[str]] = {}
                 operational_asset_ids_by_function: Dict[str, Set[Any]] = {}
                 detail_len = min(len(operational), len(island_ids))
@@ -1368,9 +1284,7 @@ def postprocess_societal_access_results(
                 }
 
             with profiler.section("societal_access.prepare_timestep_state"):
-                # Strict road_state_key resolution — no fallback to map index.
-                # Falling back to the map counter would silently reuse the baseline
-                # topology for adapted states that happen to share the same counter.
+                # Extract the road_state_key from the timestep detail and handle missing keys.
                 road_state_key_raw = ts_detail.get("road_state_key")
                 if not road_state_key_raw:
                     warnings.warn(
@@ -1384,7 +1298,7 @@ def postprocess_societal_access_results(
                 road_state_key = str(road_state_key_raw)
 
             with profiler.section("societal_access.resolve_allocation"):
-                # --- Problem 1: get or populate islands hashes for this road_state_key ---
+                # Get or populate islands hashes for this road_state_key ---
                 if road_state_key not in _islands_hash_cache and islands_gdf_cache is not None:
                     islands_gdf_tmp = islands_gdf_cache.get(road_state_key)
                     if islands_gdf_tmp is not None:
@@ -1429,7 +1343,7 @@ def postprocess_societal_access_results(
                         islands_id_hash=_cur_islands_id_hash,
                     )
                 else:
-                    # --- Problem 5: pass pre-computed pop grid hashes ---
+                    # Pass pre-computed pop grid hashes ---
                     allocation_cache_key, allocation_df = _find_allocation_cache_entry(
                         allocation_cache,
                         pop_grid_gdf,
@@ -1468,22 +1382,13 @@ def postprocess_societal_access_results(
                         continue
 
             with profiler.section("societal_access.compute_scalars"):
-                # --- Fix 1+2: retrieve or build pop_alloc + island_pop + total_pop ---
-                # --- Investigation follow-up: named as its own subphase so the
-                # allocation (pop_alloc) build work is distinguishable from
-                # cache-key construction and the scalar cache hit/miss paths
-                # below (all previously folded into one "compute_scalars" time).
+                # Compute societal access scalars (i.e. the metrics that quantify societal access) for the current timestep.
                 with profiler.section("societal_access.compute_scalars.pop_alloc"):
                     _cached_entry: Optional[Dict[str, Any]] = None
                     if allocation_cache_key is not None and allocation_df is not None:
                         if allocation_cache_key not in _pop_alloc_cache:
                             with profiler.section("societal_access.compute_scalars.pop_alloc_build"):
                                 try:
-                                    # --- Work item A: aggregate directly from
-                                    # the once-per-call sanitised population
-                                    # arrays instead of re-merging +
-                                    # re-sanitising the whole population grid
-                                    # against this state's allocation rows.
                                     _cell_id_index, _value_arrays = _get_population_value_arrays()
                                     _isl_pop, _tot_pop, _agc = _aggregate_population_by_island(
                                         allocation_df=allocation_df,
@@ -1491,11 +1396,7 @@ def postprocess_societal_access_results(
                                         cell_id_index=_cell_id_index,
                                         value_arrays=_value_arrays,
                                     )
-                                    # --- Work item C: only island_pop / total_pop /
-                                    # available_group_cols are ever read back out of
-                                    # this cache (see the comment on _pop_alloc_cache's
-                                    # declaration) -- the full per-cell frame is never
-                                    # built at all now, so there is nothing to drop.
+
                                     _pop_alloc_cache[allocation_cache_key] = {
                                         "island_pop": _isl_pop,
                                         "total_pop": _tot_pop,
@@ -1505,17 +1406,7 @@ def postprocess_societal_access_results(
                                     pass
                         _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
 
-                # --- Fix 6 / Work item 4: cache _compute_societal_scalars AND
-                # _apply_service_area_societal_scalars output together, keyed
-                # by (allocation_cache_key, frozen_island_function_map,
-                # op_signature). op_signature captures the operational
-                # provider set per function -- the missing determinant for
-                # _apply_service_area_societal_scalars, which used to be
-                # re-run unconditionally on every timestep even on a cache
-                # hit. Keying on providers only (never the full operational /
-                # island_id arrays) keeps memory independent of total asset
-                # count. This cache is function-local: it is freed when
-                # postprocess_societal_access_results returns.
+                # Compute the cache key for the scalar fields and compute scalar values if cache miss.
                 with profiler.section("societal_access.compute_scalars.cache_key"):
                     _frozen_ifm_key = frozenset(frozen_island_function_map.items())
                     _op_signature = tuple(
@@ -1527,8 +1418,8 @@ def postprocess_societal_access_results(
 
                 if _scalar_cache_hit:
                     with profiler.section("societal_access.compute_scalars.cache_hit"):
-                        # A cache hit must never hand out the same mutable dict
-                        # twice: _apply_service_area_societal_scalars mutates its
+                        # A cache hit must never hand out the same mutable dict twice:
+                        # _apply_service_area_societal_scalars mutates its
                         # `fields` argument in place, so always return a copy.
                         societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
                 else:
@@ -1541,18 +1432,12 @@ def postprocess_societal_access_results(
                             pop_group_columns=pop_group_columns,
                             all_functions=all_functions,
                             reference_group=reference_group,
-                            # --- Work item C: the full per-cell pop_alloc frame is
-                            # no longer cached (nothing downstream needs it beyond
-                            # island_pop/total_pop/available_group_cols); when
-                            # _cached_entry is None, _compute_societal_scalars
-                            # falls back to its own internal
-                            # apply_population_to_allocations build, unaffected.
                             island_pop=_cached_entry["island_pop"] if _cached_entry else None,
                             total_pop=_cached_entry["total_pop"] if _cached_entry else None,
                             available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
                         )
-                        # --- Fix 4 / Work item 5: use precomputed numpy arrays +
-                        # provider→position maps for service area computation.
+
+                        # Apply service area societal scalars to the computed societal fields.
                         societal_fields = _apply_service_area_societal_scalars(
                             societal_fields,
                             operational_asset_ids_by_function=operational_asset_ids_by_function,
@@ -1572,41 +1457,6 @@ def postprocess_societal_access_results(
     return summary_results, allocation_cache
 
 
-def _find_allocation_in_cache(
-    allocation_cache: Dict[str, pd.DataFrame],
-    pop_grid_gdf: gpd.GeoDataFrame,
-    cell_id_column: str,
-    road_state_key: str,
-    nearest_max_distance: float,
-) -> Optional[pd.DataFrame]:
-    """Scan *allocation_cache* for an entry matching all metadata fields.
-
-    This is the legacy (backward-compatible) lookup path used when no
-    ``islands_gdf_cache`` is provided to
-    :func:`postprocess_societal_access_results`.  Returns ``None`` when no
-    unique matching entry is found.
-    """
-    global _LEGACY_ALLOCATION_LOOKUP_WARNED
-    if not _LEGACY_ALLOCATION_LOOKUP_WARNED:
-        warnings.warn(
-            "Using legacy allocation-cache metadata scan path; pass "
-            "'islands_gdf_cache' to postprocess_societal_access_results for "
-            "deterministic road-state-aware allocation lookup.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        _LEGACY_ALLOCATION_LOOKUP_WARNED = True
-
-    _, allocation_df = _find_allocation_cache_entry(
-        allocation_cache,
-        pop_grid_gdf,
-        cell_id_column,
-        road_state_key,
-        nearest_max_distance,
-    )
-    return allocation_df
-
-
 def _compute_societal_scalars(
     frozen_island_function_map: Dict[int, FrozenSet[str]],
     allocation_df: Optional[pd.DataFrame],
@@ -1620,7 +1470,7 @@ def _compute_societal_scalars(
     total_pop: Optional[Dict[str, float]] = None,
     available_group_cols: Optional[Dict[str, str]] = None,
 ) -> Dict[str, float]:
-    """Compute flat societal metric scalars for one timestep.
+    """Compute societal metric scalars for one timestep.
 
     Parameters
     ----------

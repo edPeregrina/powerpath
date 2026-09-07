@@ -5,7 +5,7 @@ societal-functions model described in Paper 4's set-theoretic framework:
 population/service nodes are assigned to graph- or geometry-based "islands",
 and access is evaluated as shared island membership. `societal_access.py`
 now implements the same conceptual model in a way that is wired into the
-production simulation loop; this module is what came before that.
+production simulation loop; this module is what came before that. 
 
 Why this was discarded
 -----------------------
@@ -19,28 +19,14 @@ because it:
   call (the spatial path here).
 - Caches the expensive population -> island geometry allocation across
   timesteps *and* across EMA experiments (``get_or_build_allocation``),
-  which neither path here ever did.
-- Adds Voronoi-service-area overrides for functions such as electricity,
-  where shared-island membership is too coarse a proxy for who a given
-  substation actually serves.
-
-No production code ever called into this file. Across the whole workspace,
-the only callers were `tests/test_societal_access.py` (direct unit coverage
-of these functions) and exactly one demonstration cell in
-`book/Use_Case_sample_societal_access.ipynb` (a spatial-join visualisation
-of the same disrupted-island geometries the production path also uses).
-Both were repointed at this module, unchanged, when it was split out of
-`societal_access.py` — no demonstrated functionality was lost, only
-relocated.
+  which neither path here did.
+- Adds Voronoi-service-area overrides for functions such as electricity.
 
 Kept here for potential future reuse. Do not wire this into ``simulation.py``
 without first re-validating it against the allocation-cache invariants
 exercised in ``tests/test_societal_access.py``.
 
-Contents (original layer names kept only for continuity with the design
-notes that introduced them — there is no companion "layer" in
-`societal_access.py` any more, since that module now contains a single
-production path, not a stack of layers):
+Contents:
 
 A — Graph-native: ``build_island_assignment``, ``build_destination_function_map``,
     ``compute_origin_access``, ``compute_access_matrix_from_origins``.
@@ -457,3 +443,38 @@ def analyse_societal_access(
             "access_matrix": access_matrix,
             "equity_gaps": equity_gaps,
         }
+
+
+def _find_allocation_in_cache(
+    allocation_cache: Dict[str, pd.DataFrame],
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    road_state_key: str,
+    nearest_max_distance: float,
+) -> Optional[pd.DataFrame]:
+    """Scan *allocation_cache* for an entry matching all metadata fields.
+
+    This is the legacy (backward-compatible) lookup path used when no
+    ``islands_gdf_cache`` is provided to
+    :func:`postprocess_societal_access_results`.  Returns ``None`` when no
+    unique matching entry is found.
+    """
+    global _LEGACY_ALLOCATION_LOOKUP_WARNED
+    if not _LEGACY_ALLOCATION_LOOKUP_WARNED:
+        warnings.warn(
+            "Using legacy allocation-cache metadata scan path; pass "
+            "'islands_gdf_cache' to postprocess_societal_access_results for "
+            "deterministic road-state-aware allocation lookup.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        _LEGACY_ALLOCATION_LOOKUP_WARNED = True
+
+    _, allocation_df = _find_allocation_cache_entry(
+        allocation_cache,
+        pop_grid_gdf,
+        cell_id_column,
+        road_state_key,
+        nearest_max_distance,
+    )
+    return allocation_df
