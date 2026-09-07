@@ -47,7 +47,16 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-from src.societal_access import POPULATION_GROUP_COLUMNS, SERVICE_NODE_TAXONOMY
+from src.societal_access import (
+    POPULATION_GROUP_COLUMNS,
+    SERVICE_NODE_TAXONOMY,
+    _find_allocation_cache_entry,
+)
+
+# Local warn-once flag for `_find_allocation_in_cache` below. This used to
+# live in `societal_access.py`, but that module no longer references it now
+# that the only caller of `_find_allocation_in_cache` lives here.
+_LEGACY_ALLOCATION_LOOKUP_WARNED = False
 
 
 # ---------------------------------------------------------------------------

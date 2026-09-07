@@ -81,7 +81,6 @@ ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
 }
-_LEGACY_ALLOCATION_LOOKUP_WARNED = False
 _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
