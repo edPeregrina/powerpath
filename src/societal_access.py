@@ -1347,8 +1347,10 @@ def postprocess_societal_access_results(
             asset_type_column=asset_type_column,
             service_area_function_provider_types=service_area_function_provider_types,
         )
-    service_area_maps_digest = _service_area_population_maps_digest(
-        service_area_population_maps
+service_area_maps_digest = (
+        _service_area_population_maps_digest(service_area_population_maps)
+        if shared_realized_state_cache is not None
+        else ""
     )
 
     # Determine which functions to always emit
