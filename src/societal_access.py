@@ -87,6 +87,10 @@ _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
 }
 _REALIZED_STATE_CACHE_KEY_VERSION = "2.0.0"
 
+
+class SharedRealizedStateCacheError(RuntimeError):
+    """Raised when shared realized-state cache operations fail in fail-hard mode."""
+
 def _expand_function_category_equivalents(function_name: str) -> FrozenSet[str]:
     """Return equivalent function-category labels for compatibility outputs."""
     return _FUNCTION_CATEGORY_EQUIVALENTS.get(function_name, frozenset({function_name}))
@@ -1564,10 +1568,12 @@ def postprocess_societal_access_results(
                                 _shared_cache_hit = True
                             else:
                                 _cache_metrics["shared_misses"] += 1
-                        except Exception:
+                        except Exception as _shared_cache_err:
                             _cache_metrics["shared_errors"] += 1
                             if shared_cache_fail_hard:
-                                raise
+                                raise SharedRealizedStateCacheError(
+                                    "Shared realized-state cache read failed"
+                                ) from _shared_cache_err
 
                     if not _shared_cache_hit:
                         with profiler.section("societal_access.compute_scalars.cache_miss"):
@@ -1604,10 +1610,12 @@ def postprocess_societal_access_results(
                                         _cache_metrics["shared_writes"] += 1
                                     else:
                                         _cache_metrics["shared_write_conflicts"] += 1
-                                except Exception:
+                                except Exception as _shared_cache_err:
                                     _cache_metrics["shared_errors"] += 1
                                     if shared_cache_fail_hard:
-                                        raise
+                                        raise SharedRealizedStateCacheError(
+                                            "Shared realized-state cache write failed"
+                                        ) from _shared_cache_err
 
             with profiler.section("societal_access.merge_fields"):
                 ts_summary.update(societal_fields)

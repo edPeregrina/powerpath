@@ -1579,7 +1579,10 @@ def simulate_asset_damage_recovery_access_breakdown(
     # --- Societal access postprocessing (optional) ---
     if societal_access_config is not None and timestep_output:
         try:
-            from src.societal_access import postprocess_societal_access_results
+            from src.societal_access import (
+                SharedRealizedStateCacheError,
+                postprocess_societal_access_results,
+            )
             _sa_cfg = societal_access_config
             allocation_cache = _sa_cfg.get("allocation_cache")
             if allocation_cache is None:
@@ -1611,6 +1614,8 @@ def simulate_asset_damage_recovery_access_breakdown(
                 cache_telemetry=_cache_telemetry,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
+        except SharedRealizedStateCacheError:
+            raise
         except Exception as _sa_err:
             import warnings
             warnings.warn(
