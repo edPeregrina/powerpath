@@ -167,6 +167,20 @@ def _reset_cache_db(cache_db_path: Path) -> None:
             pass
 
 
+def _evict_worker_shared_realized_state_cache_backends() -> None:
+    try:
+        from src import simulation as simulation_module
+    except Exception:
+        return
+
+    with simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
+        for backend in simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.values():
+            close = getattr(backend, "close", None)
+            if callable(close):
+                close()
+        simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.clear()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark societal realized-state cache behavior.")
     parser.add_argument("--factory", required=True, help="Dotted factory path module:function")
@@ -205,6 +219,7 @@ def main() -> int:
     records: List[Dict[str, Any]] = []
     for evaluator_cls, evaluator_kwargs, shared_cache_enabled in runs:
         if shared_cache_enabled:
+            _evict_worker_shared_realized_state_cache_backends()
             _reset_cache_db(cache_db_path)
         records.append(
             _run_one(
