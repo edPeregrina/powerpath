@@ -911,7 +911,6 @@ def _build_service_area_population_maps(
     returned value is always a fresh copy — a cache hit never hands out the
     same mutable dict twice.
     """
-    from src.caching import get_asset_centroid_hash
     from src.impacts import create_voronoi_for_asset_type
     from src.utils import build_voronoi_service_area_map
 
@@ -926,7 +925,6 @@ def _build_service_area_population_maps(
         geometry="geometry",
         crs=gdf_assets.crs,
     )
-    asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
     asset_state_digest = _service_area_asset_state_digest(working_assets)
 
     if service_area_function_provider_types is None:
