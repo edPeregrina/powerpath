@@ -23,8 +23,10 @@ import csv
 import importlib
 import json
 import time
+from contextlib import nullcontext
+from multiprocessing import Manager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, MutableMapping, Tuple
 
 from ema_workbench import MultiprocessingEvaluator, SequentialEvaluator, Samplers
 
@@ -66,8 +68,10 @@ def _configure_shared_cache(
     cache_db_path: Path,
     namespace: str,
     schema_version: str,
-) -> Dict[str, int]:
-    telemetry: Dict[str, int] = {}
+    telemetry: MutableMapping[str, int] | None = None,
+) -> MutableMapping[str, int]:
+    if telemetry is None:
+        telemetry = {}
     const = _get_constant(model, "societal_access_config")
     if const is None:
         raise RuntimeError("Model constant 'societal_access_config' is required for cache benchmarking")
@@ -103,21 +107,26 @@ def _run_one(
     model = context["model"]
     policies = context["policies"]
     uncertainty_sampling = context.get("uncertainty_sampling", Samplers.LHS)
-    telemetry = _configure_shared_cache(
-        model,
-        enabled=shared_cache_enabled,
-        cache_db_path=cache_db_path,
-        namespace=namespace,
-        schema_version=schema_version,
-    )
-    started = time.perf_counter()
-    with evaluator_cls(model, **evaluator_kwargs) as evaluator:
-        experiments, _outcomes = evaluator.perform_experiments(
-            scenarios=scenarios,
-            policies=policies,
-            uncertainty_sampling=uncertainty_sampling,
+    manager_context = Manager() if evaluator_cls is MultiprocessingEvaluator else nullcontext()
+    with manager_context as manager:
+        telemetry_store: MutableMapping[str, int] = manager.dict() if manager is not None else {}
+        telemetry = _configure_shared_cache(
+            model,
+            enabled=shared_cache_enabled,
+            cache_db_path=cache_db_path,
+            namespace=namespace,
+            schema_version=schema_version,
+            telemetry=telemetry_store,
         )
-    elapsed = time.perf_counter() - started
+        started = time.perf_counter()
+        with evaluator_cls(model, **evaluator_kwargs) as evaluator:
+            experiments, _outcomes = evaluator.perform_experiments(
+                scenarios=scenarios,
+                policies=policies,
+                uncertainty_sampling=uncertainty_sampling,
+            )
+        elapsed = time.perf_counter() - started
+        telemetry_snapshot = {k: int(v) for k, v in telemetry.items()}
     record = {
         "evaluator": evaluator_cls.__name__,
         "shared_cache_enabled": bool(shared_cache_enabled),
@@ -126,7 +135,7 @@ def _run_one(
         "scenarios": int(scenarios),
         "policies": int(len(policies)),
     }
-    record.update({k: int(v) for k, v in telemetry.items()})
+    record.update(telemetry_snapshot)
     return record
 
 
