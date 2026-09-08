@@ -4,6 +4,7 @@ Functions to run the damage and recovery simulation.
 
 import sys
 import pickle
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -58,6 +59,47 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from config import get_config
 from shutil import copyfile
+
+_WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS = {}
+_WORKER_SHARED_REALIZED_STATE_CACHE_LOCK = threading.Lock()
+
+
+def _worker_shared_realized_state_cache_key(cache_config, *, default_db_path):
+    if not cache_config or not cache_config.get("enabled", False):
+        return None
+    configured_path = cache_config.get("path")
+    db_path = configured_path if configured_path is not None else default_db_path
+    if db_path is None:
+        return None
+    normalized_db_path = str(Path(db_path).expanduser().resolve())
+    return (
+        str(cache_config.get("backend", "sqlite")).lower(),
+        normalized_db_path,
+        cache_config.get("namespace", "default"),
+        cache_config.get("schema_version"),
+        float(cache_config.get("timeout_seconds", 30.0)),
+        int(cache_config.get("busy_timeout_ms", 30000)),
+        int(cache_config.get("max_retries", 5)),
+        float(cache_config.get("retry_backoff_seconds", 0.05)),
+    )
+
+
+def _get_worker_shared_realized_state_cache_backend(cache_config, *, default_db_path):
+    cache_key = _worker_shared_realized_state_cache_key(
+        cache_config,
+        default_db_path=default_db_path,
+    )
+    if cache_key is None:
+        return None
+    with _WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
+        backend = _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.get(cache_key)
+        if backend is None:
+            backend = build_shared_realized_state_cache_from_config(
+                cache_config,
+                default_db_path=default_db_path,
+            )
+            _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS[cache_key] = backend
+        return backend
 
 
 def _get_active_adaptation(adaptation, active_timesteps, timestep):
@@ -1369,7 +1411,7 @@ def simulate_asset_damage_recovery_access_breakdown(
             _shared_realized_state_cache = _provided_shared_backend
         elif _shared_realized_state_cache_config:
             try:
-                _shared_realized_state_cache = build_shared_realized_state_cache_from_config(
+                _shared_realized_state_cache = _get_worker_shared_realized_state_cache_backend(
                     _shared_realized_state_cache_config,
                     default_db_path=interim_dir / "societal_realized_state_cache.sqlite",
                 )

@@ -14,6 +14,7 @@ from src.realized_state_cache import (
     SQLiteSharedRealizedStateCache,
 )
 import src.societal_access as societal_access_module
+import src.simulation as simulation_module
 from src.societal_access import (
     _build_realized_state_cache_key,
     _build_service_area_population_maps,
@@ -314,6 +315,36 @@ def test_sqlite_shared_cache_backend_is_pickle_safe(tmp_path):
     payload = pickle.dumps(backend)
     restored = pickle.loads(payload)
     assert isinstance(restored, SQLiteSharedRealizedStateCache)
+
+
+def test_worker_local_shared_backend_is_reused_per_normalized_config(monkeypatch, tmp_path):
+    calls = []
+    created_backend = object()
+
+    def _fake_builder(cache_config, *, default_db_path=None):
+        calls.append((cache_config, default_db_path))
+        return created_backend
+
+    monkeypatch.setattr(
+        simulation_module,
+        "build_shared_realized_state_cache_from_config",
+        _fake_builder,
+    )
+    simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.clear()
+
+    cfg = {"enabled": True, "backend": "sqlite", "namespace": "ns"}
+    backend_first = simulation_module._get_worker_shared_realized_state_cache_backend(
+        cfg,
+        default_db_path=tmp_path / "cache.sqlite",
+    )
+    backend_second = simulation_module._get_worker_shared_realized_state_cache_backend(
+        dict(cfg),
+        default_db_path=tmp_path / "." / "cache.sqlite",
+    )
+
+    assert backend_first is created_backend
+    assert backend_second is created_backend
+    assert len(calls) == 1
 
 
 def test_cache_off_vs_sqlite_shared_cache_outputs_are_equivalent(tmp_path):
