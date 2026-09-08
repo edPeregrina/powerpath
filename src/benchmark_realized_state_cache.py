@@ -176,8 +176,8 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 def _reset_cache_db(cache_db_path: Path) -> None:
     for path in (
         cache_db_path,
-        cache_db_path.with_suffix(f"{cache_db_path.suffix}-shm"),
-        cache_db_path.with_suffix(f"{cache_db_path.suffix}-wal"),
+        Path(f"{cache_db_path}-shm"),
+        Path(f"{cache_db_path}-wal"),
     ):
         try:
             path.unlink()
