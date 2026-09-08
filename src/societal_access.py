@@ -1697,9 +1697,10 @@ def postprocess_societal_access_results(
                 try:
                     _backend_stats = shared_realized_state_cache.get_stats()
                     for _metric_name, _metric_value in _backend_stats.items():
-                        cache_telemetry[f"shared_backend_{_metric_name}"] = int(_metric_value)
+                        _telemetry_key = f"shared_backend_{_metric_name}"
+                        cache_telemetry[_telemetry_key] = cache_telemetry.get(_telemetry_key, 0) + int(_metric_value)
                 except Exception:
-                    cache_telemetry["shared_backend_stats_error"] = 1
+                    cache_telemetry["shared_backend_stats_error"] = cache_telemetry.get("shared_backend_stats_error", 0) + 1
 
     return summary_results, allocation_cache
 
