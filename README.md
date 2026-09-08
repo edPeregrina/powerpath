@@ -18,6 +18,15 @@ Configure in `societal_access_config`:
 
 The realised-state key is label-invariant with respect to raw island ID renumbering.
 
+For reproducible benchmark telemetry from CLI (sequential vs multiprocessing; cache on/off), run:
+
+`python -m src.benchmark_realized_state_cache --factory <module>:<function> --scenarios 10 --n-processes 4 --out-json /tmp/realized_cache_benchmark.json --out-csv /tmp/realized_cache_benchmark.csv`
+
+Factory function contract:
+- returns a dict with `model` and `policies`
+- may optionally include `uncertainty_sampling`
+- `model` must include EMA constant `societal_access_config`
+
 ![Model flowchart](images/fig_s4_flowchart.png)
 
 ### MIRACA

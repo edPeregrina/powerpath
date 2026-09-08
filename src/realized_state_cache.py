@@ -53,6 +53,7 @@ class SQLiteSharedRealizedStateCache:
         self.max_retries = int(max_retries)
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self._stats_lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
         self._stats: Dict[str, int] = {
             "lookups": 0,
             "hits": 0,
@@ -69,34 +70,32 @@ class SQLiteSharedRealizedStateCache:
             self._stats[name] = self._stats.get(name, 0) + value
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=self.timeout_seconds,
-            isolation_level=None,
-            check_same_thread=False,
-        )
-        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = FULL")
-        return conn
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                str(self.db_path),
+                timeout=self.timeout_seconds,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            self._conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA synchronous = FULL")
+        return self._conn
 
     def _init_db(self) -> None:
         conn = self._connect()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS realized_state_cache (
-                    namespace TEXT NOT NULL,
-                    schema_version TEXT NOT NULL,
-                    cache_key TEXT NOT NULL,
-                    payload BLOB NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    PRIMARY KEY (namespace, schema_version, cache_key)
-                )
-                """
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS realized_state_cache (
+                namespace TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                cache_key TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                PRIMARY KEY (namespace, schema_version, cache_key)
             )
-        finally:
-            conn.close()
+            """
+        )
 
     def _is_lock_error(self, exc: Exception) -> bool:
         msg = str(exc).lower()
@@ -126,8 +125,6 @@ class SQLiteSharedRealizedStateCache:
         except Exception:
             self._add_stat("errors")
             return None
-        finally:
-            conn.close()
 
     def set_if_absent(self, cache_key: str, fields: Dict[str, float]) -> bool:
         payload = pickle.dumps(dict(fields), protocol=4)
@@ -160,14 +157,35 @@ class SQLiteSharedRealizedStateCache:
                     continue
                 self._add_stat("errors")
                 return False
-            finally:
-                conn.close()
         self._add_stat("errors")
         return False
 
     def get_stats(self) -> Dict[str, int]:
         with self._stats_lock:
             return dict(self._stats)
+
+    def close(self) -> None:
+        """Close the underlying SQLite connection if open."""
+        conn = self._conn
+        self._conn = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Pickle-safe state for spawn-based multiprocessing."""
+        self.close()
+        state = dict(self.__dict__)
+        state["_stats_lock"] = None
+        state["_conn"] = None
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._stats_lock = threading.Lock()
+        self._conn = None
 
 
 def build_shared_realized_state_cache_from_config(

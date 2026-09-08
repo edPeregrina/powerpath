@@ -1,5 +1,6 @@
 import copy
 import multiprocessing as mp
+import pickle
 import sqlite3
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from shapely.geometry import Point, box
 
 from src.realized_state_cache import SQLiteSharedRealizedStateCache
+import src.societal_access as societal_access_module
 from src.societal_access import postprocess_societal_access_results
 
 
@@ -185,3 +187,37 @@ def test_sqlite_shared_cache_is_atomic_under_multiprocess_contention(tmp_path):
         conn.close()
 
     assert count == 1
+
+
+def test_shared_key_builder_not_used_when_shared_cache_disabled(monkeypatch):
+    kwargs = _common_kwargs(shared_cache=None, cache_telemetry={})
+    kwargs["islands_gdf_cache"] = {"roads": _make_islands((1, 2))}
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("shared key builder should not run when shared cache is disabled")
+
+    monkeypatch.setattr(
+        societal_access_module,
+        "_build_realized_state_cache_key",
+        _fail_if_called,
+    )
+
+    updated, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0, "map": 0}],
+        detailed_results=[{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": "roads",
+            "operational": np.array([True, False]),
+            "island_id": np.array([1, 2]),
+        }],
+        **kwargs,
+    )
+    assert np.isfinite(updated[0]["societal_access_pct__hospital__total"])
+
+
+def test_sqlite_shared_cache_backend_is_pickle_safe(tmp_path):
+    backend = SQLiteSharedRealizedStateCache(tmp_path / "pickle_safe.sqlite")
+    payload = pickle.dumps(backend)
+    restored = pickle.loads(payload)
+    assert isinstance(restored, SQLiteSharedRealizedStateCache)

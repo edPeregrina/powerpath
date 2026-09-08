@@ -1312,6 +1312,7 @@ def postprocess_societal_access_results(
 
     # Precompute numpy arrays and positions for service area population maps
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
+    _shared_realized_key_cache: Dict[Any, str] = {}
     _cache_metrics: Dict[str, int] = {
         "local_lookups": 0,
         "local_hits": 0,
@@ -1513,27 +1514,12 @@ def postprocess_societal_access_results(
 
                 # Compute the cache key for the scalar fields and compute scalar values if cache miss.
                 with profiler.section("societal_access.compute_scalars.cache_key"):
-                    _shared_cache_key = _build_realized_state_cache_key(
-                        frozen_island_function_map=frozen_island_function_map,
-                        operational_asset_ids_by_function=operational_asset_ids_by_function,
-                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
-                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
-                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
-                        all_functions=all_functions,
-                        pop_group_columns=pop_group_columns,
-                        reference_group=reference_group,
-                        service_area_function_provider_types=service_area_function_provider_types,
-                        allocation_df=allocation_df,
+                    _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                    _op_signature = tuple(
+                        (func, frozenset(ids))
+                        for func, ids in sorted(operational_asset_ids_by_function.items())
                     )
-                    if _shared_cache_key:
-                        _scalar_cache_key = ("shared_state_v2", _shared_cache_key)
-                    else:
-                        _frozen_ifm_key = frozenset(frozen_island_function_map.items())
-                        _op_signature = tuple(
-                            (func, frozenset(ids))
-                            for func, ids in sorted(operational_asset_ids_by_function.items())
-                        )
-                        _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
+                    _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
                     _cache_metrics["local_lookups"] += 1
                     _scalar_cache_hit = _scalar_cache_key in _scalar_fields_cache
                     if _scalar_cache_hit:
@@ -1549,6 +1535,24 @@ def postprocess_societal_access_results(
                         societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
                 else:
                     _shared_cache_hit = False
+                    _shared_cache_key = ""
+                    if shared_realized_state_cache is not None:
+                        _shared_cache_key = _shared_realized_key_cache.get(_scalar_cache_key, "")
+                        if not _shared_cache_key:
+                            _shared_cache_key = _build_realized_state_cache_key(
+                                frozen_island_function_map=frozen_island_function_map,
+                                operational_asset_ids_by_function=operational_asset_ids_by_function,
+                                island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                                total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                                available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                                all_functions=all_functions,
+                                pop_group_columns=pop_group_columns,
+                                reference_group=reference_group,
+                                service_area_function_provider_types=service_area_function_provider_types,
+                                allocation_df=allocation_df,
+                            )
+                            if _shared_cache_key:
+                                _shared_realized_key_cache[_scalar_cache_key] = _shared_cache_key
                     if _shared_cache_key and shared_realized_state_cache is not None:
                         _cache_metrics["shared_lookups"] += 1
                         try:
