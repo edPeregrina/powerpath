@@ -373,6 +373,13 @@ def test_shared_cache_hits_when_identical_state_repeats(tmp_path):
     assert second_telemetry.get("shared_misses", 0) == 0
 
 
+def test_cache_telemetry_omits_cumulative_backend_stats(tmp_path):
+    shared_cache = SQLiteSharedRealizedStateCache(tmp_path / "backend_stats.sqlite")
+    telemetry = {}
+    _run_once(shared_cache=shared_cache, telemetry=telemetry)
+    assert not any(key.startswith("shared_backend_") for key in telemetry)
+
+
 @pytest.mark.parametrize(
     "variant",
     [

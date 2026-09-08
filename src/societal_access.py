@@ -1693,14 +1693,6 @@ def postprocess_societal_access_results(
         with cache_telemetry_lock if cache_telemetry_lock is not None else nullcontext():
             for _metric_name, _metric_value in _cache_metrics.items():
                 cache_telemetry[_metric_name] = cache_telemetry.get(_metric_name, 0) + int(_metric_value)
-            if shared_realized_state_cache is not None and hasattr(shared_realized_state_cache, "get_stats"):
-                try:
-                    _backend_stats = shared_realized_state_cache.get_stats()
-                    for _metric_name, _metric_value in _backend_stats.items():
-                        _telemetry_key = f"shared_backend_{_metric_name}"
-                        cache_telemetry[_telemetry_key] = cache_telemetry.get(_telemetry_key, 0) + int(_metric_value)
-                except Exception:
-                    cache_telemetry["shared_backend_stats_error"] = cache_telemetry.get("shared_backend_stats_error", 0) + 1
 
     return summary_results, allocation_cache
 
