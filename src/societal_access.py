@@ -39,6 +39,7 @@ make that one call fast and repeatable across EMA experiments.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import warnings
@@ -1169,6 +1170,7 @@ def postprocess_societal_access_results(
     shared_realized_state_cache: Optional[Any] = None,
     shared_cache_fail_hard: bool = False,
     cache_telemetry: Optional[Dict[str, int]] = None,
+    cache_telemetry_lock: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1345,7 +1347,7 @@ def postprocess_societal_access_results(
             asset_type_column=asset_type_column,
             service_area_function_provider_types=service_area_function_provider_types,
         )
-service_area_maps_digest = (
+    service_area_maps_digest = (
         _service_area_population_maps_digest(service_area_population_maps)
         if shared_realized_state_cache is not None
         else ""
@@ -1688,15 +1690,16 @@ service_area_maps_digest = (
                 ts_summary["allocation_road_state_key"] = road_state_key
 
     if cache_telemetry is not None:
-        for _metric_name, _metric_value in _cache_metrics.items():
-            cache_telemetry[_metric_name] = cache_telemetry.get(_metric_name, 0) + int(_metric_value)
-        if shared_realized_state_cache is not None and hasattr(shared_realized_state_cache, "get_stats"):
-            try:
-                _backend_stats = shared_realized_state_cache.get_stats()
-                for _metric_name, _metric_value in _backend_stats.items():
-                    cache_telemetry[f"shared_backend_{_metric_name}"] = int(_metric_value)
-            except Exception:
-                cache_telemetry["shared_backend_stats_error"] = 1
+        with cache_telemetry_lock if cache_telemetry_lock is not None else nullcontext():
+            for _metric_name, _metric_value in _cache_metrics.items():
+                cache_telemetry[_metric_name] = cache_telemetry.get(_metric_name, 0) + int(_metric_value)
+            if shared_realized_state_cache is not None and hasattr(shared_realized_state_cache, "get_stats"):
+                try:
+                    _backend_stats = shared_realized_state_cache.get_stats()
+                    for _metric_name, _metric_value in _backend_stats.items():
+                        cache_telemetry[f"shared_backend_{_metric_name}"] = int(_metric_value)
+                except Exception:
+                    cache_telemetry["shared_backend_stats_error"] = 1
 
     return summary_results, allocation_cache
 

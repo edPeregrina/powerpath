@@ -48,7 +48,7 @@ def _make_islands(base_ids=(1, 2)):
     )
 
 
-def _common_kwargs(shared_cache=None, cache_telemetry=None):
+def _common_kwargs(shared_cache=None, cache_telemetry=None, cache_telemetry_lock=None):
     return dict(
         gdf_assets=_make_assets(),
         pop_grid_gdf=_make_population(),
@@ -59,6 +59,7 @@ def _common_kwargs(shared_cache=None, cache_telemetry=None):
         islands_gdf_cache={},
         shared_realized_state_cache=shared_cache,
         cache_telemetry=cache_telemetry,
+        cache_telemetry_lock=cache_telemetry_lock,
     )
 
 
@@ -79,6 +80,7 @@ def _run_once(
     *,
     shared_cache=None,
     telemetry=None,
+    telemetry_lock=None,
     islands_ids=(1, 2),
     road_state_key="roads",
     operational=None,
@@ -89,7 +91,11 @@ def _run_once(
     if operational is None:
         operational = np.array([True, False])
     summary, detailed = _single_timestep(road_state_key, islands_ids, operational)
-    kwargs = _common_kwargs(shared_cache=shared_cache, cache_telemetry=telemetry)
+    kwargs = _common_kwargs(
+        shared_cache=shared_cache,
+        cache_telemetry=telemetry,
+        cache_telemetry_lock=telemetry_lock,
+    )
     kwargs["islands_gdf_cache"] = {road_state_key: _make_islands(islands_ids)}
     if pop_grid_gdf is not None:
         kwargs["pop_grid_gdf"] = pop_grid_gdf
@@ -102,6 +108,33 @@ def _run_once(
         **kwargs,
     )
     return result
+
+
+class _LockAwareTelemetry(dict):
+    def __init__(self):
+        super().__init__()
+        self.lock_held = False
+
+    def get(self, key, default=None):
+        assert self.lock_held
+        return super().get(key, default)
+
+    def __setitem__(self, key, value):
+        assert self.lock_held
+        super().__setitem__(key, value)
+
+
+class _RecordingLock:
+    def __init__(self, telemetry):
+        self.telemetry = telemetry
+
+    def __enter__(self):
+        self.telemetry.lock_held = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.telemetry.lock_held = False
+        return False
 
 
 def test_shared_cache_is_label_invariant_across_island_id_renumbering(tmp_path):
@@ -196,6 +229,16 @@ def test_shared_cache_failure_raises_when_fail_hard_enabled():
             shared_cache_fail_hard=True,
             **kwargs,
         )
+
+
+def test_cache_telemetry_updates_hold_provided_lock():
+    telemetry = _LockAwareTelemetry()
+    lock = _RecordingLock(telemetry)
+
+    updated = _run_once(telemetry=telemetry, telemetry_lock=lock)
+
+    assert np.isfinite(updated[0]["societal_access_pct__hospital__total"])
+    assert dict.get(telemetry, "local_hits", 0) >= 0
 
 
 def _contended_insert_worker(db_path: str, value: int) -> None:

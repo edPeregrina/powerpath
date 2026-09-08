@@ -1350,6 +1350,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     _shared_realized_state_cache_config = None
     _shared_cache_fail_hard = False
     _cache_telemetry = None
+    _cache_telemetry_lock = None
     if societal_access_config is not None:
         allocation_cache = societal_access_config.get("allocation_cache")
         if allocation_cache is None:
@@ -1362,6 +1363,7 @@ def simulate_asset_damage_recovery_access_breakdown(
             societal_access_config.get("shared_cache_fail_hard", False)
         )
         _cache_telemetry = societal_access_config.get("cache_telemetry")
+        _cache_telemetry_lock = societal_access_config.get("cache_telemetry_lock")
         _provided_shared_backend = societal_access_config.get("shared_realized_state_cache")
         if _provided_shared_backend is not None:
             _shared_realized_state_cache = _provided_shared_backend
@@ -1612,6 +1614,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                 shared_realized_state_cache=_run_shared_realized_state_cache,
                 shared_cache_fail_hard=_shared_cache_fail_hard,
                 cache_telemetry=_cache_telemetry,
+                cache_telemetry_lock=_cache_telemetry_lock,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except SharedRealizedStateCacheError:

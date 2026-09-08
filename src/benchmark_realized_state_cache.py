@@ -69,6 +69,7 @@ def _configure_shared_cache(
     namespace: str,
     schema_version: str,
     telemetry: MutableMapping[str, int] | None = None,
+    telemetry_lock: Any | None = None,
 ) -> MutableMapping[str, int]:
     if telemetry is None:
         telemetry = {}
@@ -78,6 +79,7 @@ def _configure_shared_cache(
     config = copy.deepcopy(getattr(const, "value", {}) or {})
     config.pop("shared_realized_state_cache", None)
     config["cache_telemetry"] = telemetry
+    config["cache_telemetry_lock"] = telemetry_lock
     if enabled:
         config["shared_realized_state_cache_config"] = {
             "enabled": True,
@@ -110,6 +112,7 @@ def _run_one(
     manager_context = Manager() if evaluator_cls is MultiprocessingEvaluator else nullcontext()
     with manager_context as manager:
         telemetry_store: MutableMapping[str, int] = manager.dict() if manager is not None else {}
+        telemetry_lock = manager.Lock() if manager is not None else None
         telemetry = _configure_shared_cache(
             model,
             enabled=shared_cache_enabled,
@@ -117,6 +120,7 @@ def _run_one(
             namespace=namespace,
             schema_version=schema_version,
             telemetry=telemetry_store,
+            telemetry_lock=telemetry_lock,
         )
         started = time.perf_counter()
         with evaluator_cls(model, **evaluator_kwargs) as evaluator:
