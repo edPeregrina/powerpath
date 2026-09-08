@@ -268,6 +268,7 @@ def test_sqlite_shared_cache_backend_is_pickle_safe(tmp_path):
 def test_cache_off_vs_sqlite_shared_cache_outputs_are_equivalent(tmp_path):
     cache_off = _run_once(shared_cache=None, telemetry={})
     shared_cache = SQLiteSharedRealizedStateCache(tmp_path / "equivalence.sqlite")
+    _run_once(shared_cache=shared_cache, telemetry={})
     cache_on = _run_once(shared_cache=shared_cache, telemetry={})
     keys = [k for k in cache_off[0].keys() if k.startswith("societal_")]
     assert keys
