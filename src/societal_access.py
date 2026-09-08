@@ -85,10 +85,100 @@ _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
 }
+_REALIZED_STATE_CACHE_KEY_VERSION = "2.0.0"
 
 def _expand_function_category_equivalents(function_name: str) -> FrozenSet[str]:
     """Return equivalent function-category labels for compatibility outputs."""
     return _FUNCTION_CATEGORY_EQUIVALENTS.get(function_name, frozenset({function_name}))
+
+
+def _stable_value_token(value: Any) -> str:
+    """Stable token for heterogeneous hash-key values."""
+    return f"{type(value).__name__}:{value!r}"
+
+
+def _canonical_operational_signature(
+    operational_asset_ids_by_function: Dict[str, Set[Any]],
+) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    """Canonical function→provider signature independent of insertion order."""
+    return tuple(
+        (
+            str(func),
+            tuple(sorted(_stable_value_token(provider_id) for provider_id in ids)),
+        )
+        for func, ids in sorted(operational_asset_ids_by_function.items(), key=lambda kv: str(kv[0]))
+    )
+
+
+def _build_label_invariant_island_profiles(
+    frozen_island_function_map: Dict[int, FrozenSet[str]],
+    island_pop: pd.DataFrame,
+    available_group_cols: Dict[str, str],
+) -> Tuple[Tuple[Tuple[str, ...], Tuple[float, ...]], ...]:
+    """Canonical island profiles that are invariant to island ID renumbering."""
+    if island_pop is None or island_pop.empty or not available_group_cols:
+        return tuple()
+
+    sorted_groups = sorted(available_group_cols.items(), key=lambda kv: str(kv[0]))
+    profiles: List[Tuple[Tuple[str, ...], Tuple[float, ...]]] = []
+    for island_id in island_pop.index:
+        try:
+            island_int = int(island_id)
+        except Exception:
+            continue
+        funcs = tuple(sorted(str(f) for f in frozen_island_function_map.get(island_int, frozenset())))
+        pop_vector = tuple(float(island_pop.loc[island_id, col]) for _, col in sorted_groups)
+        profiles.append((funcs, pop_vector))
+    return tuple(sorted(profiles))
+
+
+def _build_realized_state_cache_key(
+    *,
+    frozen_island_function_map: Dict[int, FrozenSet[str]],
+    operational_asset_ids_by_function: Dict[str, Set[Any]],
+    island_pop: Optional[pd.DataFrame],
+    total_pop: Optional[Dict[str, float]],
+    available_group_cols: Optional[Dict[str, str]],
+    all_functions: List[str],
+    pop_group_columns: Dict[str, str],
+    reference_group: str,
+    service_area_function_provider_types: Dict[str, FrozenSet[str]],
+    allocation_df: Optional[pd.DataFrame],
+) -> str:
+    """Build a label-invariant realized-state cache key."""
+    if island_pop is None or total_pop is None or available_group_cols is None:
+        return ""
+
+    allocation_attrs = allocation_df.attrs if allocation_df is not None else {}
+    key_dict: Dict[str, Any] = {
+        "version": _REALIZED_STATE_CACHE_KEY_VERSION,
+        "allocation_algorithm_version": str(
+            allocation_attrs.get("allocation_algorithm_version", ALLOCATION_ALGORITHM_VERSION)
+        ),
+        "population_grid_hash": str(allocation_attrs.get("population_grid_hash")),
+        "cell_id_hash": str(allocation_attrs.get("cell_id_hash")),
+        "nearest_max_distance": float(allocation_attrs.get("nearest_max_distance", 200.0)),
+        "all_functions": tuple(sorted(str(f) for f in all_functions)),
+        "pop_group_labels": tuple(sorted(str(label) for label in pop_group_columns.keys())),
+        "reference_group": str(reference_group),
+        "service_area_function_provider_types": _canonicalize_service_area_provider_types(
+            service_area_function_provider_types
+        ),
+        "operational_signature": _canonical_operational_signature(
+            operational_asset_ids_by_function
+        ),
+        "total_population": tuple(
+            (str(label), float(total_pop.get(label, 0.0)))
+            for label in sorted(total_pop.keys(), key=str)
+        ),
+        "island_profiles": _build_label_invariant_island_profiles(
+            frozen_island_function_map=frozen_island_function_map,
+            island_pop=island_pop,
+            available_group_cols=available_group_cols,
+        ),
+    }
+    key_str = json.dumps(key_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(key_str.encode()).hexdigest()
 
 
 def _geometry_hash(gdf: gpd.GeoDataFrame) -> str:
@@ -1013,6 +1103,9 @@ def postprocess_societal_access_results(
     profiler: Optional[Any] = NULL_PROFILER,
     pop_grid_area_warn_buffer_m: float = 5000.0,
     pop_grid_area_warn_ratio: float = 25.0,
+    shared_realized_state_cache: Optional[Any] = None,
+    shared_cache_fail_hard: bool = False,
+    cache_telemetry: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
@@ -1101,6 +1194,8 @@ def postprocess_societal_access_results(
         taxonomy = SERVICE_NODE_TAXONOMY
     if allocation_cache is None:
         allocation_cache = {}
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
 
     # Determine asset types for service-node filtering
     asset_types = gdf_assets[asset_type_column].values if asset_type_column in gdf_assets.columns else np.array(["unknown"] * len(gdf_assets))
@@ -1217,6 +1312,17 @@ def postprocess_societal_access_results(
 
     # Precompute numpy arrays and positions for service area population maps
     _scalar_fields_cache: Dict[Any, Dict[str, float]] = {}
+    _cache_metrics: Dict[str, int] = {
+        "local_lookups": 0,
+        "local_hits": 0,
+        "local_misses": 0,
+        "shared_lookups": 0,
+        "shared_hits": 0,
+        "shared_misses": 0,
+        "shared_writes": 0,
+        "shared_write_conflicts": 0,
+        "shared_errors": 0,
+    }
     _service_area_numpy: Dict[str, Dict[str, Any]] = {}
     _service_area_positions: Dict[str, Dict[str, Dict[Any, int]]] = {}
     for _func, _group_maps in service_area_population_maps.items():
@@ -1407,13 +1513,33 @@ def postprocess_societal_access_results(
 
                 # Compute the cache key for the scalar fields and compute scalar values if cache miss.
                 with profiler.section("societal_access.compute_scalars.cache_key"):
-                    _frozen_ifm_key = frozenset(frozen_island_function_map.items())
-                    _op_signature = tuple(
-                        (func, frozenset(ids))
-                        for func, ids in sorted(operational_asset_ids_by_function.items())
+                    _shared_cache_key = _build_realized_state_cache_key(
+                        frozen_island_function_map=frozen_island_function_map,
+                        operational_asset_ids_by_function=operational_asset_ids_by_function,
+                        island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                        total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                        available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                        all_functions=all_functions,
+                        pop_group_columns=pop_group_columns,
+                        reference_group=reference_group,
+                        service_area_function_provider_types=service_area_function_provider_types,
+                        allocation_df=allocation_df,
                     )
-                    _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
+                    if _shared_cache_key:
+                        _scalar_cache_key = ("shared_state_v2", _shared_cache_key)
+                    else:
+                        _frozen_ifm_key = frozenset(frozen_island_function_map.items())
+                        _op_signature = tuple(
+                            (func, frozenset(ids))
+                            for func, ids in sorted(operational_asset_ids_by_function.items())
+                        )
+                        _scalar_cache_key = (allocation_cache_key, _frozen_ifm_key, _op_signature)
+                    _cache_metrics["local_lookups"] += 1
                     _scalar_cache_hit = _scalar_cache_key in _scalar_fields_cache
+                    if _scalar_cache_hit:
+                        _cache_metrics["local_hits"] += 1
+                    else:
+                        _cache_metrics["local_misses"] += 1
 
                 if _scalar_cache_hit:
                     with profiler.section("societal_access.compute_scalars.cache_hit"):
@@ -1422,36 +1548,78 @@ def postprocess_societal_access_results(
                         # `fields` argument in place, so always return a copy.
                         societal_fields = dict(_scalar_fields_cache[_scalar_cache_key])
                 else:
-                    with profiler.section("societal_access.compute_scalars.cache_miss"):
-                        societal_fields = _compute_societal_scalars(
-                            frozen_island_function_map=frozen_island_function_map,
-                            allocation_df=allocation_df,
-                            pop_grid_gdf=pop_grid_gdf,
-                            cell_id_column=cell_id_column,
-                            pop_group_columns=pop_group_columns,
-                            all_functions=all_functions,
-                            reference_group=reference_group,
-                            island_pop=_cached_entry["island_pop"] if _cached_entry else None,
-                            total_pop=_cached_entry["total_pop"] if _cached_entry else None,
-                            available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
-                        )
+                    _shared_cache_hit = False
+                    if _shared_cache_key and shared_realized_state_cache is not None:
+                        _cache_metrics["shared_lookups"] += 1
+                        try:
+                            _shared_fields = shared_realized_state_cache.get(_shared_cache_key)
+                            if isinstance(_shared_fields, dict):
+                                societal_fields = dict(_shared_fields)
+                                _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+                                _cache_metrics["shared_hits"] += 1
+                                _shared_cache_hit = True
+                            else:
+                                _cache_metrics["shared_misses"] += 1
+                        except Exception:
+                            _cache_metrics["shared_errors"] += 1
+                            if shared_cache_fail_hard:
+                                raise
 
-                        # Apply service area societal scalars to the computed societal fields.
-                        societal_fields = _apply_service_area_societal_scalars(
-                            societal_fields,
-                            operational_asset_ids_by_function=operational_asset_ids_by_function,
-                            service_area_population_maps=service_area_population_maps,
-                            pop_group_columns=pop_group_columns,
-                            reference_group=reference_group,
-                            numpy_maps=_service_area_numpy if _service_area_numpy else None,
-                            position_maps=_service_area_positions if _service_area_positions else None,
-                        )
-                        _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+                    if not _shared_cache_hit:
+                        with profiler.section("societal_access.compute_scalars.cache_miss"):
+                            societal_fields = _compute_societal_scalars(
+                                frozen_island_function_map=frozen_island_function_map,
+                                allocation_df=allocation_df,
+                                pop_grid_gdf=pop_grid_gdf,
+                                cell_id_column=cell_id_column,
+                                pop_group_columns=pop_group_columns,
+                                all_functions=all_functions,
+                                reference_group=reference_group,
+                                island_pop=_cached_entry["island_pop"] if _cached_entry else None,
+                                total_pop=_cached_entry["total_pop"] if _cached_entry else None,
+                                available_group_cols=_cached_entry["available_group_cols"] if _cached_entry else None,
+                            )
+
+                            # Apply service area societal scalars to the computed societal fields.
+                            societal_fields = _apply_service_area_societal_scalars(
+                                societal_fields,
+                                operational_asset_ids_by_function=operational_asset_ids_by_function,
+                                service_area_population_maps=service_area_population_maps,
+                                pop_group_columns=pop_group_columns,
+                                reference_group=reference_group,
+                                numpy_maps=_service_area_numpy if _service_area_numpy else None,
+                                position_maps=_service_area_positions if _service_area_positions else None,
+                            )
+                            _scalar_fields_cache[_scalar_cache_key] = dict(societal_fields)
+                            if _shared_cache_key and shared_realized_state_cache is not None:
+                                try:
+                                    _inserted = shared_realized_state_cache.set_if_absent(
+                                        _shared_cache_key, dict(societal_fields)
+                                    )
+                                    if _inserted:
+                                        _cache_metrics["shared_writes"] += 1
+                                    else:
+                                        _cache_metrics["shared_write_conflicts"] += 1
+                                except Exception:
+                                    _cache_metrics["shared_errors"] += 1
+                                    if shared_cache_fail_hard:
+                                        raise
 
             with profiler.section("societal_access.merge_fields"):
                 ts_summary.update(societal_fields)
                 ts_summary["allocation_cache_key"] = allocation_cache_key
                 ts_summary["allocation_road_state_key"] = road_state_key
+
+    if cache_telemetry is not None:
+        for _metric_name, _metric_value in _cache_metrics.items():
+            cache_telemetry[_metric_name] = cache_telemetry.get(_metric_name, 0) + int(_metric_value)
+        if shared_realized_state_cache is not None and hasattr(shared_realized_state_cache, "get_stats"):
+            try:
+                _backend_stats = shared_realized_state_cache.get_stats()
+                for _metric_name, _metric_value in _backend_stats.items():
+                    cache_telemetry[f"shared_backend_{_metric_name}"] = int(_metric_value)
+            except Exception:
+                cache_telemetry["shared_backend_stats_error"] = 1
 
     return summary_results, allocation_cache
 
@@ -1653,4 +1821,3 @@ def list_societal_metric_names(
             names.append(f"societal_equity_absolute_gap__{func}__{group}")
             names.append(f"societal_equity_relative_gap__{func}__{group}")
     return names
-

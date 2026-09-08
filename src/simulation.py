@@ -25,6 +25,7 @@ from src.caching import (
     load_overlap_cache,
     load_societal_allocation_cache,
 )
+from src.realized_state_cache import build_shared_realized_state_cache_from_config
 from src.damage_recovery import (
     default_damage_ratio_function,
     default_fragility_function,
@@ -1350,6 +1351,24 @@ def simulate_asset_damage_recovery_access_breakdown(
         if allocation_cache is None:
             allocation_cache = load_societal_allocation_cache(interim_dir, hazard_dir)
             societal_access_config["allocation_cache"] = allocation_cache
+        if societal_access_config.get("shared_realized_state_cache") is None:
+            shared_cache_cfg = societal_access_config.get("shared_realized_state_cache_config")
+            if shared_cache_cfg:
+                try:
+                    societal_access_config["shared_realized_state_cache"] = (
+                        build_shared_realized_state_cache_from_config(
+                            shared_cache_cfg,
+                            default_db_path=interim_dir / "societal_realized_state_cache.sqlite",
+                        )
+                    )
+                except Exception as _shared_cache_err:
+                    import warnings
+                    warnings.warn(
+                        f"Shared realized-state cache setup failed; continuing without shared cache: {_shared_cache_err}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    societal_access_config["shared_realized_state_cache"] = None
 
     # Results tracking for this simulation
     results = []
@@ -1576,6 +1595,9 @@ def simulate_asset_damage_recovery_access_breakdown(
                 fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
                 verbose=_sa_cfg.get("verbose", verbose),
                 profiler=profiler,
+                shared_realized_state_cache=_sa_cfg.get("shared_realized_state_cache"),
+                shared_cache_fail_hard=_sa_cfg.get("shared_cache_fail_hard", False),
+                cache_telemetry=_sa_cfg.get("cache_telemetry"),
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
         except Exception as _sa_err:
