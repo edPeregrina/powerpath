@@ -806,7 +806,7 @@ def _service_area_asset_state_digest(working_assets: gpd.GeoDataFrame) -> str:
     """Deterministic digest of service-area-relevant asset state."""
     digest = hashlib.sha256()
     digest.update(str(working_assets.crs).encode())
-    for asset_id in sorted(working_assets.index, key=_stable_value_token):
+    for asset_id in working_assets.index:
         row = working_assets.loc[asset_id]
         digest.update(_stable_value_token(asset_id).encode())
         digest.update(_stable_value_token(row.get("type")).encode())
