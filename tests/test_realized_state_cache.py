@@ -57,6 +57,48 @@ def _common_kwargs(shared_cache=None, cache_telemetry=None):
     )
 
 
+def _single_timestep(road_state_key: str, island_ids: tuple[int, int], operational: np.ndarray):
+    return (
+        [{"timestep": 0, "map": 0}],
+        [{
+            "timestep": 0,
+            "map": 0,
+            "road_state_key": road_state_key,
+            "operational": operational,
+            "island_id": np.array([island_ids[0], island_ids[1]]),
+        }],
+    )
+
+
+def _run_once(
+    *,
+    shared_cache=None,
+    telemetry=None,
+    islands_ids=(1, 2),
+    road_state_key="roads",
+    operational=None,
+    pop_grid_gdf=None,
+    all_functions=None,
+    reference_group="total",
+):
+    if operational is None:
+        operational = np.array([True, False])
+    summary, detailed = _single_timestep(road_state_key, islands_ids, operational)
+    kwargs = _common_kwargs(shared_cache=shared_cache, cache_telemetry=telemetry)
+    kwargs["islands_gdf_cache"] = {road_state_key: _make_islands(islands_ids)}
+    if pop_grid_gdf is not None:
+        kwargs["pop_grid_gdf"] = pop_grid_gdf
+    if all_functions is not None:
+        kwargs["all_functions"] = all_functions
+    result, _ = postprocess_societal_access_results(
+        summary_results=copy.deepcopy(summary),
+        detailed_results=detailed,
+        reference_group=reference_group,
+        **kwargs,
+    )
+    return result
+
+
 def test_shared_cache_is_label_invariant_across_island_id_renumbering(tmp_path):
     db_path = tmp_path / "shared_state.sqlite"
     shared_cache = SQLiteSharedRealizedStateCache(db_path)
@@ -221,3 +263,104 @@ def test_sqlite_shared_cache_backend_is_pickle_safe(tmp_path):
     payload = pickle.dumps(backend)
     restored = pickle.loads(payload)
     assert isinstance(restored, SQLiteSharedRealizedStateCache)
+
+
+def test_cache_off_vs_sqlite_shared_cache_outputs_are_equivalent(tmp_path):
+    cache_off = _run_once(shared_cache=None, telemetry={})
+    shared_cache = SQLiteSharedRealizedStateCache(tmp_path / "equivalence.sqlite")
+    cache_on = _run_once(shared_cache=shared_cache, telemetry={})
+    keys = [k for k in cache_off[0].keys() if k.startswith("societal_")]
+    assert keys
+    for key in keys:
+        left = float(cache_off[0][key])
+        right = float(cache_on[0][key])
+        if np.isnan(left) and np.isnan(right):
+            continue
+        assert left == pytest.approx(right)
+
+
+def test_shared_cache_hits_when_identical_state_repeats(tmp_path):
+    shared_cache = SQLiteSharedRealizedStateCache(tmp_path / "repeat.sqlite")
+    first_telemetry = {}
+    second_telemetry = {}
+    _run_once(shared_cache=shared_cache, telemetry=first_telemetry)
+    _run_once(shared_cache=shared_cache, telemetry=second_telemetry)
+    assert first_telemetry.get("shared_misses", 0) >= 1
+    assert second_telemetry.get("shared_hits", 0) >= 1
+    assert second_telemetry.get("shared_misses", 0) == 0
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "operational_signature",
+        "population_distribution",
+        "reference_group",
+        "function_set",
+    ],
+)
+def test_shared_cache_key_sensitivity_matrix_misses_on_determinant_change(tmp_path, variant):
+    shared_cache = SQLiteSharedRealizedStateCache(tmp_path / f"sensitivity_{variant}.sqlite")
+    _run_once(shared_cache=shared_cache, telemetry={})
+    telemetry = {}
+
+    if variant == "operational_signature":
+        _run_once(
+            shared_cache=shared_cache,
+            telemetry=telemetry,
+            operational=np.array([False, True]),
+        )
+    elif variant == "population_distribution":
+        pop_alt = _make_population()
+        pop_alt.loc[0, "aantal_inwoners"] = 140
+        pop_alt.loc[1, "aantal_inwoners"] = 60
+        _run_once(shared_cache=shared_cache, telemetry=telemetry, pop_grid_gdf=pop_alt)
+    elif variant == "reference_group":
+        _run_once(shared_cache=shared_cache, telemetry=telemetry, reference_group="elderly")
+    elif variant == "function_set":
+        _run_once(
+            shared_cache=shared_cache,
+            telemetry=telemetry,
+            all_functions=["hospital"],
+        )
+    else:
+        raise AssertionError(f"Unhandled variant {variant}")
+
+    assert telemetry.get("shared_hits", 0) == 0
+    assert telemetry.get("shared_misses", 0) >= 1
+
+
+def test_shared_cache_no_false_hit_from_neighboring_seeded_entry(tmp_path):
+    shared_cache = SQLiteSharedRealizedStateCache(tmp_path / "false_hit.sqlite")
+    shared_cache.set_if_absent(
+        "neighboring-key",
+        {
+            "societal_access_pct__hospital__total": 999.0,
+            "societal_access_relative_access__hospital__total": 999.0,
+        },
+    )
+
+    telemetry = {}
+    changed = _run_once(
+        shared_cache=shared_cache,
+        telemetry=telemetry,
+        operational=np.array([False, True]),
+    )
+    assert telemetry.get("shared_hits", 0) == 0
+    assert float(changed[0]["societal_access_pct__hospital__total"]) != pytest.approx(999.0)
+
+
+def _spawn_backend_worker(backend: SQLiteSharedRealizedStateCache, queue) -> None:
+    backend.set_if_absent("spawn-key", {"value": 1.0})
+    queue.put(backend.get("spawn-key") is not None)
+
+
+def test_sqlite_shared_cache_spawn_roundtrip_serialization_smoke(tmp_path):
+    backend = SQLiteSharedRealizedStateCache(tmp_path / "spawn_smoke.sqlite")
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_spawn_backend_worker, args=(backend, queue))
+    proc.start()
+    proc.join(timeout=30)
+    assert proc.exitcode == 0
+    assert queue.get(timeout=5) is True
