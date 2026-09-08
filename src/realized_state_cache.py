@@ -155,7 +155,7 @@ class SQLiteSharedRealizedStateCache:
                     self._add_stat("lock_retries")
                     time.sleep(self.retry_backoff_seconds * (attempt + 1))
                     continue
-self._add_stat("errors")
+                self._add_stat("errors")
                 raise
         self._add_stat("errors")
         return False
