@@ -86,7 +86,7 @@ _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
 }
-_REALIZED_STATE_CACHE_KEY_VERSION = "2.1.0"
+_REALIZED_STATE_CACHE_KEY_VERSION = "2.2.0"
 
 
 class SharedRealizedStateCacheError(RuntimeError):
@@ -119,13 +119,13 @@ def _build_label_invariant_island_profiles(
     frozen_island_function_map: Dict[int, FrozenSet[str]],
     island_pop: pd.DataFrame,
     available_group_cols: Dict[str, str],
-) -> Tuple[Tuple[Tuple[str, ...], Tuple[float, ...]], ...]:
+) -> Tuple[Tuple[bool, Tuple[str, ...], Tuple[float, ...]], ...]:
     """Canonical island profiles that are invariant to island ID renumbering."""
     if island_pop is None or island_pop.empty or not available_group_cols:
         return tuple()
 
     sorted_groups = sorted(available_group_cols.items(), key=lambda kv: str(kv[0]))
-    profiles: List[Tuple[Tuple[str, ...], Tuple[float, ...]]] = []
+    profiles: List[Tuple[bool, Tuple[str, ...], Tuple[float, ...]]] = []
     for island_id in island_pop.index:
         try:
             island_int = int(island_id)
@@ -133,7 +133,9 @@ def _build_label_invariant_island_profiles(
             continue
         funcs = tuple(sorted(str(f) for f in frozen_island_function_map.get(island_int, frozenset())))
         pop_vector = tuple(float(island_pop.loc[island_id, col]) for _, col in sorted_groups)
-        profiles.append((funcs, pop_vector))
+        # Keep sentinel semantics: island_id == -1 means "unassigned" and is
+        # excluded from islands_with_func in _compute_societal_scalars.
+        profiles.append((island_int == -1, funcs, pop_vector))
     return tuple(sorted(profiles))
 
 

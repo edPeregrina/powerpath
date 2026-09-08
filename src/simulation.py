@@ -1416,6 +1416,8 @@ def simulate_asset_damage_recovery_access_breakdown(
                     default_db_path=interim_dir / "societal_realized_state_cache.sqlite",
                 )
             except Exception as _shared_cache_err:
+                if _shared_cache_fail_hard:
+                    raise
                 import warnings
                 warnings.warn(
                     f"Shared realized-state cache setup failed; continuing without shared cache: {_shared_cache_err}",

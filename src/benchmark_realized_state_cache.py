@@ -13,6 +13,7 @@ Factory contract:
       - model: ema_workbench Model
       - policies: list[Policy]
       - optional uncertainty_sampling
+      - optional scenarios (reused across all benchmark modes)
 """
 
 from __future__ import annotations
@@ -22,12 +23,14 @@ import copy
 import csv
 import importlib
 import json
+import random
 import time
 from contextlib import nullcontext
 from multiprocessing import Manager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, MutableMapping, Tuple
 
+import numpy as np
 from ema_workbench import MultiprocessingEvaluator, SequentialEvaluator, Samplers
 
 
@@ -104,11 +107,16 @@ def _run_one(
     cache_db_path: Path,
     namespace: str,
     schema_version: str,
+    shared_scenarios: Any = None,
+    sampling_seed: int | None = 42,
 ) -> Dict[str, Any]:
     context = _load_factory(factory_spec)()
     model = context["model"]
     policies = context["policies"]
     uncertainty_sampling = context.get("uncertainty_sampling", Samplers.LHS)
+    scenarios_arg = (
+        copy.deepcopy(shared_scenarios) if shared_scenarios is not None else scenarios
+    )
     manager_context = Manager() if evaluator_cls is MultiprocessingEvaluator else nullcontext()
     with manager_context as manager:
         telemetry_store: MutableMapping[str, int] = manager.dict() if manager is not None else {}
@@ -123,21 +131,31 @@ def _run_one(
             telemetry_lock=telemetry_lock,
         )
         started = time.perf_counter()
+        if shared_scenarios is None and sampling_seed is not None:
+            random.seed(sampling_seed)
+            np.random.seed(sampling_seed)
         with evaluator_cls(model, **evaluator_kwargs) as evaluator:
             experiments, _outcomes = evaluator.perform_experiments(
-                scenarios=scenarios,
+                scenarios=scenarios_arg,
                 policies=policies,
                 uncertainty_sampling=uncertainty_sampling,
             )
         elapsed = time.perf_counter() - started
         telemetry_snapshot = {k: int(v) for k, v in telemetry.items()}
+    try:
+        scenarios_count = int(len(scenarios_arg))
+    except Exception:
+        scenarios_count = int(scenarios)
     record = {
         "evaluator": evaluator_cls.__name__,
         "shared_cache_enabled": bool(shared_cache_enabled),
         "seconds": float(elapsed),
         "experiments": int(len(experiments)),
-        "scenarios": int(scenarios),
+        "scenarios": scenarios_count,
         "policies": int(len(policies)),
+        "scenario_source": (
+            "factory_shared_set" if shared_scenarios is not None else f"sampler_seed_{sampling_seed}"
+        ),
     }
     record.update(telemetry_snapshot)
     return record
@@ -189,6 +207,7 @@ def main() -> int:
     parser.add_argument("--cache-db", default="data/interim/societal_realized_state_cache.sqlite")
     parser.add_argument("--namespace", default="societal")
     parser.add_argument("--schema-version", default="2.0.0")
+    parser.add_argument("--sampling-seed", type=int, default=42)
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--out-csv")
     parser.add_argument(
@@ -203,6 +222,8 @@ def main() -> int:
         choices=["seq_no_cache", "seq_shared_cache", "mp_no_cache", "mp_shared_cache"],
     )
     args = parser.parse_args()
+    base_context = _load_factory(args.factory)()
+    shared_scenarios = base_context.get("scenarios")
 
     cache_db_path = Path(args.cache_db).resolve()
     cache_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +252,8 @@ def main() -> int:
                 cache_db_path=cache_db_path,
                 namespace=args.namespace,
                 schema_version=args.schema_version,
+                shared_scenarios=shared_scenarios,
+                sampling_seed=args.sampling_seed,
             )
         )
 

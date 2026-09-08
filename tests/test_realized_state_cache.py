@@ -509,6 +509,37 @@ def test_realized_state_key_changes_with_service_area_maps_digest():
     assert key_a != key_b
 
 
+def test_realized_state_key_distinguishes_unassigned_island_sentinel():
+    shared_kwargs = dict(
+        operational_asset_ids_by_function={"hospital": {"provider_a"}},
+        total_pop={"total": 100.0},
+        available_group_cols={"total": "total_weighted"},
+        all_functions=["hospital"],
+        pop_group_columns={"total": "aantal_inwoners"},
+        reference_group="total",
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+        allocation_df=societal_access_module.pd.DataFrame(),
+        service_area_population_maps_digest="same_digest",
+    )
+    key_unassigned = _build_realized_state_cache_key(
+        frozen_island_function_map={-1: frozenset({"hospital"})},
+        island_pop=societal_access_module.pd.DataFrame(
+            {"total_weighted": [100.0]},
+            index=societal_access_module.pd.Index([-1], name="island_id"),
+        ),
+        **shared_kwargs,
+    )
+    key_regular = _build_realized_state_cache_key(
+        frozen_island_function_map={1: frozenset({"hospital"})},
+        island_pop=societal_access_module.pd.DataFrame(
+            {"total_weighted": [100.0]},
+            index=societal_access_module.pd.Index([1], name="island_id"),
+        ),
+        **shared_kwargs,
+    )
+    assert key_unassigned != key_regular
+
+
 def test_service_area_pop_map_cache_key_uses_population_values():
     assets = gpd.GeoDataFrame(
         {"type": ["msls", "msls"]},
