@@ -317,6 +317,23 @@ def test_sqlite_shared_cache_backend_is_pickle_safe(tmp_path):
     assert isinstance(restored, SQLiteSharedRealizedStateCache)
 
 
+def test_sqlite_shared_cache_backend_reopens_connection_after_pid_change(monkeypatch, tmp_path):
+    backend = SQLiteSharedRealizedStateCache(tmp_path / "pid_reopen.sqlite")
+    original_conn = backend._connect()
+    first_pid = backend._conn_pid
+    pid_stream = iter([first_pid, first_pid + 1])
+    monkeypatch.setattr("src.realized_state_cache.os.getpid", lambda: next(pid_stream))
+
+    reused_conn = backend._connect()
+    reopened_conn = backend._connect()
+
+    assert reused_conn is original_conn
+    assert reopened_conn is not original_conn
+    assert backend._conn_pid == first_pid + 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        original_conn.execute("SELECT 1")
+
+
 def test_worker_local_shared_backend_is_reused_per_normalized_config(monkeypatch, tmp_path):
     calls = []
     created_backend = object()

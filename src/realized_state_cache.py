@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -54,6 +55,7 @@ class SQLiteSharedRealizedStateCache:
         self.retry_backoff_seconds = float(retry_backoff_seconds)
         self._stats_lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
+        self._conn_pid: Optional[int] = None
         self._stats: Dict[str, int] = {
             "lookups": 0,
             "hits": 0,
@@ -70,6 +72,10 @@ class SQLiteSharedRealizedStateCache:
             self._stats[name] = self._stats.get(name, 0) + value
 
     def _connect(self) -> sqlite3.Connection:
+        current_pid = os.getpid()
+        if self._conn is not None and self._conn_pid != current_pid:
+            self.close()
+
         if self._conn is None:
             self._conn = sqlite3.connect(
                 str(self.db_path),
@@ -77,6 +83,7 @@ class SQLiteSharedRealizedStateCache:
                 isolation_level=None,
                 check_same_thread=False,
             )
+            self._conn_pid = current_pid
             self._conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute("PRAGMA synchronous = FULL")
@@ -172,6 +179,7 @@ class SQLiteSharedRealizedStateCache:
         """Close the underlying SQLite connection if open."""
         conn = self._conn
         self._conn = None
+        self._conn_pid = None
         if conn is not None:
             try:
                 conn.close()
@@ -184,12 +192,14 @@ class SQLiteSharedRealizedStateCache:
         state = dict(self.__dict__)
         state["_stats_lock"] = None
         state["_conn"] = None
+        state["_conn_pid"] = None
         return state
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
         self._stats_lock = threading.Lock()
         self._conn = None
+        self._conn_pid = None
 
 
 def build_shared_realized_state_cache_from_config(
