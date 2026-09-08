@@ -9,7 +9,10 @@ import numpy as np
 import pytest
 from shapely.geometry import Point, box
 
-from src.realized_state_cache import SQLiteSharedRealizedStateCache
+from src.realized_state_cache import (
+    REALIZED_STATE_CACHE_SCHEMA_VERSION,
+    SQLiteSharedRealizedStateCache,
+)
 import src.societal_access as societal_access_module
 from src.societal_access import (
     _build_realized_state_cache_key,
@@ -271,7 +274,7 @@ def test_sqlite_shared_cache_is_atomic_under_multiprocess_contention(tmp_path):
             SELECT COUNT(*) FROM realized_state_cache
             WHERE namespace = ? AND schema_version = ? AND cache_key = ?
             """,
-            ("contention", "1.0.0", "shared-key"),
+            ("contention", REALIZED_STATE_CACHE_SCHEMA_VERSION, "shared-key"),
         ).fetchone()[0]
     finally:
         conn.close()

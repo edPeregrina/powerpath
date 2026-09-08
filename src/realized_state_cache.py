@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import pickle
+import json
 import sqlite3
 import threading
 import time
@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Protocol
 
 
-REALIZED_STATE_CACHE_SCHEMA_VERSION = "1.0.0"
+REALIZED_STATE_CACHE_SCHEMA_VERSION = "2.0.0"
 
 
 class SharedRealizedStateCacheBackend(Protocol):
@@ -116,18 +116,22 @@ class SQLiteSharedRealizedStateCache:
             if row is None:
                 self._add_stat("misses")
                 return None
-            payload = pickle.loads(row[0])
+            payload = json.loads(row[0])
             if not isinstance(payload, dict):
                 self._add_stat("errors")
                 return None
             self._add_stat("hits")
-            return payload
+            return {str(k): float(v) for k, v in payload.items()}
         except Exception:
             self._add_stat("errors")
             raise
 
     def set_if_absent(self, cache_key: str, fields: Dict[str, float]) -> bool:
-        payload = pickle.dumps(dict(fields), protocol=4)
+        payload = json.dumps(
+            {str(k): float(v) for k, v in dict(fields).items()},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         for attempt in range(self.max_retries + 1):
             conn = self._connect()
             try:

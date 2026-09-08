@@ -174,7 +174,7 @@ def main() -> int:
     parser.add_argument("--n-processes", type=int, default=4)
     parser.add_argument("--cache-db", default="data/interim/societal_realized_state_cache.sqlite")
     parser.add_argument("--namespace", default="societal")
-    parser.add_argument("--schema-version", default="1.0.0")
+    parser.add_argument("--schema-version", default="2.0.0")
     parser.add_argument("--out-json", required=True)
     parser.add_argument("--out-csv")
     parser.add_argument(
