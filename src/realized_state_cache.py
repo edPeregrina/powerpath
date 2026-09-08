@@ -124,7 +124,7 @@ class SQLiteSharedRealizedStateCache:
             return payload
         except Exception:
             self._add_stat("errors")
-            return None
+            raise
 
     def set_if_absent(self, cache_key: str, fields: Dict[str, float]) -> bool:
         payload = pickle.dumps(dict(fields), protocol=4)
