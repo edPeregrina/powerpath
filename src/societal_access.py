@@ -85,7 +85,7 @@ _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
 }
-_REALIZED_STATE_CACHE_KEY_VERSION = "2.0.0"
+_REALIZED_STATE_CACHE_KEY_VERSION = "2.1.0"
 
 
 class SharedRealizedStateCacheError(RuntimeError):
@@ -148,6 +148,7 @@ def _build_realized_state_cache_key(
     reference_group: str,
     service_area_function_provider_types: Dict[str, FrozenSet[str]],
     allocation_df: Optional[pd.DataFrame],
+    service_area_population_maps_digest: str = "",
 ) -> str:
     """Build a label-invariant realized-state cache key."""
     if island_pop is None or total_pop is None or available_group_cols is None:
@@ -168,6 +169,7 @@ def _build_realized_state_cache_key(
         "service_area_function_provider_types": _canonicalize_service_area_provider_types(
             service_area_function_provider_types
         ),
+        "service_area_population_maps_digest": str(service_area_population_maps_digest),
         "operational_signature": _canonical_operational_signature(
             operational_asset_ids_by_function
         ),
@@ -797,6 +799,63 @@ _SERVICE_AREA_POP_MAP_CACHE: Dict[Any, Dict[str, Dict[str, Dict[Any, float]]]] =
 _SERVICE_AREA_POP_MAP_CACHE_VERSION = "1.0.0"
 
 
+def _service_area_asset_state_digest(working_assets: gpd.GeoDataFrame) -> str:
+    """Deterministic digest of service-area-relevant asset state."""
+    digest = hashlib.sha256()
+    digest.update(str(working_assets.crs).encode())
+    for asset_id in sorted(working_assets.index, key=_stable_value_token):
+        row = working_assets.loc[asset_id]
+        digest.update(_stable_value_token(asset_id).encode())
+        digest.update(_stable_value_token(row.get("type")).encode())
+        geom = row.get("geometry")
+        digest.update(geom.wkb if geom is not None else b"null")
+    return digest.hexdigest()[:24]
+
+
+def _service_area_population_values_digest(
+    pop_grid_gdf: gpd.GeoDataFrame,
+    pop_group_columns: Dict[str, str],
+) -> str:
+    """Deterministic digest of demographic values used in service-area maps."""
+    digest = hashlib.sha256()
+    digest.update(str(pop_grid_gdf.crs).encode())
+    for label, column_name in sorted(pop_group_columns.items(), key=lambda kv: str(kv[0])):
+        digest.update(str(label).encode())
+        digest.update(str(column_name).encode())
+        if column_name not in pop_grid_gdf.columns:
+            digest.update(b"__missing__")
+            continue
+        col = pd.to_numeric(pop_grid_gdf[column_name], errors="coerce").fillna(0)
+        col = col.where(col >= 0, 0)
+        for value in col.to_numpy(dtype=float):
+            digest.update(repr(float(value)).encode())
+            digest.update(b"\0")
+    return digest.hexdigest()[:24]
+
+
+def _service_area_population_maps_digest(
+    service_area_population_maps: Dict[str, Dict[str, Dict[Any, float]]],
+) -> str:
+    """Deterministic digest of provider→population mappings used for overrides."""
+    canonical: List[Any] = []
+    for function_name in sorted(service_area_population_maps.keys(), key=str):
+        group_maps = service_area_population_maps[function_name]
+        group_entries: List[Any] = []
+        for label in sorted(group_maps.keys(), key=str):
+            provider_population = group_maps.get(label, {})
+            provider_entries = tuple(
+                (
+                    _stable_value_token(provider_id),
+                    float(provider_population[provider_id]),
+                )
+                for provider_id in sorted(provider_population.keys(), key=_stable_value_token)
+            )
+            group_entries.append((str(label), provider_entries))
+        canonical.append((str(function_name), tuple(group_entries)))
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:24]
+
+
 def _canonicalize_service_area_provider_types(
     spec: Mapping[str, Iterable[str]],
 ) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
@@ -808,7 +867,7 @@ def _canonicalize_service_area_provider_types(
 
 
 def _service_area_pop_map_cache_key(
-    asset_cache_key: str,
+    asset_state_digest: str,
     pop_grid_gdf: gpd.GeoDataFrame,
     pop_group_columns: Dict[str, str],
     service_area_function_provider_types: Dict[str, FrozenSet[str]],
@@ -817,8 +876,9 @@ def _service_area_pop_map_cache_key(
     """Build the memo key for :func:`_build_service_area_population_maps`."""
     return (
         _SERVICE_AREA_POP_MAP_CACHE_VERSION,
-        asset_cache_key,
+        asset_state_digest,
         _geometry_hash(pop_grid_gdf),
+        _service_area_population_values_digest(pop_grid_gdf, pop_group_columns),
         tuple(sorted(pop_group_columns.items())),
         _canonicalize_service_area_provider_types(service_area_function_provider_types),
         asset_type_column,
@@ -867,12 +927,13 @@ def _build_service_area_population_maps(
         crs=gdf_assets.crs,
     )
     asset_cache_key = get_asset_centroid_hash(working_assets[["geometry"]].copy())
+    asset_state_digest = _service_area_asset_state_digest(working_assets)
 
     if service_area_function_provider_types is None:
         service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
 
     cache_key = _service_area_pop_map_cache_key(
-        asset_cache_key,
+        asset_state_digest,
         pop_grid_gdf,
         pop_group_columns,
         service_area_function_provider_types,
@@ -1286,6 +1347,9 @@ def postprocess_societal_access_results(
             asset_type_column=asset_type_column,
             service_area_function_provider_types=service_area_function_provider_types,
         )
+    service_area_maps_digest = _service_area_population_maps_digest(
+        service_area_population_maps
+    )
 
     # Determine which functions to always emit
     if all_functions is None:
@@ -1554,6 +1618,7 @@ def postprocess_societal_access_results(
                                 reference_group=reference_group,
                                 service_area_function_provider_types=service_area_function_provider_types,
                                 allocation_df=allocation_df,
+                                service_area_population_maps_digest=service_area_maps_digest,
                             )
                             if _shared_cache_key:
                                 _shared_realized_key_cache[_scalar_cache_key] = _shared_cache_key

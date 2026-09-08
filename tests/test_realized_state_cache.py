@@ -11,7 +11,12 @@ from shapely.geometry import Point, box
 
 from src.realized_state_cache import SQLiteSharedRealizedStateCache
 import src.societal_access as societal_access_module
-from src.societal_access import postprocess_societal_access_results
+from src.societal_access import (
+    _build_realized_state_cache_key,
+    _build_service_area_population_maps,
+    _service_area_pop_map_cache_key,
+    postprocess_societal_access_results,
+)
 
 
 def _make_assets():
@@ -365,3 +370,155 @@ def test_sqlite_shared_cache_spawn_roundtrip_serialization_smoke(tmp_path):
     proc.join(timeout=30)
     assert proc.exitcode == 0
     assert queue.get(timeout=5) is True
+
+
+def test_realized_state_key_changes_with_service_area_maps_digest():
+    key_a = _build_realized_state_cache_key(
+        frozen_island_function_map={1: frozenset({"hospital"})},
+        operational_asset_ids_by_function={"hospital": {0}},
+        island_pop=societal_access_module.pd.DataFrame(
+            {"total_weighted": [100.0]},
+            index=societal_access_module.pd.Index([1], name="island_id"),
+        ),
+        total_pop={"total": 100.0},
+        available_group_cols={"total": "total_weighted"},
+        all_functions=["hospital"],
+        pop_group_columns={"total": "aantal_inwoners"},
+        reference_group="total",
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+        allocation_df=societal_access_module.pd.DataFrame(),
+        service_area_population_maps_digest="digest_a",
+    )
+    key_b = _build_realized_state_cache_key(
+        frozen_island_function_map={1: frozenset({"hospital"})},
+        operational_asset_ids_by_function={"hospital": {0}},
+        island_pop=societal_access_module.pd.DataFrame(
+            {"total_weighted": [100.0]},
+            index=societal_access_module.pd.Index([1], name="island_id"),
+        ),
+        total_pop={"total": 100.0},
+        available_group_cols={"total": "total_weighted"},
+        all_functions=["hospital"],
+        pop_group_columns={"total": "aantal_inwoners"},
+        reference_group="total",
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+        allocation_df=societal_access_module.pd.DataFrame(),
+        service_area_population_maps_digest="digest_b",
+    )
+    assert key_a != key_b
+
+
+def test_service_area_pop_map_cache_key_uses_population_values():
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls", "msls"]},
+        geometry=[Point(0, 0), Point(10, 10)],
+        crs="EPSG:28992",
+    )
+    pop_1 = gpd.GeoDataFrame(
+        {
+            "cell_id": ["c1", "c2"],
+            "aantal_inwoners": [100.0, 50.0],
+        },
+        geometry=[box(0, 0, 3, 3), box(8, 8, 12, 12)],
+        crs="EPSG:28992",
+    )
+    pop_2 = pop_1.copy()
+    pop_2.loc[0, "aantal_inwoners"] = 999.0
+
+    working_assets = assets[["type", "geometry"]].copy()
+    asset_digest = societal_access_module._service_area_asset_state_digest(working_assets)
+    spec = {"electricity": frozenset({"msls"})}
+    key_1 = _service_area_pop_map_cache_key(
+        asset_digest,
+        pop_1,
+        {"total": "aantal_inwoners"},
+        spec,
+        "type",
+    )
+    key_2 = _service_area_pop_map_cache_key(
+        asset_digest,
+        pop_2,
+        {"total": "aantal_inwoners"},
+        spec,
+        "type",
+    )
+    assert key_1 != key_2
+
+
+def test_service_area_pop_map_cache_key_uses_asset_state_digest():
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["c1", "c2"],
+            "aantal_inwoners": [100.0, 50.0],
+        },
+        geometry=[box(0, 0, 3, 3), box(8, 8, 12, 12)],
+        crs="EPSG:28992",
+    )
+    spec = {"electricity": frozenset({"msls"})}
+
+    assets_a = gpd.GeoDataFrame(
+        {"type": ["msls", "msls"]},
+        geometry=[Point(0, 0), Point(10, 10)],
+        crs="EPSG:28992",
+    )
+    assets_b = gpd.GeoDataFrame(
+        {"type": ["msls", "msls"]},
+        geometry=[Point(0, 10), Point(10, 0)],  # same bbox/count, different layout
+        crs="EPSG:28992",
+    )
+    digest_a = societal_access_module._service_area_asset_state_digest(
+        assets_a[["type", "geometry"]].copy()
+    )
+    digest_b = societal_access_module._service_area_asset_state_digest(
+        assets_b[["type", "geometry"]].copy()
+    )
+    key_a = _service_area_pop_map_cache_key(
+        digest_a,
+        pop,
+        {"total": "aantal_inwoners"},
+        spec,
+        "type",
+    )
+    key_b = _service_area_pop_map_cache_key(
+        digest_b,
+        pop,
+        {"total": "aantal_inwoners"},
+        spec,
+        "type",
+    )
+    assert key_a != key_b
+
+
+def test_service_area_population_map_memo_does_not_reuse_on_population_change():
+    societal_access_module._SERVICE_AREA_POP_MAP_CACHE.clear()
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls", "msls"]},
+        geometry=[Point(0, 0), Point(10, 10)],
+        crs="EPSG:28992",
+    )
+    pop_1 = gpd.GeoDataFrame(
+        {
+            "cell_id": ["c1", "c2"],
+            "aantal_inwoners": [100.0, 50.0],
+        },
+        geometry=[box(0, 0, 3, 3), box(8, 8, 12, 12)],
+        crs="EPSG:28992",
+    )
+    pop_2 = pop_1.copy()
+    pop_2.loc[:, "aantal_inwoners"] = [1.0, 2.0]
+
+    maps_1 = _build_service_area_population_maps(
+        assets,
+        pop_1,
+        {"total": "aantal_inwoners"},
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+    )
+    maps_2 = _build_service_area_population_maps(
+        assets,
+        pop_2,
+        {"total": "aantal_inwoners"},
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+    )
+    sum_1 = sum(maps_1["electricity"]["total"].values())
+    sum_2 = sum(maps_2["electricity"]["total"].values())
+    assert sum_1 != sum_2
