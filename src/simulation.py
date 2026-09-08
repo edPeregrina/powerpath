@@ -1588,14 +1588,6 @@ def simulate_asset_damage_recovery_access_breakdown(
                 )
                 _sa_cfg["allocation_cache"] = allocation_cache
             _run_shared_realized_state_cache = _shared_realized_state_cache
-            if (
-                _run_shared_realized_state_cache is None
-                and _shared_realized_state_cache_config
-            ):
-                _run_shared_realized_state_cache = build_shared_realized_state_cache_from_config(
-                    _shared_realized_state_cache_config,
-                    default_db_path=interim_dir / "societal_realized_state_cache.sqlite",
-                )
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
