@@ -1007,7 +1007,7 @@ def _build_service_area_population_maps(
                     voronoi_gdf = create_voronoi_for_asset_type(
                         working_assets,
                         provider_type,
-                        asset_cache_key=asset_cache_key,
+                        asset_cache_key=asset_state_digest,
                     )
                     provider_map = build_voronoi_service_area_map(
                         voronoi_gdf,

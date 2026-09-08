@@ -565,3 +565,51 @@ def test_service_area_population_map_memo_does_not_reuse_on_population_change():
     sum_1 = sum(maps_1["electricity"]["total"].values())
     sum_2 = sum(maps_2["electricity"]["total"].values())
     assert sum_1 != sum_2
+
+
+def test_service_area_population_maps_pass_asset_state_digest_to_voronoi(monkeypatch):
+    societal_access_module._SERVICE_AREA_POP_MAP_CACHE.clear()
+    assets = gpd.GeoDataFrame(
+        {"type": ["msls", "msls", "msls", "msls"]},
+        geometry=[Point(0, 0), Point(10, 0), Point(0, 10), Point(10, 10)],
+        crs="EPSG:28992",
+    )
+    pop = gpd.GeoDataFrame(
+        {
+            "cell_id": ["c1", "c2"],
+            "aantal_inwoners": [100.0, 50.0],
+        },
+        geometry=[box(0, 0, 3, 3), box(8, 8, 12, 12)],
+        crs="EPSG:28992",
+    )
+    captured = {}
+
+    def _fake_create_voronoi_for_asset_type(gdf_assets, asset_type, boundary=None, **kwargs):
+        captured["asset_type"] = asset_type
+        captured["asset_cache_key"] = kwargs.get("asset_cache_key")
+        return gpd.GeoDataFrame(
+            {"asset_id": list(gdf_assets.index)},
+            geometry=gdf_assets.geometry,
+            crs=gdf_assets.crs,
+        )
+
+    def _fake_build_voronoi_service_area_map(voronoi_gdf, pop_assets):
+        provider_id = voronoi_gdf["asset_id"].iloc[0]
+        return {provider_id: list(pop_assets.index)}
+
+    monkeypatch.setattr("src.impacts.create_voronoi_for_asset_type", _fake_create_voronoi_for_asset_type)
+    monkeypatch.setattr("src.utils.build_voronoi_service_area_map", _fake_build_voronoi_service_area_map)
+
+    maps = _build_service_area_population_maps(
+        assets,
+        pop,
+        {"total": "aantal_inwoners"},
+        service_area_function_provider_types={"electricity": frozenset({"msls"})},
+    )
+
+    expected_digest = societal_access_module._service_area_asset_state_digest(
+        assets[["type", "geometry"]].copy()
+    )
+    assert captured["asset_type"] == "msls"
+    assert captured["asset_cache_key"] == expected_digest
+    assert maps["electricity"]["total"]
