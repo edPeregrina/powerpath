@@ -1409,7 +1409,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         _provided_shared_backend = societal_access_config.get("shared_realized_state_cache")
         if _provided_shared_backend is not None:
             _shared_realized_state_cache = _provided_shared_backend
-        elif _shared_realized_state_cache_config:
+        elif _shared_realized_state_cache_config and timestep_output:
             try:
                 _shared_realized_state_cache = _get_worker_shared_realized_state_cache_backend(
                     _shared_realized_state_cache_config,
