@@ -151,6 +151,18 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
             writer.writerow(row)
 
 
+def _reset_cache_db(cache_db_path: Path) -> None:
+    for path in (
+        cache_db_path,
+        cache_db_path.with_suffix(f"{cache_db_path.suffix}-shm"),
+        cache_db_path.with_suffix(f"{cache_db_path.suffix}-wal"),
+    ):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark societal realized-state cache behavior.")
     parser.add_argument("--factory", required=True, help="Dotted factory path module:function")
@@ -188,6 +200,8 @@ def main() -> int:
 
     records: List[Dict[str, Any]] = []
     for evaluator_cls, evaluator_kwargs, shared_cache_enabled in runs:
+        if shared_cache_enabled:
+            _reset_cache_db(cache_db_path)
         records.append(
             _run_one(
                 evaluator_cls=evaluator_cls,
