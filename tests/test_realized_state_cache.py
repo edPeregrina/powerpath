@@ -12,6 +12,7 @@ from shapely.geometry import Point, box
 from src.realized_state_cache import (
     REALIZED_STATE_CACHE_SCHEMA_VERSION,
     SQLiteSharedRealizedStateCache,
+    build_shared_realized_state_cache_from_config,
 )
 import src.societal_access as societal_access_module
 import src.simulation as simulation_module
@@ -362,6 +363,20 @@ def test_worker_local_shared_backend_is_reused_per_normalized_config(monkeypatch
     assert backend_first is created_backend
     assert backend_second is created_backend
     assert len(calls) == 1
+
+
+def test_build_shared_backend_expands_user_path(monkeypatch, tmp_path):
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    cache = build_shared_realized_state_cache_from_config(
+        {"enabled": True, "backend": "sqlite", "path": "~/cache.sqlite"}
+    )
+    try:
+        assert cache is not None
+        assert cache.db_path == (fake_home / "cache.sqlite").resolve()
+    finally:
+        cache.close()
 
 
 def test_cache_off_vs_sqlite_shared_cache_outputs_are_equivalent(tmp_path):

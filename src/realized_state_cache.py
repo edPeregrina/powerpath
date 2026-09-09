@@ -260,6 +260,7 @@ def build_shared_realized_state_cache_from_config(
         raise ValueError("Shared realized-state cache requires a database path.")
 
     db_path = configured_path if configured_path is not None else default_db_path
+    db_path = Path(db_path).expanduser().resolve()
     return SQLiteSharedRealizedStateCache(
         db_path=db_path,
         namespace=cache_config.get("namespace", "default"),
