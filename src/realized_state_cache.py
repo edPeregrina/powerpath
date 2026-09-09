@@ -77,32 +77,61 @@ class SQLiteSharedRealizedStateCache:
             self.close()
 
         if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                timeout=self.timeout_seconds,
-                isolation_level=None,
-                check_same_thread=False,
-            )
-            self._conn_pid = current_pid
-            self._conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA synchronous = FULL")
+            for attempt in range(self.max_retries + 1):
+                conn: Optional[sqlite3.Connection] = None
+                try:
+                    conn = sqlite3.connect(
+                        str(self.db_path),
+                        timeout=self.timeout_seconds,
+                        isolation_level=None,
+                        check_same_thread=False,
+                    )
+                    conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA synchronous = FULL")
+                    self._conn = conn
+                    self._conn_pid = current_pid
+                    break
+                except Exception as exc:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                    if self._is_lock_error(exc) and attempt < self.max_retries:
+                        self._add_stat("lock_retries")
+                        time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                        continue
+                    self._add_stat("errors")
+                    raise
         return self._conn
 
     def _init_db(self) -> None:
-        conn = self._connect()
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS realized_state_cache (
-                namespace TEXT NOT NULL,
-                schema_version TEXT NOT NULL,
-                cache_key TEXT NOT NULL,
-                payload BLOB NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                PRIMARY KEY (namespace, schema_version, cache_key)
-            )
-            """
-        )
+        for attempt in range(self.max_retries + 1):
+            conn: Optional[sqlite3.Connection] = None
+            try:
+                conn = self._connect()
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS realized_state_cache (
+                        namespace TEXT NOT NULL,
+                        schema_version TEXT NOT NULL,
+                        cache_key TEXT NOT NULL,
+                        payload BLOB NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                        PRIMARY KEY (namespace, schema_version, cache_key)
+                    )
+                    """
+                )
+                return
+            except Exception as exc:
+                if self._is_lock_error(exc) and attempt < self.max_retries:
+                    self._add_stat("lock_retries")
+                    self.close()
+                    time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                    continue
+                self._add_stat("errors")
+                raise
 
     def _is_lock_error(self, exc: Exception) -> bool:
         msg = str(exc).lower()
@@ -140,8 +169,9 @@ class SQLiteSharedRealizedStateCache:
             separators=(",", ":"),
         )
         for attempt in range(self.max_retries + 1):
-            conn = self._connect()
+            conn: Optional[sqlite3.Connection] = None
             try:
+                conn = self._connect()
                 conn.execute("BEGIN IMMEDIATE")
                 cur = conn.execute(
                     """
