@@ -29,6 +29,28 @@ class _CreateTableFailingConnection:
         return object()
 
 
+class _SelectFailingConnection:
+    def __init__(self, *, row):
+        self.row = row
+        self.select_attempts = 0
+
+    def execute(self, sql: str, params=None):
+        if "SELECT payload" in sql:
+            self.select_attempts += 1
+            if self.select_attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+            class _Cursor:
+                def __init__(self, payload_row):
+                    self._row = payload_row
+
+                def fetchone(self):
+                    return self._row
+
+            return _Cursor(self.row)
+        return object()
+
+
 def test_connect_retries_when_journal_mode_pragma_is_locked(monkeypatch, tmp_path):
     monkeypatch.setattr(SQLiteSharedRealizedStateCache, "_init_db", lambda self: None)
     backend = SQLiteSharedRealizedStateCache(
@@ -105,3 +127,22 @@ def test_set_if_absent_retries_when_connect_is_locked(monkeypatch, tmp_path):
     assert row == 1
     assert backend.get_stats()["lock_retries"] == 1
     conn.close()
+
+
+def test_get_retries_when_select_is_locked(monkeypatch, tmp_path):
+    monkeypatch.setattr(SQLiteSharedRealizedStateCache, "_init_db", lambda self: None)
+    backend = SQLiteSharedRealizedStateCache(
+        tmp_path / "read_retry.sqlite",
+        namespace="retry_ns",
+        max_retries=2,
+        retry_backoff_seconds=0.0,
+    )
+    conn = _SelectFailingConnection(row=('{"value": 1.0}',))
+    monkeypatch.setattr(backend, "_connect", lambda: conn)
+    monkeypatch.setattr(backend, "close", lambda: None)
+
+    row = backend.get("k")
+
+    assert row == {"value": 1.0}
+    assert conn.select_attempts == 2
+    assert backend.get_stats()["lock_retries"] == 1

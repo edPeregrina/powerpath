@@ -1246,6 +1246,26 @@ def postprocess_societal_access_results(
         :func:`clip_population_to_service_area`.  This never raises or
         changes behaviour -- some callers may have legitimate reasons for a
         larger grid (e.g. a shared national grid reused across studies).
+    shared_realized_state_cache:
+        Optional cross-experiment cache backend implementing ``get``,
+        ``set_if_absent``, and ``get_stats``.  When provided, cache keys are
+        built from the realized state and cached societal scalar fields are
+        reused across compatible timesteps and runs.
+    shared_cache_fail_hard:
+        When ``True``, exceptions raised while reading from or writing to
+        *shared_realized_state_cache* are propagated to the caller.  When
+        ``False``, shared-cache failures are treated as soft failures and the
+        societal fields are recomputed normally.
+    cache_telemetry:
+        Optional mutable mapping updated in-place with aggregate counters such
+        as ``shared_hits``, ``shared_misses``, ``shared_writes``,
+        ``shared_write_conflicts``, and ``shared_errors`` for the current
+        invocation.
+    cache_telemetry_lock:
+        Optional context-manager lock used to guard writes to
+        *cache_telemetry*.  Multiprocessing callers sharing a manager-backed
+        mapping should provide the matching lock so telemetry updates remain
+        synchronized.
 
     Returns
     -------

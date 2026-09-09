@@ -139,28 +139,35 @@ class SQLiteSharedRealizedStateCache:
 
     def get(self, cache_key: str) -> Optional[Dict[str, float]]:
         self._add_stat("lookups")
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                """
-                SELECT payload
-                FROM realized_state_cache
-                WHERE namespace = ? AND schema_version = ? AND cache_key = ?
-                """,
-                (self.namespace, self.schema_version, str(cache_key)),
-            ).fetchone()
-            if row is None:
-                self._add_stat("misses")
-                return None
-            payload = json.loads(row[0])
-            if not isinstance(payload, dict):
+        for attempt in range(self.max_retries + 1):
+            conn: Optional[sqlite3.Connection] = None
+            try:
+                conn = self._connect()
+                row = conn.execute(
+                    """
+                    SELECT payload
+                    FROM realized_state_cache
+                    WHERE namespace = ? AND schema_version = ? AND cache_key = ?
+                    """,
+                    (self.namespace, self.schema_version, str(cache_key)),
+                ).fetchone()
+                if row is None:
+                    self._add_stat("misses")
+                    return None
+                payload = json.loads(row[0])
+                if not isinstance(payload, dict):
+                    self._add_stat("errors")
+                    return None
+                self._add_stat("hits")
+                return {str(k): float(v) for k, v in payload.items()}
+            except Exception as exc:
+                if self._is_lock_error(exc) and attempt < self.max_retries:
+                    self._add_stat("lock_retries")
+                    self.close()
+                    time.sleep(self.retry_backoff_seconds * (attempt + 1))
+                    continue
                 self._add_stat("errors")
-                return None
-            self._add_stat("hits")
-            return {str(k): float(v) for k, v in payload.items()}
-        except Exception:
-            self._add_stat("errors")
-            raise
+                raise
 
     def set_if_absent(self, cache_key: str, fields: Dict[str, float]) -> bool:
         payload = json.dumps(

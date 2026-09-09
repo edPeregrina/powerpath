@@ -24,6 +24,7 @@ import csv
 import importlib
 import json
 import random
+import tempfile
 import time
 from contextlib import nullcontext
 from multiprocessing import Manager
@@ -204,7 +205,7 @@ def main() -> int:
     parser.add_argument("--factory", required=True, help="Dotted factory path module:function")
     parser.add_argument("--scenarios", type=int, default=10)
     parser.add_argument("--n-processes", type=int, default=4)
-    parser.add_argument("--cache-db", default="data/interim/societal_realized_state_cache.sqlite")
+    parser.add_argument("--cache-db")
     parser.add_argument("--namespace", default="societal")
     parser.add_argument("--schema-version", default="2.0.0")
     parser.add_argument("--sampling-seed", type=int, default=42)
@@ -224,9 +225,19 @@ def main() -> int:
     args = parser.parse_args()
     base_context = _load_factory(args.factory)()
     shared_scenarios = base_context.get("scenarios")
-
-    cache_db_path = Path(args.cache_db).resolve()
-    cache_db_path.parent.mkdir(parents=True, exist_ok=True)
+    auto_cache_db_path: Path | None = None
+    if args.cache_db:
+        cache_db_path = Path(args.cache_db).resolve()
+        cache_db_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        with tempfile.NamedTemporaryFile(
+            prefix="powerpath-benchmark-cache-",
+            suffix=".sqlite",
+            delete=False,
+        ) as tmp_cache_db:
+            auto_cache_db_path = Path(tmp_cache_db.name)
+        auto_cache_db_path.unlink(missing_ok=True)
+        cache_db_path = auto_cache_db_path
     runs: List[Tuple[Any, Dict[str, Any], bool]] = []
     if "seq_no_cache" in args.modes:
         runs.append((SequentialEvaluator, {}, False))
@@ -237,33 +248,37 @@ def main() -> int:
     if "mp_shared_cache" in args.modes:
         runs.append((MultiprocessingEvaluator, {"n_processes": args.n_processes}, True))
 
-    records: List[Dict[str, Any]] = []
-    for evaluator_cls, evaluator_kwargs, shared_cache_enabled in runs:
-        if shared_cache_enabled:
-            _evict_worker_shared_realized_state_cache_backends()
-            _reset_cache_db(cache_db_path)
-        records.append(
-            _run_one(
-                evaluator_cls=evaluator_cls,
-                evaluator_kwargs=evaluator_kwargs,
-                factory_spec=args.factory,
-                scenarios=args.scenarios,
-                shared_cache_enabled=shared_cache_enabled,
-                cache_db_path=cache_db_path,
-                namespace=args.namespace,
-                schema_version=args.schema_version,
-                shared_scenarios=shared_scenarios,
-                sampling_seed=args.sampling_seed,
+    try:
+        records: List[Dict[str, Any]] = []
+        for evaluator_cls, evaluator_kwargs, shared_cache_enabled in runs:
+            if shared_cache_enabled:
+                _evict_worker_shared_realized_state_cache_backends()
+                _reset_cache_db(cache_db_path)
+            records.append(
+                _run_one(
+                    evaluator_cls=evaluator_cls,
+                    evaluator_kwargs=evaluator_kwargs,
+                    factory_spec=args.factory,
+                    scenarios=args.scenarios,
+                    shared_cache_enabled=shared_cache_enabled,
+                    cache_db_path=cache_db_path,
+                    namespace=args.namespace,
+                    schema_version=args.schema_version,
+                    shared_scenarios=shared_scenarios,
+                    sampling_seed=args.sampling_seed,
+                )
             )
-        )
 
-    out_json = Path(args.out_json).resolve()
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(records, indent=2), encoding="utf-8")
-    if args.out_csv:
-        _write_csv(Path(args.out_csv).resolve(), records)
-    print(json.dumps(records, indent=2))
-    return 0
+        out_json = Path(args.out_json).resolve()
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(records, indent=2), encoding="utf-8")
+        if args.out_csv:
+            _write_csv(Path(args.out_csv).resolve(), records)
+        print(json.dumps(records, indent=2))
+        return 0
+    finally:
+        if auto_cache_db_path is not None:
+            _reset_cache_db(auto_cache_db_path)
 
 
 if __name__ == "__main__":
