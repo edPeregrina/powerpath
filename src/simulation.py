@@ -26,7 +26,10 @@ from src.caching import (
     load_overlap_cache,
     load_societal_allocation_cache,
 )
-from src.realized_state_cache import build_shared_realized_state_cache_from_config
+from src.realized_state_cache import (
+    REALIZED_STATE_CACHE_SCHEMA_VERSION,
+    build_shared_realized_state_cache_from_config,
+)
 from src.damage_recovery import (
     default_damage_ratio_function,
     default_fragility_function,
@@ -72,11 +75,15 @@ def _worker_shared_realized_state_cache_key(cache_config, *, default_db_path):
     if db_path is None:
         return None
     normalized_db_path = str(Path(db_path).expanduser().resolve())
+    normalized_namespace = str(cache_config.get("namespace", "default"))
+    normalized_schema_version = str(
+        cache_config.get("schema_version", REALIZED_STATE_CACHE_SCHEMA_VERSION)
+    )
     return (
         str(cache_config.get("backend", "sqlite")).lower(),
         normalized_db_path,
-        cache_config.get("namespace", "default"),
-        cache_config.get("schema_version"),
+        normalized_namespace,
+        normalized_schema_version,
         float(cache_config.get("timeout_seconds", 30.0)),
         int(cache_config.get("busy_timeout_ms", 30000)),
         int(cache_config.get("max_retries", 5)),
