@@ -228,6 +228,20 @@ def main() -> int:
     auto_cache_db_path: Path | None = None
     if args.cache_db:
         cache_db_path = Path(args.cache_db).resolve()
+        existing_cache_paths = [
+            path
+            for path in (
+                cache_db_path,
+                Path(f"{cache_db_path}-shm"),
+                Path(f"{cache_db_path}-wal"),
+            )
+            if path.exists()
+        ]
+        if existing_cache_paths:
+            parser.error(
+                "--cache-db points to an existing cache database path; "
+                "provide a new path to avoid overwriting existing cache data."
+            )
         cache_db_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         with tempfile.NamedTemporaryFile(
