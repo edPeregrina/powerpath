@@ -258,11 +258,17 @@ def test_sqlite_shared_cache_is_atomic_under_multiprocess_contention(tmp_path):
         ctx.Process(target=_contended_insert_worker, args=(str(db_path), i))
         for i in range(8)
     ]
-    for proc in procs:
-        proc.start()
-    for proc in procs:
-        proc.join(timeout=30)
-        assert proc.exitcode == 0
+    try:
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join(timeout=30)
+            assert proc.exitcode == 0
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+            proc.join()
 
     backend = SQLiteSharedRealizedStateCache(db_path, namespace="contention")
     row = backend.get("shared-key")
@@ -482,10 +488,15 @@ def test_sqlite_shared_cache_spawn_roundtrip_serialization_smoke(tmp_path):
     ctx = mp.get_context("spawn")
     queue = ctx.Queue()
     proc = ctx.Process(target=_spawn_backend_worker, args=(backend, queue))
-    proc.start()
-    proc.join(timeout=30)
-    assert proc.exitcode == 0
-    assert queue.get(timeout=5) is True
+    try:
+        proc.start()
+        proc.join(timeout=30)
+        assert proc.exitcode == 0
+        assert queue.get(timeout=5) is True
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+        proc.join()
 
 
 def test_realized_state_key_changes_with_service_area_maps_digest():

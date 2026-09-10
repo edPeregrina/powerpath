@@ -125,7 +125,11 @@ class SQLiteSharedRealizedStateCache:
                 )
                 return
             except Exception as exc:
-                if self._is_lock_error(exc) and attempt < self.max_retries:
+                if (
+                    conn is not None
+                    and self._is_lock_error(exc)
+                    and attempt < self.max_retries
+                ):
                     self._add_stat("lock_retries")
                     self.close()
                     time.sleep(self.retry_backoff_seconds * (attempt + 1))
@@ -161,7 +165,11 @@ class SQLiteSharedRealizedStateCache:
                 self._add_stat("hits")
                 return {str(k): float(v) for k, v in payload.items()}
             except Exception as exc:
-                if self._is_lock_error(exc) and attempt < self.max_retries:
+                if (
+                    conn is not None
+                    and self._is_lock_error(exc)
+                    and attempt < self.max_retries
+                ):
                     self._add_stat("lock_retries")
                     self.close()
                     time.sleep(self.retry_backoff_seconds * (attempt + 1))
@@ -196,10 +204,15 @@ class SQLiteSharedRealizedStateCache:
                 return False
             except Exception as exc:
                 try:
-                    conn.execute("ROLLBACK")
+                    if conn is not None:
+                        conn.execute("ROLLBACK")
                 except Exception:
                     pass
-                if self._is_lock_error(exc) and attempt < self.max_retries:
+                if (
+                    conn is not None
+                    and self._is_lock_error(exc)
+                    and attempt < self.max_retries
+                ):
                     self._add_stat("lock_retries")
                     time.sleep(self.retry_backoff_seconds * (attempt + 1))
                     continue

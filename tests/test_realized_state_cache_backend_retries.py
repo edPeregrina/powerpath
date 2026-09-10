@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from src.realized_state_cache import SQLiteSharedRealizedStateCache
 
 
@@ -85,7 +87,26 @@ def test_init_db_retries_create_table_when_locked(monkeypatch, tmp_path):
     assert backend.get_stats()["lock_retries"] == 1
 
 
-def test_set_if_absent_retries_when_connect_is_locked(monkeypatch, tmp_path):
+def test_init_db_does_not_retry_after_connect_exhausts_its_lock_budget(monkeypatch, tmp_path):
+    connect_calls = {"count": 0}
+
+    def _always_locked(_self):
+        connect_calls["count"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(SQLiteSharedRealizedStateCache, "_connect", _always_locked)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        SQLiteSharedRealizedStateCache(
+            tmp_path / "init_connect_locked.sqlite",
+            max_retries=2,
+            retry_backoff_seconds=0.0,
+        )
+
+    assert connect_calls["count"] == 1
+
+
+def test_set_if_absent_does_not_retry_when_connect_is_locked(monkeypatch, tmp_path):
     monkeypatch.setattr(SQLiteSharedRealizedStateCache, "_init_db", lambda self: None)
     backend = SQLiteSharedRealizedStateCache(
         tmp_path / "write_connect_retry.sqlite",
@@ -111,21 +132,15 @@ def test_set_if_absent_retries_when_connect_is_locked(monkeypatch, tmp_path):
 
     def _connect_with_first_lock():
         calls["count"] += 1
-        if calls["count"] == 1:
-            raise sqlite3.OperationalError("database is locked")
-        return conn
+        raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(backend, "_connect", _connect_with_first_lock)
 
-    wrote = backend.set_if_absent("k", {"value": 1.0})
-    row = conn.execute(
-        "SELECT COUNT(*) FROM realized_state_cache WHERE namespace = ? AND cache_key = ?",
-        (backend.namespace, "k"),
-    ).fetchone()[0]
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        backend.set_if_absent("k", {"value": 1.0})
 
-    assert wrote is True
-    assert row == 1
-    assert backend.get_stats()["lock_retries"] == 1
+    assert calls["count"] == 1
+    assert backend.get_stats()["lock_retries"] == 0
     conn.close()
 
 
@@ -146,3 +161,26 @@ def test_get_retries_when_select_is_locked(monkeypatch, tmp_path):
     assert row == {"value": 1.0}
     assert conn.select_attempts == 2
     assert backend.get_stats()["lock_retries"] == 1
+
+
+def test_get_does_not_retry_when_connect_is_locked(monkeypatch, tmp_path):
+    monkeypatch.setattr(SQLiteSharedRealizedStateCache, "_init_db", lambda self: None)
+    backend = SQLiteSharedRealizedStateCache(
+        tmp_path / "read_connect_locked.sqlite",
+        namespace="retry_ns",
+        max_retries=2,
+        retry_backoff_seconds=0.0,
+    )
+    calls = {"count": 0}
+
+    def _always_locked():
+        calls["count"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(backend, "_connect", _always_locked)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        backend.get("k")
+
+    assert calls["count"] == 1
+    assert backend.get_stats()["lock_retries"] == 0
