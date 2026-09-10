@@ -4,6 +4,7 @@ Functions to run the damage and recovery simulation.
 
 import sys
 import pickle
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,10 @@ from src.caching import (
     load_island_cache,
     load_overlap_cache,
     load_societal_allocation_cache,
+)
+from src.realized_state_cache import (
+    REALIZED_STATE_CACHE_SCHEMA_VERSION,
+    build_shared_realized_state_cache_from_config,
 )
 from src.damage_recovery import (
     default_damage_ratio_function,
@@ -57,6 +62,51 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from config import get_config
 from shutil import copyfile
+
+_WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS = {}
+_WORKER_SHARED_REALIZED_STATE_CACHE_LOCK = threading.Lock()
+
+
+def _worker_shared_realized_state_cache_key(cache_config, *, default_db_path):
+    if not cache_config or not cache_config.get("enabled", False):
+        return None
+    configured_path = cache_config.get("path")
+    db_path = configured_path if configured_path is not None else default_db_path
+    if db_path is None:
+        return None
+    normalized_db_path = str(Path(db_path).expanduser().resolve())
+    normalized_namespace = str(cache_config.get("namespace", "default"))
+    normalized_schema_version = str(
+        cache_config.get("schema_version", REALIZED_STATE_CACHE_SCHEMA_VERSION)
+    )
+    return (
+        str(cache_config.get("backend", "sqlite")).lower(),
+        normalized_db_path,
+        normalized_namespace,
+        normalized_schema_version,
+        float(cache_config.get("timeout_seconds", 30.0)),
+        int(cache_config.get("busy_timeout_ms", 30000)),
+        int(cache_config.get("max_retries", 5)),
+        float(cache_config.get("retry_backoff_seconds", 0.05)),
+    )
+
+
+def _get_worker_shared_realized_state_cache_backend(cache_config, *, default_db_path):
+    cache_key = _worker_shared_realized_state_cache_key(
+        cache_config,
+        default_db_path=default_db_path,
+    )
+    if cache_key is None:
+        return None
+    with _WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
+        backend = _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.get(cache_key)
+        if backend is None:
+            backend = build_shared_realized_state_cache_from_config(
+                cache_config,
+                default_db_path=default_db_path,
+            )
+            _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS[cache_key] = backend
+        return backend
 
 
 def _get_active_adaptation(adaptation, active_timesteps, timestep):
@@ -1345,11 +1395,43 @@ def simulate_asset_damage_recovery_access_breakdown(
     overlap_cache = init['overlap_cache']
     island_cache = init['island_cache']
 
+    _shared_realized_state_cache = None
+    _shared_realized_state_cache_config = None
+    _shared_cache_fail_hard = False
+    _cache_telemetry = None
+    _cache_telemetry_lock = None
     if societal_access_config is not None:
         allocation_cache = societal_access_config.get("allocation_cache")
         if allocation_cache is None:
             allocation_cache = load_societal_allocation_cache(interim_dir, hazard_dir)
             societal_access_config["allocation_cache"] = allocation_cache
+        _shared_realized_state_cache_config = societal_access_config.get(
+            "shared_realized_state_cache_config"
+        )
+        _shared_cache_fail_hard = bool(
+            societal_access_config.get("shared_cache_fail_hard", False)
+        )
+        _cache_telemetry = societal_access_config.get("cache_telemetry")
+        _cache_telemetry_lock = societal_access_config.get("cache_telemetry_lock")
+        _provided_shared_backend = societal_access_config.get("shared_realized_state_cache")
+        if _provided_shared_backend is not None:
+            _shared_realized_state_cache = _provided_shared_backend
+        elif _shared_realized_state_cache_config and timestep_output:
+            try:
+                _shared_realized_state_cache = _get_worker_shared_realized_state_cache_backend(
+                    _shared_realized_state_cache_config,
+                    default_db_path=interim_dir / "societal_realized_state_cache.sqlite",
+                )
+            except Exception as _shared_cache_err:
+                if _shared_cache_fail_hard:
+                    raise
+                import warnings
+                warnings.warn(
+                    f"Shared realized-state cache setup failed; continuing without shared cache: {_shared_cache_err}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                _shared_realized_state_cache = None
 
     # Results tracking for this simulation
     results = []
@@ -1549,8 +1631,11 @@ def simulate_asset_damage_recovery_access_breakdown(
 
     # --- Societal access postprocessing (optional) ---
     if societal_access_config is not None and timestep_output:
+        from src.societal_access import (
+            SharedRealizedStateCacheError,
+            postprocess_societal_access_results,
+        )
         try:
-            from src.societal_access import postprocess_societal_access_results
             _sa_cfg = societal_access_config
             allocation_cache = _sa_cfg.get("allocation_cache")
             if allocation_cache is None:
@@ -1558,6 +1643,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                     interim_dir, hazard_dir
                 )
                 _sa_cfg["allocation_cache"] = allocation_cache
+            _run_shared_realized_state_cache = _shared_realized_state_cache
             results, alloc_cache_updated = postprocess_societal_access_results(
                 summary_results=results,
                 detailed_results=timestep_results,
@@ -1576,8 +1662,14 @@ def simulate_asset_damage_recovery_access_breakdown(
                 fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
                 verbose=_sa_cfg.get("verbose", verbose),
                 profiler=profiler,
+                shared_realized_state_cache=_run_shared_realized_state_cache,
+                shared_cache_fail_hard=_shared_cache_fail_hard,
+                cache_telemetry=_cache_telemetry,
+                cache_telemetry_lock=_cache_telemetry_lock,
             )
             cache_updated["societal_allocation_cache"] = alloc_cache_updated
+        except SharedRealizedStateCacheError:
+            raise
         except Exception as _sa_err:
             import warnings
             warnings.warn(

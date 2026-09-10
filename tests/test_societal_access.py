@@ -19,6 +19,7 @@ from src.caching import (
     save_simulation_caches,
 )
 from src.simulation import simulate_asset_damage_recovery_access_breakdown
+from src.realized_state_cache import REALIZED_STATE_CACHE_SCHEMA_VERSION
 from src.societal_access import (
     POPULATION_GROUP_COLUMNS,
     _aggregate_population_by_island,
@@ -2040,3 +2041,134 @@ def test_postprocess_does_not_warn_on_proportionate_population_grid(recwarn):
         issubclass(w.category, RuntimeWarning) and "Population grid bounding-box area" in str(w.message)
         for w in recwarn.list
     )
+
+
+def test_shared_cache_setup_error_raises_when_fail_hard_enabled(monkeypatch, tmp_path):
+    config, gdf_assets, societal_access_config, hazard_maps = _build_hospital_msls_scenario(
+        monkeypatch, tmp_path
+    )
+    societal_access_config = dict(societal_access_config)
+    societal_access_config["shared_realized_state_cache_config"] = {
+        "enabled": True,
+        "backend": "sqlite",
+    }
+    societal_access_config["shared_cache_fail_hard"] = True
+
+    monkeypatch.setattr(
+        simulation_module,
+        "_get_worker_shared_realized_state_cache_backend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        simulate_asset_damage_recovery_access_breakdown(
+            gdf_assets=gdf_assets.copy(),
+            hazard_maps=hazard_maps,
+            number_repair_crews=1,
+            repair_crew_assignment_method="island",
+            flood_threshold=0.2,
+            root_dir=tmp_path,
+            config=config,
+            major_timestep=1,
+            timestep_output=True,
+            societal_access_config=societal_access_config,
+            verbose=False,
+        )
+
+
+def test_shared_cache_setup_error_warns_and_falls_back_when_fail_hard_disabled(
+    monkeypatch, tmp_path
+):
+    config, gdf_assets, societal_access_config, hazard_maps = _build_hospital_msls_scenario(
+        monkeypatch, tmp_path
+    )
+    societal_access_config = dict(societal_access_config)
+    societal_access_config["shared_realized_state_cache_config"] = {
+        "enabled": True,
+        "backend": "sqlite",
+    }
+    societal_access_config["shared_cache_fail_hard"] = False
+
+    monkeypatch.setattr(
+        simulation_module,
+        "_get_worker_shared_realized_state_cache_backend",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("setup failed")),
+    )
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Shared realized-state cache setup failed; continuing without shared cache",
+    ):
+        results, _, _ = simulate_asset_damage_recovery_access_breakdown(
+            gdf_assets=gdf_assets.copy(),
+            hazard_maps=hazard_maps,
+            number_repair_crews=1,
+            repair_crew_assignment_method="island",
+            flood_threshold=0.2,
+            root_dir=tmp_path,
+            config=config,
+            major_timestep=1,
+            timestep_output=True,
+            societal_access_config=societal_access_config,
+            verbose=False,
+        )
+    assert isinstance(results, list) and results
+
+
+def test_worker_shared_backend_cache_key_normalizes_schema_defaults_and_namespace(tmp_path):
+    default_db = tmp_path / "shared.sqlite"
+    cfg_missing_schema = {
+        "enabled": True,
+        "backend": "sqlite",
+        "path": str(default_db),
+        "namespace": 123,
+    }
+    cfg_explicit_schema = {
+        "enabled": True,
+        "backend": "sqlite",
+        "path": str(default_db),
+        "namespace": "123",
+        "schema_version": REALIZED_STATE_CACHE_SCHEMA_VERSION,
+    }
+    key_missing = simulation_module._worker_shared_realized_state_cache_key(
+        cfg_missing_schema, default_db_path=default_db
+    )
+    key_explicit = simulation_module._worker_shared_realized_state_cache_key(
+        cfg_explicit_schema, default_db_path=default_db
+    )
+    assert key_missing == key_explicit
+
+
+def test_worker_shared_backend_reuses_backend_for_equivalent_configs(tmp_path):
+    default_db = tmp_path / "shared.sqlite"
+    cfg_missing_schema = {
+        "enabled": True,
+        "backend": "sqlite",
+        "path": str(default_db),
+        "namespace": 123,
+    }
+    cfg_explicit_schema = {
+        "enabled": True,
+        "backend": "sqlite",
+        "path": str(default_db),
+        "namespace": "123",
+        "schema_version": REALIZED_STATE_CACHE_SCHEMA_VERSION,
+    }
+
+    with simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
+        for backend in simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.values():
+            close = getattr(backend, "close", None)
+            if callable(close):
+                close()
+        simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS.clear()
+
+    backend_a = simulation_module._get_worker_shared_realized_state_cache_backend(
+        cfg_missing_schema, default_db_path=default_db
+    )
+    backend_b = simulation_module._get_worker_shared_realized_state_cache_backend(
+        cfg_explicit_schema, default_db_path=default_db
+    )
+    assert backend_a is backend_b
+
+    with simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
+        assert len(simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS) == 1
