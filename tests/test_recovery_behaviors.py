@@ -8,12 +8,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.simulation import (
     SimulationState,
     _assign_repair_crews,
+    _build_crew_pools,
     _handle_completed_repairs,
-    _normalize_repair_crews_by_asset_type_config,
+    _normalize_number_repair_crews_config,
     _update_unreachable_assets,
 )
+
+
+def _typed_pool_state(typed_config):
+    """Build a crew_pools structure directly from a type->count dict, mirroring
+    what run_simulation derives from a type-specific number_repair_crews config."""
+    normalized = _normalize_number_repair_crews_config(typed_config)
+    return _build_crew_pools(normalized["typed"])
+
+
 def test_grouped_crew_pool_cannot_cross_islands():
-    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state = _typed_pool_state({"hospital": 1})
     pool_state["pools"][0]["available"] = {0: 1}
     assigned = np.zeros(2, dtype=bool)
 
@@ -28,7 +38,7 @@ def test_grouped_crew_pool_cannot_cross_islands():
         method="islands",
         verbose=False,
         asset_type=np.array(["hospital", "hospital"]),
-        repair_crews_by_asset_type=pool_state,
+        crew_pools=pool_state,
     )
 
     assert assigned.tolist() == [False, False]
@@ -36,7 +46,7 @@ def test_grouped_crew_pool_cannot_cross_islands():
 
 
 def test_grouped_pool_assigns_for_singular_island_method():
-    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state = _typed_pool_state({"hospital": 1})
     pool_state["pools"][0]["available"] = {0: 1}
 
     _, assigned = _assign_repair_crews(
@@ -50,7 +60,7 @@ def test_grouped_pool_assigns_for_singular_island_method():
         method="island",
         verbose=False,
         asset_type=np.array(["hospital", "hospital"]),
-        repair_crews_by_asset_type=pool_state,
+        crew_pools=pool_state,
     )
 
     assert assigned.sum() == 1
@@ -58,7 +68,7 @@ def test_grouped_pool_assigns_for_singular_island_method():
 
 
 def test_grouped_scalar_fallback_assigns_for_singular_island_method():
-    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state = _typed_pool_state({"hospital": 1})
 
     _, assigned = _assign_repair_crews(
         timestep=0,
@@ -71,7 +81,7 @@ def test_grouped_scalar_fallback_assigns_for_singular_island_method():
         method="island",
         verbose=False,
         asset_type=np.array(["hospital", "hospital"]),
-        repair_crews_by_asset_type=pool_state,
+        crew_pools=pool_state,
     )
 
     assert assigned.sum() == 1
@@ -79,7 +89,7 @@ def test_grouped_scalar_fallback_assigns_for_singular_island_method():
 
 
 def test_grouped_crew_returns_to_repaired_assets_current_island():
-    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state = _typed_pool_state({"hospital": 1})
     pool_state["pools"][0]["available"] = {0: 0}
     state = SimulationState(None, 1)
     state.island_ids[0] = 3
@@ -91,7 +101,7 @@ def test_grouped_crew_returns_to_repaired_assets_current_island():
         verbose=False,
         timestep=1,
         asset_type=np.array(["hospital"]),
-        repair_crews_by_asset_type=pool_state,
+        crew_pools=pool_state,
     )
 
     assert pool_state["pools"][0]["available"] == {0: 0, 3: 1}
@@ -99,7 +109,7 @@ def test_grouped_crew_returns_to_repaired_assets_current_island():
 
 
 def test_busy_grouped_crew_keeps_its_island_reachable():
-    pool_state = _normalize_repair_crews_by_asset_type_config({"hospital": 1})
+    pool_state = _typed_pool_state({"hospital": 1})
     pool_state["pools"][0]["available"] = {2: 0}
     state = SimulationState(None, 2)
     state.island_ids[:] = 2
@@ -112,7 +122,7 @@ def test_busy_grouped_crew_keeps_its_island_reachable():
         flooded_mask=np.zeros(2, dtype=bool),
         damage_threshold=0.1,
         asset_type=np.array(["hospital", "hospital"]),
-        repair_crews_by_asset_type=pool_state,
+        crew_pools=pool_state,
     )
 
     assert state.unreachable.tolist() == [False, False]

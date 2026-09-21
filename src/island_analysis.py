@@ -19,47 +19,78 @@ from shapely.geometry import LineString
 # ---------------------------------------------------------------------------
 
 ActorCountsByIsland = dict[int, int]
-ActorDistribution = dict[str, ActorCountsByIsland]
+# Island-outer/type-inner nesting: {island_id: {actor_type: count}}. The "*"
+# key is the conventional sentinel for an untyped/default pool.
+NestedActorDistribution = dict[int, dict[str, int]]
 
 
 def _is_nested_actor_distribution(value) -> bool:
-    return isinstance(value, dict) and all(isinstance(v, dict) for v in value.values())
+    """Detect the island-outer/type-inner nested shape ``{island_id: {type: count}}``.
+
+    An empty dict is explicitly treated as *not* nested (there is nothing to
+    disambiguate it from a flat, empty island distribution), so callers never
+    have to guess: ``_is_nested_actor_distribution({}) is False``.
+    """
+    if not isinstance(value, dict) or not value:
+        return False
+    return all(isinstance(v, dict) for v in value.values())
 
 
 def _extract_actor_counts(
     available_actors,
     actor_type: str,
-) -> "tuple[ActorCountsByIsland | int, str, ActorDistribution]":
-    """Extract a single actor type from flat/nested compatibility inputs."""
+) -> "tuple[ActorCountsByIsland | int, str, NestedActorDistribution]":
+    """Extract a single actor type's per-island counts from flat/nested inputs.
+
+    ``available_actors`` may be:
+      - ``int``: a single global (unpartitioned) count.
+      - ``dict[int, int]``: a flat island->count distribution (legacy, untyped).
+      - ``dict[int, dict[str, int]]``: island-outer/type-inner nested
+        distribution, e.g. ``{1: {"msls": 3, "hospital": 1}}``.
+    """
     if isinstance(available_actors, int):
-        return available_actors, "int", {actor_type: {}}
+        return available_actors, "int", {}
 
     if not isinstance(available_actors, dict):
-        raise TypeError("available_actors must be int, dict[island->count], or dict[type->dict]")
+        raise TypeError(
+            "available_actors must be int, dict[island->count], or "
+            "dict[island->dict[type->count]]"
+        )
 
     if _is_nested_actor_distribution(available_actors):
-        nested_distribution = {k: dict(v) for k, v in available_actors.items()}
-        actor_counts = dict(nested_distribution.get(actor_type, {}))
+        nested_distribution = {
+            int(island_id): dict(types) for island_id, types in available_actors.items()
+        }
+        actor_counts = {
+            island_id: types[actor_type]
+            for island_id, types in nested_distribution.items()
+            if actor_type in types
+        }
         return actor_counts, "nested", nested_distribution
 
     flat_distribution = {int(k): int(v) for k, v in available_actors.items()}
-    return flat_distribution, "flat", {actor_type: flat_distribution.copy()}
+    return flat_distribution, "flat", {}
 
 
 def _pack_actor_counts(
     *,
     updated_actor_counts: "ActorCountsByIsland",
     input_shape: str,
-    nested_distribution: "ActorDistribution",
+    nested_distribution: "NestedActorDistribution",
     actor_type: str,
 ):
-    """Pack updated actor counts back to the requested compatibility shape."""
-    if input_shape == "nested":
-        nested_distribution[actor_type] = updated_actor_counts
-        return nested_distribution
+    """Pack updated per-island actor counts back to the requested compatibility shape."""
+    if input_shape != "nested":
+        return updated_actor_counts
 
-    # For int or flat legacy inputs, keep legacy output shape.
-    return updated_actor_counts
+    # Clear any stale per-island entries for this actor_type before writing
+    # the freshly redistributed counts, so islands the type moved away from
+    # don't keep a leftover, outdated count.
+    for island_types in nested_distribution.values():
+        island_types.pop(actor_type, None)
+    for island_id, count in updated_actor_counts.items():
+        nested_distribution.setdefault(island_id, {})[actor_type] = count
+    return nested_distribution
 
 
 def _compute_initial_distribution(
@@ -679,26 +710,48 @@ def update_repair_crew_islands(
     l1_active_timesteps=None
 ):
     """
-    Distribute repair crews by island while keeping the island logic local.
+    Distribute repair crews (default and/or type-specific pools) by island.
+
+    ``available_repair_crews`` may be a plain ``int``, a flat
+    ``dict[island_id, int]`` (legacy, untyped), or an island-outer/type-inner
+    nested ``dict[island_id, dict[asset_type, int]]`` (including the ``"*"``
+    sentinel for the untyped/default pool). Each asset type present in the
+    nested structure -- including ``"*"`` -- is redistributed independently
+    via :func:`update_actor_islands`, but all types share the same
+    current_map/previous_map, so the overlap-cache key is identical across
+    them: the expensive transition-probability computation happens once per
+    timestep and is reused for every type/pool.
     """
     try:
-        return update_actor_islands(
-            available_repair_crews,
-            previous_rfids_islands,
-            current_rfids_islands,
-            rfids_lengths,
-            actor_type="repair_crews",
-            verbose=verbose,
-            overlap_cache=overlap_cache,
-            current_map=current_map,
-            previous_map=previous_map,
-            hazard_threshold=hazard_threshold,
-            hazard_dir=hazard_dir,
-            _config=_config,
-            cache_updated=cache_updated,
-            l1_area_geojson=l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps,
-        )
+        if isinstance(available_repair_crews, dict) and _is_nested_actor_distribution(
+            available_repair_crews
+        ):
+            actor_types = sorted(
+                {asset_type for types in available_repair_crews.values() for asset_type in types}
+            )
+        else:
+            actor_types = ["*"]
+
+        result = available_repair_crews
+        for actor_type in actor_types:
+            result = update_actor_islands(
+                result,
+                previous_rfids_islands,
+                current_rfids_islands,
+                rfids_lengths,
+                actor_type=actor_type,
+                verbose=verbose,
+                overlap_cache=overlap_cache,
+                current_map=current_map,
+                previous_map=previous_map,
+                hazard_threshold=hazard_threshold,
+                hazard_dir=hazard_dir,
+                _config=_config,
+                cache_updated=cache_updated,
+                l1_area_geojson=l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
+            )
+        return result
     except Exception as e:
         print(f"Error in crew redistribution: {e}")
         import traceback
@@ -720,7 +773,7 @@ def update_actor_islands(
     current_rfids_islands,
     rfids_lengths,
     *,
-    actor_type="repair_crews",
+    actor_type="*",
     verbose=False,
     overlap_cache=None,
     current_map=None,

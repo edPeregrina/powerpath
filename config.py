@@ -53,6 +53,15 @@ def get_config(root_dir=None, hazard_dir_override=None):
 
         # Simulation configuration
         'simulation_config': {
+            # number_repair_crews supports:
+            #   - scalar global crews:          10
+            #   - island-keyed crews:           {1: 3, 2: 5}
+            #   - global type-specific crews:   {"msls": 4, "hospital": 2}
+            #   - island + type-specific crews: {1: {"msls": 3, "hospital": 1},
+            #                                    2: {"msls": 2, "hospital": 4}}
+            # An optional "*" key inside a type-specific dict defines an
+            # explicit default/untyped pool; asset types not covered by any
+            # type-specific pool otherwise receive zero crews.
             'number_repair_crews': 20,
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
@@ -225,9 +234,94 @@ def get_config(root_dir=None, hazard_dir_override=None):
     return config
 
 
+def _validate_number_repair_crews(number_repair_crews):
+    """Validate the shape of ``simulation_config['number_repair_crews']``.
+
+    Mirrors the shape rules enforced at runtime by
+    ``src.simulation._normalize_number_repair_crews_config`` (scalar,
+    island-keyed dict, type-specific dict, or island+type nested dict), but
+    is intentionally self-contained here to avoid a config<->simulation
+    circular import. Returns a list of human-readable error strings; an
+    empty list means the value is valid.
+    """
+    errors = []
+    if isinstance(number_repair_crews, bool):
+        return [f"number_repair_crews must be an int or dict, not a bool: {number_repair_crews!r}"]
+    if isinstance(number_repair_crews, int):
+        if number_repair_crews < 0:
+            errors.append("number_repair_crews scalar value must be non-negative.")
+        return errors
+    if not isinstance(number_repair_crews, dict):
+        return [
+            "number_repair_crews must be an int, dict[island_id, int], "
+            "dict[asset_type, int], or dict[island_id, dict[asset_type, int]]; "
+            f"got {type(number_repair_crews).__name__}."
+        ]
+    if not number_repair_crews:
+        return errors
+
+    keys = list(number_repair_crews.keys())
+    is_int_key = lambda k: isinstance(k, int) and not isinstance(k, bool)
+    all_int_keys = all(is_int_key(k) for k in keys)
+    all_str_keys = all(isinstance(k, str) for k in keys)
+
+    if not all_int_keys and not all_str_keys:
+        errors.append(
+            "number_repair_crews dict keys must be all island IDs (int) or all "
+            "asset-type strings (str); mixed key types are not supported."
+        )
+        return errors
+
+    values = list(number_repair_crews.values())
+    value_is_dict = [isinstance(v, dict) for v in values]
+
+    if all_int_keys:
+        if any(value_is_dict) and not all(value_is_dict):
+            errors.append(
+                "number_repair_crews island-keyed dict values must be all plain "
+                "counts (int) or all per-type dicts, not a mix."
+            )
+            return errors
+        if all(value_is_dict):
+            for island_id, type_counts in number_repair_crews.items():
+                for asset_type, count in type_counts.items():
+                    if not isinstance(asset_type, str):
+                        errors.append(
+                            f"number_repair_crews island {island_id}: inner keys must "
+                            f"be asset-type strings, got {asset_type!r}."
+                        )
+                    elif not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                        errors.append(
+                            f"number_repair_crews island {island_id}, type '{asset_type}': "
+                            f"crew count must be a non-negative int, got {count!r}."
+                        )
+        else:
+            for island_id, count in number_repair_crews.items():
+                if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    errors.append(
+                        f"number_repair_crews island {island_id}: crew count must be "
+                        f"a non-negative int, got {count!r}."
+                    )
+    else:
+        for asset_type, count in number_repair_crews.items():
+            if isinstance(count, dict):
+                errors.append(
+                    f"number_repair_crews type '{asset_type}': global type-specific "
+                    "values must be plain counts (int); use the island+type nested "
+                    "form for per-island type pools."
+                )
+            elif not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                errors.append(
+                    f"number_repair_crews type '{asset_type}': crew count must be a "
+                    f"non-negative int, got {count!r}."
+                )
+
+    return errors
+
+
 def validate_config(config):
     """
-    Check for required directories.
+    Check for required directories and simulation_config shape validity.
     
     Args:
         config (dict): Configuration dictionary
@@ -243,10 +337,14 @@ def validate_config(config):
         path = config[key]
         if not path.exists():
             missing_dirs.append(f"{key}: {path}")
+
+    warnings = _validate_number_repair_crews(
+        config.get('simulation_config', {}).get('number_repair_crews', 0)
+    )
+
+    is_valid = len(missing_dirs) == 0 and len(warnings) == 0
     
-    is_valid = len(missing_dirs) == 0
-    
-    return is_valid, missing_dirs
+    return is_valid, missing_dirs, warnings
 
 
 def setup_directories(config):
