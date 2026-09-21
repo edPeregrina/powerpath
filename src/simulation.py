@@ -37,11 +37,10 @@ from src.damage_recovery import (
     vectorized_damage_ratio_solver,
 )
 from src.dependency_evaluator import (
-    activate_delayed_trigger_waits,
-    clear_completed_delayed_triggers,
-    evaluate_dependencies,
-    evaluate_dependencies_from_graph,
+    activate_hazard_recovery_waits,
+    evaluate_operational_state,
 )
+from src.dependency_topology import expand_dependency_edges
 from src.hazard_analysis_electricity import (
     find_hazard_value_at_points_optimized,
 )
@@ -56,7 +55,6 @@ from src.recovery_scheduler import (
     initialize_recovery_wait_vectors,
 )
 from src.timing_profiler import NULL_PROFILER
-from src.utils import build_service_area_map_from_rules
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -128,7 +126,22 @@ class SimulationState:
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
         self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
+        # Active-mask store for hazard_recovery_wait::<name> countdowns (delayed
+        # hazard return-to-operational triggers). Kept separate from
+        # dependency_restart_active so restart_ready never inspects hazard waits.
         self.recovery_delay_active = {}
+        # Active-mask store for restart_wait::<edge_key> countdowns (one
+        # independent timer per dependency edge -- see src.dependency_evaluator).
+        self.dependency_restart_active = {}
+        # Separated operational-state layers (see src.dependency_evaluator):
+        # intrinsic (physical/repair) -> hazard -> dependency -> restart-ready
+        # -> effective. ``operational`` remains the final effective state
+        # consumed by all existing downstream code.
+        self.intrinsic_operational = np.ones(num_assets, dtype=bool)
+        self.hazard_available = np.ones(num_assets, dtype=bool)
+        self.dependency_available = np.ones(num_assets, dtype=bool)
+        self.restart_ready = np.ones(num_assets, dtype=bool)
+        self.effective_operational = np.ones(num_assets, dtype=bool)
         self.dependency_blocked_mask = np.zeros(num_assets, dtype=bool)
         self.dependency_report = {}
         self.simulation_warnings = []
@@ -792,10 +805,12 @@ def _initialize_simulation(
 
     dependency_config = _config.get('dependency_parameters', {})
     knowledge_graph_rules = dependency_config.get('knowledge_graph', None) or []
-    if knowledge_graph_rules and dependency_config.get('service_area_map', None) is None:
-        dependency_config['service_area_map'] = build_service_area_map_from_rules(
+    if knowledge_graph_rules and dependency_config.get('dependency_edges', None) is None:
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+
+        dependency_config['dependency_edges'] = expand_dependency_edges(
             gdf_assets,
-            knowledge_graph_rules,
+            DependencyKnowledgeGraph.from_config(knowledge_graph_rules),
         )
 
     # Build L1/L2 depth reduction array (with caching)
@@ -1057,85 +1072,75 @@ def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
         active_masks={"repair_time": can_repair_mask},
     )
 
-def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None):
-    """Evaluate dependency rules each timestep using current state vectors.
+def _update_operational_state(
+    state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None, dependency_edges=None,
+):
+    """Evaluate hazard + dependency availability each timestep using current state vectors.
 
-    When a knowledge graph is configured this function performs two passes:
-
-    1. **Restore pass** – re-enables assets whose return-to-operational
-       trigger is now satisfied (no longer flooded and repair condition met).
-    2. **Block pass** – suppresses assets that still do not meet conditions
-       (currently flooded or repair not yet complete per the rule trigger).
-
-    The two-pass design means the knowledge graph is the single authority for
-    both directions of operational-state change.  The ``state.operational``
-    array is updated in-place via assignment.
+    Computes the fully separated operational-state layers (see
+    :func:`src.dependency_evaluator.evaluate_operational_state`) --
+    ``intrinsic_operational -> hazard_available -> dependency_available ->
+    restart_ready -> effective_operational`` -- and publishes the final
+    result as ``state.operational`` for all existing downstream consumers
+    (plotting, timestep results, societal-access postprocessing, realized-
+    state caching). ``state.operational`` going *into* this call is treated
+    as this timestep's intrinsic/physical operational state (repair
+    completion etc.); it is never treated as a temporary dependency-only
+    state.
 
     Args:
         state: Current :class:`SimulationState`.
         asset_type: String array of asset types.
         flooded_mask: Boolean array; ``True`` where hazard exceeds threshold.
         config: Simulation configuration dict.
-        repair_threshold: Repair-time value below which an asset is considered
-            not in need of formal repair (used on the legacy path only).
+        repair_threshold: Unused by the graph-aware evaluator; retained for
+            call-signature compatibility.
         knowledge_graph: Pre-built :class:`DependencyKnowledgeGraph` instance,
             or ``None`` to build from ``config['dependency_parameters']`` each
-            call (legacy behaviour; use the pre-built instance for performance).
+            call (use the pre-built instance for performance).
+        dependency_edges: Pre-expanded list of
+            :class:`~src.dependency_topology.DependencyEdge` runtime edges, or
+            ``None`` to expand from ``config['dependency_parameters']`` (not
+            recommended per-timestep; expand once and pass it in).
     """
     dependency_config = config.get('dependency_parameters', {})
     kg_config = dependency_config.get('knowledge_graph', None) or []
-    state.dependency_report = {}
 
-    if kg_config:
-        # Graph-aware path: per-pair rules from the knowledge graph.
-        if knowledge_graph is None:
-            from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-            knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
-        hazard_type = dependency_config.get('hazard_type', 'flooding')
-        service_area_map = dependency_config.get('service_area_map', None)
-        # evaluate_dependencies_from_graph internally calls restore_operational_from_graph
-        # first (restore pass) then applies the block pass, so state.operational is
-        # updated correctly in both directions.
-        state.operational, state.dependency_report = evaluate_dependencies_from_graph(
-            state.operational,
-            asset_type,
-            hazard_type,
-            knowledge_graph,
-            flooded_mask=flooded_mask,
-            repair_time=state.recovery_wait_vectors["repair_time"],
-            wait_vectors=state.recovery_wait_vectors,
-            service_area_map=service_area_map,
-            previous_dependency_blocked_mask=state.dependency_blocked_mask,
-            return_report=True,
-        )
-        state.dependency_blocked_mask = state.dependency_report[
-            "dependency_blocked_mask"
-        ]
-        clear_completed_delayed_triggers(
-            state.operational,
-            state.recovery_wait_vectors,
-            state.recovery_delay_active,
-        )
-    else:
-        # Legacy flat-flags path (backwards compatible).
-        state.operational, state.dependency_report = evaluate_dependencies(
-            state.operational,
-            asset_type,
-            hazard_values=state.current_hazard_values,
-            flooded_mask=flooded_mask,
-            repair_time=state.recovery_wait_vectors["repair_time"],
-            repair_threshold=repair_threshold,
-            dependency_map=dependency_config.get('dependency_map'),
-            area_dependencies=dependency_config.get('area_dependencies'),
-            pairwise_dependencies=dependency_config.get('pairwise_dependencies'),
-            previous_dependency_blocked_mask=state.dependency_blocked_mask,
-            enable_default_rules=dependency_config.get('enable_default_rules', True),
-            require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
-            return_report=True,
-        )
-        state.dependency_blocked_mask = state.dependency_report[
-            "dependency_blocked_mask"
-        ]
+    if knowledge_graph is None:
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+        knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+
+    if dependency_edges is None:
+        dependency_edges = dependency_config.get('dependency_edges', None) or []
+
+    hazard_type = dependency_config.get('hazard_type', 'flooding')
+    restart_delay_steps = dependency_config.get('dependency_restart_delay_steps', 0.0)
+
+    previous_dependency_available = state.dependency_available
+
+    effective_operational, report = evaluate_operational_state(
+        intrinsic_operational=state.operational,
+        asset_type=asset_type,
+        hazard_type=hazard_type,
+        knowledge_graph=knowledge_graph,
+        flooded_mask=flooded_mask,
+        repair_time=state.recovery_wait_vectors["repair_time"],
+        dependency_edges=dependency_edges,
+        wait_vectors=state.recovery_wait_vectors,
+        hazard_active_masks=state.recovery_delay_active,
+        restart_active_masks=state.dependency_restart_active,
+        previous_dependency_available=previous_dependency_available,
+        restart_delay_steps=restart_delay_steps,
+    )
+
+    state.intrinsic_operational = report["intrinsic_operational"]
+    state.hazard_available = report["hazard_available"]
+    state.dependency_available = report["dependency_available"]
+    state.restart_ready = report["restart_ready"]
+    state.effective_operational = effective_operational
+    state.operational = effective_operational
+    state.dependency_blocked_mask = report["dependency_blocked_mask"]
+    state.dependency_report = report
 
     warning = state.dependency_report.get("warning")
     if warning and warning not in state.simulation_warnings:
@@ -1492,13 +1497,18 @@ def simulate_asset_damage_recovery_access_breakdown(
     # Normalize grouped type-pool configuration to mutable internal state.
     repair_crews_by_asset_type = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
 
-    # Pre-build the knowledge graph once to avoid reconstructing it every timestep.
+    # Pre-build the knowledge graph and runtime dependency edges once to avoid
+    # reconstructing/expanding them every timestep.
     _knowledge_graph = None
+    _dependency_edges = []
     _dep_config = _config.get('dependency_parameters', {})
     _kg_config = _dep_config.get('knowledge_graph', None) or []
     if _kg_config:
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
+        _dependency_edges = _dep_config.get('dependency_edges', None)
+        if _dependency_edges is None:
+            _dependency_edges = expand_dependency_edges(gdf_assets, _knowledge_graph)
 
     # Named distinctly from the per-timestep "simulation.total" aggregate produced by
     # profiler.timestep(loop="simulation") below -- both would otherwise share the
@@ -1531,9 +1541,9 @@ def simulate_asset_damage_recovery_access_breakdown(
                     cache_updated[cache_name] = cache_content
 
                 if _knowledge_graph is not None:
-                    with profiler.section("simulation.activate_delayed_trigger_waits"):
-                        activate_delayed_trigger_waits(
-                            state.operational,
+                    with profiler.section("simulation.activate_hazard_recovery_waits"):
+                        activate_hazard_recovery_waits(
+                            state.hazard_available,
                             asset_type,
                             _dep_config.get('hazard_type', 'flooding'),
                             _knowledge_graph,
@@ -1569,7 +1579,10 @@ def simulate_asset_damage_recovery_access_breakdown(
 
                 # 5. Evaluate dependencies using current repair/hazard state
                 with profiler.section("simulation._update_operational_state"):
-                    _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
+                    _update_operational_state(
+                        state, asset_type, flooded_mask, _config, repair_threshold,
+                        knowledge_graph=_knowledge_graph, dependency_edges=_dependency_edges,
+                    )
 
                 # 6. Update unreachable assets (island method)
                 if island_method_active:

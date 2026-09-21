@@ -135,51 +135,62 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'reference_group': 'total',
         },
 
-        # Dependency parameters – per-pair rules between hazard types and asset types.
+        # Dependency parameters -- type-level knowledge-graph rules (see
+        # src.dependency_knowledge_graph) plus the runtime knobs that consume
+        # them in the simulation loop.
         #
-        # 'hazard_type'  : the active hazard (e.g. "flooding")
-        # 'asset_type_a' : primary asset type ("msls", "ms", "ls")
-        # 'asset_type_b' : downstream asset type within A's service area, or null
-        # 'relationship' : "direct" (rule on A itself) | "service_area" (A blocks B)
-        # 'parameters'   :
-        #   hazard_blocks_operation  : bool – True means the asset is non-operational
-        #                              while hazard exposure exceeds flood_threshold
-        #   return_to_operational    : what must happen before the asset is operational again
-        #     trigger : "immediate"       – returns as soon as hazard clears (no repair needed)
-        #               "repair_complete" – returns only when repair_time reaches 0
-        #               "repair_below"   – returns when repair_time < threshold
-        #               "delayed"        – returns after a crew-independent countdown
-        #     threshold : float           – used only with "repair_below"
-        #     delay_steps : float         – used only with "delayed"
-        #     wait_vector : str           – named countdown vector used with "delayed"
+        # 'hazard_type' : the active hazard (e.g. "flooding") used to look up
+        #                 hazard-availability rules from 'knowledge_graph'.
+        #
+        # 'knowledge_graph' : a list of type-level rule dicts (asset *types*
+        #                 only -- never asset IDs/indices), each either:
+        #                   {"relation": "hazard", "hazard_type": ..., "source_type": ...,
+        #                    "hazard_blocks_operation": bool, "return_to_operational": {...}}
+        #                 or:
+        #                   {"relation": "dependency", "source_type": ..., "target_type": ...,
+        #                    "topology": "direct" | "voronoi" | "radius",
+        #                    "availability_policy": "exclusive" | "any" | "at_least_n",
+        #                    "radius_m": float (radius topology only),
+        #                    "minimum_available": int (at_least_n only)}
+        #                 Defaults to
+        #                 ``src.dependency_knowledge_graph.build_default_knowledge_graph()``
+        #                 -- the msls/ms/ls/hospital return-to-operational rules
+        #                 plus a msls -> hospital direct dependency rule -- unless
+        #                 explicitly overridden. Pass an explicit list (including
+        #                 ``[]`` to opt out entirely) to take control of the rules
+        #                 yourself; see ``book/Use_Case_sample_knowledge_graph.ipynb``
+        #                 for a worked example. NOTE: the built-in default rule uses
+        #                 topology="direct" for msls -> hospital, which requires at
+        #                 most one msls asset; datasets with multiple substations
+        #                 must override this rule with topology="voronoi" or
+        #                 "radius" (or supply precomputed 'dependency_edges').
+        #
+        # 'dependency_edges' : optional caller-precomputed list of runtime
+        #                 :class:`~src.dependency_topology.DependencyEdge`
+        #                 instances. When left as ``None`` (the default), the
+        #                 simulation expands 'knowledge_graph' against
+        #                 gdf_assets once via
+        #                 :func:`src.dependency_topology.expand_dependency_edges`.
+        #                 When provided, this precomputed value is preserved
+        #                 and never overwritten by the simulation.
+        #
+        # 'dependency_restart_delay_steps' : number of simulation steps a
+        #                 restored dependency must remain continuously
+        #                 available before the assets it gates resume
+        #                 operating (see restart_wait::<edge_key> in
+        #                 src.dependency_evaluator). Kept separate from
+        #                 hazard-recovery waits.
         #
         # Road availability remains governed exclusively by the existing
         # road-graph exposure filtering and is not part of this dependency model.
         # Substation/hospital structural damage remains governed by fragility
-        # and repair completion in the simulation loop.
-        #
-        # 'knowledge_graph' below defaults to
-        # ``src.dependency_knowledge_graph.build_default_knowledge_graph()`` --
-        # i.e. the msls/ms/ls/hospital return-to-operational rules plus the
-        # msls -> hospital service-area rule are wired in automatically
-        # whenever this key is not explicitly overridden. Pass an explicit
-        # list (including ``[]`` to opt out entirely) to take control of the
-        # rules yourself; see ``book/Use_Case_sample_knowledge_graph.ipynb``
-        # for a worked example of doing so.
+        # and repair completion in the simulation loop; dependency blocking
+        # never mutates damage, repair time, or fragility state.
         'dependency_parameters': {
             'hazard_type': 'flooding',  # active hazard type for graph look-up
-            'enable_default_rules': True,
-            'require_repair_for_operational': False,
-            # Legacy flat dependency inputs. Area entries map one supplier to
-            # multiple dependents; pairwise entries are (supplier, dependent).
-            'dependency_map': {},
-            'area_dependencies': [],
-            'pairwise_dependencies': [],
             'knowledge_graph': build_default_knowledge_graph().to_config(),
-            # Optional: mapping of asset index (A) → list of asset indices (B)
-            # for service_area rules. When left as None and service-area rules
-            # are configured, the simulation precomputes this from gdf_assets.
-            'service_area_map': None,
+            'dependency_edges': None,
+            'dependency_restart_delay_steps': 0.0,
         }
     }
     

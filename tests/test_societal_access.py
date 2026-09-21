@@ -1298,14 +1298,16 @@ def test_hospital_not_flooded_disrupted_voronoi():
       hospital operational: True
       hospital access: 100 %
 
-    After MSLS failure (pairwise dependency blocks the hospital)
+    After MSLS failure (dependency-graph edge blocks the hospital)
       hospital flooded: False
       roads disconnected: False   (island_id unchanged)
       MSLS operational: False
       hospital operational: False (blocked by dependency)
       hospital access: 0 %
     """
-    from src.dependency_evaluator import evaluate_dependencies
+    from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+    from src.dependency_topology import expand_dependency_edges
+    from src.dependency_evaluator import evaluate_dependency_availability
 
     # Assets: index 0 = supporting MSLS station, index 1 = fake hospital
     asset_types = np.array(["msls", "hospital"])
@@ -1348,19 +1350,29 @@ def test_hospital_not_flooded_disrupted_voronoi():
         allocation_cache, pop, "cell_id", islands, road_state_key="roads_connected"
     )
 
-    # MSLS -> hospital pairwise dependency: when MSLS (index 0) is non-operational,
-    # the hospital (index 1) is blocked.
-    pairwise_deps = [(0, 1)]
+    # MSLS -> hospital dependency rule (exclusive: exactly one msls governs
+    # the hospital, direct topology works deterministically here because
+    # there is exactly one msls asset). Expanded into a concrete runtime
+    # edge over gdf_assets, then evaluated hazard-agnostically from the
+    # current operational baseline -- this replaces the removed legacy
+    # pairwise_dependencies/evaluate_dependencies flat-schema path.
+    knowledge_graph = DependencyKnowledgeGraph.from_config([
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "hospital",
+            "topology": "direct",
+            "availability_policy": "exclusive",
+        }
+    ])
+    dependency_edges = expand_dependency_edges(gdf_assets, knowledge_graph)
 
     # --- BEFORE MSLS failure ---
     op_initial = np.array([True, True])
-    op_before, _ = evaluate_dependencies(
-        op_initial.copy(),
-        asset_types,
-        hazard_values=hazard_values,
-        pairwise_dependencies=pairwise_deps,
-        return_report=True,
+    dependency_available_before, _ = evaluate_dependency_availability(
+        dependency_edges, op_initial, num_assets=len(asset_types)
     )
+    op_before = op_initial & dependency_available_before
     hospital_operational_before = bool(op_before[1])
 
     roads_remain_connected = bool(island_ids[0] == island_ids[1])
@@ -1385,13 +1397,10 @@ def test_hospital_not_flooded_disrupted_voronoi():
 
     # --- AFTER MSLS failure (hospital physically intact, roads intact) ---
     op_msls_failed = np.array([False, True])   # only MSLS fails; hospital not flooded
-    op_after, _ = evaluate_dependencies(
-        op_msls_failed.copy(),
-        asset_types,
-        hazard_values=hazard_values,
-        pairwise_dependencies=pairwise_deps,
-        return_report=True,
+    dependency_available_after, _ = evaluate_dependency_availability(
+        dependency_edges, op_msls_failed, num_assets=len(asset_types)
     )
+    op_after = op_msls_failed & dependency_available_after
     hospital_operational_after = bool(op_after[1])
 
     updated_after, _ = postprocess_societal_access_results(
@@ -1434,37 +1443,27 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
     config["simulation_config"]["accessibility_model"] = None
     config["dependency_parameters"]["knowledge_graph"] = [
         {
+            "relation": "hazard",
             "hazard_type": "flooding",
-            "asset_type_a": "msls",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "repair_complete"},
-            },
+            "source_type": "msls",
+            "hazard_blocks_operation": False,
+            "return_to_operational": {"trigger": "repair_complete"},
         },
         {
+            "relation": "hazard",
             "hazard_type": "flooding",
-            "asset_type_a": "hospital",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "repair_complete"},
-            },
+            "source_type": "hospital",
+            "hazard_blocks_operation": False,
+            "return_to_operational": {"trigger": "repair_complete"},
         },
         {
-            "hazard_type": "flooding",
-            "asset_type_a": "msls",
-            "asset_type_b": "hospital",
-            "relationship": "service_area",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "immediate"},
-            },
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "hospital",
+            "topology": "direct",
+            "availability_policy": "exclusive",
         },
     ]
-    config["dependency_parameters"]["service_area_map"] = None
 
     gdf_assets = gpd.GeoDataFrame(
         {"type": ["msls", "hospital"]},
@@ -1597,37 +1596,27 @@ def _build_hospital_msls_scenario(monkeypatch, tmp_path):
     config["simulation_config"]["accessibility_model"] = None
     config["dependency_parameters"]["knowledge_graph"] = [
         {
+            "relation": "hazard",
             "hazard_type": "flooding",
-            "asset_type_a": "msls",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "repair_complete"},
-            },
+            "source_type": "msls",
+            "hazard_blocks_operation": False,
+            "return_to_operational": {"trigger": "repair_complete"},
         },
         {
+            "relation": "hazard",
             "hazard_type": "flooding",
-            "asset_type_a": "hospital",
-            "asset_type_b": None,
-            "relationship": "direct",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "repair_complete"},
-            },
+            "source_type": "hospital",
+            "hazard_blocks_operation": False,
+            "return_to_operational": {"trigger": "repair_complete"},
         },
         {
-            "hazard_type": "flooding",
-            "asset_type_a": "msls",
-            "asset_type_b": "hospital",
-            "relationship": "service_area",
-            "parameters": {
-                "hazard_blocks_operation": False,
-                "return_to_operational": {"trigger": "immediate"},
-            },
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "hospital",
+            "topology": "direct",
+            "availability_policy": "exclusive",
         },
     ]
-    config["dependency_parameters"]["service_area_map"] = None
 
     gdf_assets = gpd.GeoDataFrame(
         {"type": ["msls", "hospital"]},
