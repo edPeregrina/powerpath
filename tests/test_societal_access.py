@@ -606,15 +606,19 @@ def test_postprocess_without_matching_allocation_emits_nan():
     summary_results = [{"timestep": 0, "map": 99}]
     detailed_results = [{"timestep": 0, "map": 99, "operational": [True], "island_id": [1]}]
 
-    updated_summary, _ = postprocess_societal_access_results(
-        summary_results=summary_results,
-        detailed_results=detailed_results,
-        gdf_assets=gdf_assets,
-        pop_grid_gdf=pop,
-        cell_id_column="cell_id",
-        allocation_cache={},
-        all_functions=["hospital"],
-    )
+    with pytest.warns(
+        RuntimeWarning,
+        match="road_state_key is absent",
+    ):
+        updated_summary, _ = postprocess_societal_access_results(
+            summary_results=summary_results,
+            detailed_results=detailed_results,
+            gdf_assets=gdf_assets,
+            pop_grid_gdf=pop,
+            cell_id_column="cell_id",
+            allocation_cache={},
+            all_functions=["hospital"],
+        )
 
     assert math.isnan(updated_summary[0]["societal_access_pct__hospital__total"])
 

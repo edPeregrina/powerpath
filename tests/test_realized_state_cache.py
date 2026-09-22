@@ -375,6 +375,7 @@ def test_build_shared_backend_expands_user_path(monkeypatch, tmp_path):
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
     cache = build_shared_realized_state_cache_from_config(
         {"enabled": True, "backend": "sqlite", "path": "~/cache.sqlite"}
     )
