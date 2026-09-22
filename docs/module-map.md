@@ -202,7 +202,7 @@ Those outputs feed:
 
 ### Source code
 
-Can be found in [`src/`]
+Can be found in [`src/`](../src/)
 
 ### Notebooks
 
