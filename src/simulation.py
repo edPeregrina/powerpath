@@ -37,11 +37,10 @@ from src.damage_recovery import (
     vectorized_damage_ratio_solver,
 )
 from src.dependency_evaluator import (
-    activate_delayed_trigger_waits,
-    clear_completed_delayed_triggers,
-    evaluate_dependencies,
-    evaluate_dependencies_from_graph,
+    activate_hazard_recovery_waits,
+    evaluate_operational_state,
 )
+from src.dependency_topology import expand_dependency_edges
 from src.hazard_analysis_electricity import (
     find_hazard_value_at_points_optimized,
 )
@@ -56,7 +55,6 @@ from src.recovery_scheduler import (
     initialize_recovery_wait_vectors,
 )
 from src.timing_profiler import NULL_PROFILER
-from src.utils import build_service_area_map_from_rules
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -128,7 +126,22 @@ class SimulationState:
         self.current_hazard_values = np.zeros(num_assets, dtype=np.float64)
         self.island_ids = np.zeros(num_assets, dtype=int)
         self.recovery_wait_vectors = initialize_recovery_wait_vectors(num_assets)
+        # Active-mask store for hazard_recovery_wait::<name> countdowns (delayed
+        # hazard return-to-operational triggers). Kept separate from
+        # dependency_restart_active so restart_ready never inspects hazard waits.
         self.recovery_delay_active = {}
+        # Active-mask store for restart_wait::<edge_key> countdowns (one
+        # independent timer per dependency edge -- see src.dependency_evaluator).
+        self.dependency_restart_active = {}
+        # Separated operational-state layers (see src.dependency_evaluator):
+        # intrinsic (physical/repair) -> hazard -> dependency -> restart-ready
+        # -> effective. ``operational`` remains the final effective state
+        # consumed by all existing downstream code.
+        self.intrinsic_operational = np.ones(num_assets, dtype=bool)
+        self.hazard_available = np.ones(num_assets, dtype=bool)
+        self.dependency_available = np.ones(num_assets, dtype=bool)
+        self.restart_ready = np.ones(num_assets, dtype=bool)
+        self.effective_operational = np.ones(num_assets, dtype=bool)
         self.dependency_blocked_mask = np.zeros(num_assets, dtype=bool)
         self.dependency_report = {}
         self.simulation_warnings = []
@@ -142,7 +155,7 @@ def _update_hazard_map_states(
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
     fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
-    repair_crews_by_asset_type=None, l2_asset_geojson=None, l2_active_timesteps=None,
+    crew_pools=None, l2_asset_geojson=None, l2_active_timesteps=None,
     societal_access_config=None,
 ):
     """
@@ -293,11 +306,15 @@ def _update_hazard_map_states(
             rfids_islands = None
        
         if rfids_islands is not None:
-            # Call with all caching parameters
-            available_repair_crews = update_repair_crew_islands(
-                available_repair_crews,
-                previous_rfids_islands, 
-                rfids_islands, 
+            # Redistribute the default ("*") pool and any type-specific pools
+            # together in a single pass so they share the same overlap-cache
+            # key (current_map/previous_map) -- the transition-probability
+            # computation happens once and is reused across every pool.
+            combined_crew_state = _assemble_nested_crew_state(available_repair_crews, crew_pools)
+            combined_crew_state = update_repair_crew_islands(
+                combined_crew_state,
+                previous_rfids_islands,
+                rfids_islands,
                 rfids_lengths,
                 verbose=verbose,
                 overlap_cache=overlap_cache,
@@ -307,25 +324,10 @@ def _update_hazard_map_states(
                 hazard_dir=hazard_dir,
                 _config=_config,
                 cache_updated=cache_updated,
+                l1_area_geojson=l1_area_geojson,
+                l1_active_timesteps=l1_active_timesteps,
             )
-            if repair_crews_by_asset_type is not None:
-                for pool in repair_crews_by_asset_type["pools"]:
-                    pool["available"] = update_repair_crew_islands(
-                        pool["available"],
-                        previous_rfids_islands,
-                        rfids_islands,
-                        rfids_lengths,
-                        verbose=verbose,
-                        overlap_cache=overlap_cache,
-                        current_map=current_map_str,
-                        previous_map=previous_map_str,
-                        hazard_threshold=flood_threshold,
-                        hazard_dir=hazard_dir,
-                        _config=_config,
-                        cache_updated=cache_updated,
-                        l1_area_geojson=l1_area_geojson,
-                        l1_active_timesteps=l1_active_timesteps,
-                    )
+            available_repair_crews = _disassemble_nested_crew_state(combined_crew_state, crew_pools)
 
             previous_map_counter = map_counter
             previous_rfids_islands = rfids_islands.copy()
@@ -337,12 +339,20 @@ def _update_hazard_map_states(
     # Mask of assets flooded above threshold
     flooded_mask = state.current_hazard_values > flood_threshold
 
-    # Apply fragility to assets that are not currently under repair
-    assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.operational
+    # Apply fragility to assets that are not currently under repair.
+    # Gated on `state.intrinsic_operational` (the persisted physical/intrinsic
+    # state), not `state.operational` (the final effective state, which may be
+    # temporarily False due to dependency/hazard blocking alone). Using the
+    # effective state here would incorrectly skip fragility evaluation for an
+    # intrinsically-fine asset that happens to be dependency-blocked.
+    assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.intrinsic_operational
 
-    # Update operational status based on fragility for assets above threshold
+    # Update intrinsic operational status based on fragility for assets above threshold.
+    # This only ever lowers `state.intrinsic_operational` (physical failure), never
+    # `state.operational` directly -- the effective state is recomputed from the
+    # intrinsic state every timestep in `_update_operational_state`.
     if np.any(assets_to_evaluate):
-        fragility_operational = np.ones_like(state.operational, dtype=bool)
+        fragility_operational = np.ones_like(state.intrinsic_operational, dtype=bool)
         hazard_subset = state.current_hazard_values[assets_to_evaluate]
         asset_type_subset = asset_type[assets_to_evaluate]
         fragility_result = default_fragility_function(
@@ -353,7 +363,7 @@ def _update_hazard_map_states(
             fragility_models=_config['recovery_parameters'].get('fragility_models'),
         )
         fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
-        state.operational = np.minimum(state.operational, fragility_operational)
+        state.intrinsic_operational = np.minimum(state.intrinsic_operational, fragility_operational)
 
     # Update damage ratio and repair time for assets flooded above threshold this timestep
     if np.any(flooded_mask):
@@ -596,94 +606,163 @@ def update_repair_crew_assignment_optimized(timestep, available_repair_crews, re
     return available_repair_crews, repair_crews_assigned
 
 
-def _normalize_asset_type_group_key(group_key):
-    """Normalize an asset-type group key to a frozenset of strings."""
-    if isinstance(group_key, str):
-        normalized = [group_key]
-    elif isinstance(group_key, (tuple, list, set, frozenset, np.ndarray, pd.Index)):
-        normalized = [str(v) for v in group_key if v is not None]
-    else:
-        raise TypeError(
-            "repair_crews_by_asset_type keys must be a string asset type or an iterable of asset types."
-        )
-
-    normalized = [v.strip() for v in normalized if str(v).strip()]
-    if not normalized:
-        raise ValueError("Asset-type group keys cannot be empty.")
-    return frozenset(normalized)
-
-
-def _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type):
-    """Normalize repair-crew pool config to an internal grouped-pool structure.
+def _normalize_number_repair_crews_config(number_repair_crews):
+    """Normalize every supported ``number_repair_crews`` shape into a single
+    canonical form: ``{"default": <int|dict[int,int]>, "typed": {asset_type: <int|dict[int,int]>}}``.
 
     Supported inputs:
-      - ``{'hospital': 2}`` (single-type pool)
-      - ``{('ls', 'msls'): 5, 'hospital': 2}`` (grouped + single pools)
-      - ``[({'ls', 'msls'}, 5), ('hospital', 2)]`` (list of (group, crews))
-      - ``[{'asset_types': ['ls', 'msls'], 'count': 5}, {'asset_types': ['hospital'], 'count': 2}]``
+      1. Scalar global crews:            ``10``
+      2. Island-keyed crews:             ``{1: 3, 2: 5}``
+      3. Global type-specific crews:     ``{"msls": 4, "hospital": 2}``
+      4. Island + type-specific crews:   ``{1: {"msls": 3, "hospital": 1}, 2: {"msls": 2, "hospital": 4}}``
+
+    A ``"*"`` key may be used inside shapes 3/4 to define an explicit
+    untyped/default pool alongside type-specific pools (e.g.
+    ``{"msls": 4, "*": 1}``). Asset types absent from a type-specific
+    configuration receive zero crews unless a ``"*"`` pool is supplied.
+
+    Raises ``ValueError``/``TypeError`` for malformed or mixed-key
+    configurations (e.g. a dict mixing int and str keys at the same level,
+    or with values that mix scalar counts and nested dicts).
     """
-    if not repair_crews_by_asset_type:
-        return None
+    if isinstance(number_repair_crews, (bool, np.bool_)):
+        raise TypeError("number_repair_crews must be an int, not a bool.")
 
-    if isinstance(repair_crews_by_asset_type, dict) and "pools" in repair_crews_by_asset_type:
-        # Already normalized internal state.
-        return repair_crews_by_asset_type
+    if isinstance(number_repair_crews, (int, np.integer)):
+        return {"default": int(number_repair_crews), "typed": {}}
 
-    if isinstance(repair_crews_by_asset_type, dict):
-        raw_items = list(repair_crews_by_asset_type.items())
-    elif isinstance(repair_crews_by_asset_type, (list, tuple)):
-        raw_items = []
-        for entry in repair_crews_by_asset_type:
-            if isinstance(entry, dict):
-                if "asset_types" not in entry:
-                    raise ValueError("Pool dictionaries must contain an 'asset_types' key.")
-                if "count" in entry:
-                    crew_count = entry["count"]
-                elif "crews" in entry:
-                    crew_count = entry["crews"]
-                else:
-                    raise ValueError("Pool dictionaries must contain 'count' (or 'crews').")
-                raw_items.append((entry["asset_types"], crew_count))
-            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
-                raw_items.append((entry[0], entry[1]))
-            else:
-                raise TypeError(
-                    "List-style repair_crews_by_asset_type entries must be (asset_types, crews) pairs "
-                    "or dictionaries with asset_types/count."
-                )
-    else:
+    if not isinstance(number_repair_crews, dict):
         raise TypeError(
-            "repair_crews_by_asset_type must be a dict, list of pairs, or list of pool dictionaries."
+            "number_repair_crews must be an int, dict[island_id, int], "
+            "dict[asset_type, int], or dict[island_id, dict[asset_type, int]]."
         )
 
+    if not number_repair_crews:
+        return {"default": 0, "typed": {}}
+
+    def _non_negative_int(count, context):
+        count = int(count)
+        if count < 0:
+            raise ValueError(f"Crew counts in number_repair_crews must be non-negative ({context}).")
+        return count
+
+    keys = list(number_repair_crews.keys())
+    is_int_key = lambda k: isinstance(k, (int, np.integer)) and not isinstance(k, (bool, np.bool_))
+    all_int_keys = all(is_int_key(k) for k in keys)
+    all_str_keys = all(isinstance(k, str) for k in keys)
+
+    if not all_int_keys and not all_str_keys:
+        raise ValueError(
+            "number_repair_crews dict keys must be all island IDs (int) or all "
+            "asset-type strings (str); mixed key types are not supported."
+        )
+
+    if all_int_keys:
+        values = list(number_repair_crews.values())
+        value_is_dict = [isinstance(v, dict) for v in values]
+        if any(value_is_dict) and not all(value_is_dict):
+            raise ValueError(
+                "number_repair_crews island-keyed dict values must be all plain "
+                "counts (int) or all per-type dicts, not a mix."
+            )
+
+        if all(value_is_dict):
+            # Shape 4: island_id -> {asset_type: count}
+            default: dict[int, int] = {}
+            typed: dict[str, dict[int, int]] = {}
+            for island_id, type_counts in number_repair_crews.items():
+                island_id = int(island_id)
+                for asset_type, count in type_counts.items():
+                    if not isinstance(asset_type, str):
+                        raise ValueError(
+                            "Inner keys of an island+type number_repair_crews config "
+                            "must be asset-type strings."
+                        )
+                    count = _non_negative_int(count, f"island {island_id}, type '{asset_type}'")
+                    if asset_type == "*":
+                        default[island_id] = count
+                    else:
+                        typed.setdefault(asset_type, {})[island_id] = count
+            return {"default": default, "typed": typed}
+
+        # Shape 2: legacy island_id -> count
+        flat = {
+            int(island_id): _non_negative_int(count, f"island {island_id}")
+            for island_id, count in number_repair_crews.items()
+        }
+        return {"default": flat, "typed": {}}
+
+    # Shape 3: asset_type -> count (or "*" -> count)
+    default = 0
+    typed = {}
+    for asset_type, count in number_repair_crews.items():
+        if isinstance(count, dict):
+            raise ValueError(
+                "Global type-specific number_repair_crews values must be plain "
+                "counts (int); use the island+type nested form for per-island "
+                "type pools."
+            )
+        count = _non_negative_int(count, f"type '{asset_type}'")
+        if asset_type == "*":
+            default = count
+        else:
+            typed[asset_type] = count
+    return {"default": default, "typed": typed}
+
+
+def _build_crew_pools(typed):
+    """Build the internal per-type pool structure from a normalized ``typed`` dict.
+
+    Each pool covers exactly one asset type (there is no grouped-type-tuple
+    syntax in the ``number_repair_crews`` schema). Returns ``None`` when there
+    are no type-specific pools, so callers can treat "no typed pools" and
+    "typed pools present" uniformly with a simple ``is not None`` check.
+    """
+    if not typed:
+        return None
     pools = []
     asset_type_to_pool = {}
-    for raw_key, raw_count in raw_items:
-        asset_type_group = _normalize_asset_type_group_key(raw_key)
-        crew_count = int(raw_count)
-        if crew_count < 0:
-            raise ValueError("Crew counts in repair_crews_by_asset_type must be non-negative.")
+    for pool_index, asset_type in enumerate(sorted(typed)):
+        pools.append({"asset_types": frozenset({asset_type}), "available": typed[asset_type]})
+        asset_type_to_pool[asset_type] = pool_index
+    return {"pools": pools, "asset_type_to_pool": asset_type_to_pool}
 
-        pool_index = len(pools)
-        pools.append(
-            {
-                "asset_types": asset_type_group,
-                "available": crew_count,
-            }
-        )
 
-        for atype in asset_type_group:
-            if atype in asset_type_to_pool:
-                prev_group = pools[asset_type_to_pool[atype]]["asset_types"]
-                raise ValueError(
-                    f"Asset type '{atype}' appears in multiple crew pools: {set(prev_group)} and {set(asset_type_group)}."
-                )
-            asset_type_to_pool[atype] = pool_index
+def _assemble_nested_crew_state(available_repair_crews, crew_pools):
+    """Combine the default (``"*"``) pool and any typed pools into one
+    island-outer/type-inner nested structure for a single shared
+    redistribution pass (see :func:`update_repair_crew_islands`).
+    """
+    nested: dict = {}
+    if isinstance(available_repair_crews, dict):
+        for island_id, count in available_repair_crews.items():
+            nested.setdefault(int(island_id), {})["*"] = int(count)
+    if crew_pools is not None:
+        for pool in crew_pools["pools"]:
+            (asset_type,) = pool["asset_types"]
+            pool_available = pool["available"]
+            if isinstance(pool_available, dict):
+                for island_id, count in pool_available.items():
+                    nested.setdefault(int(island_id), {})[asset_type] = int(count)
+    return nested
 
-    return {
-        "pools": pools,
-        "asset_type_to_pool": asset_type_to_pool,
+
+def _disassemble_nested_crew_state(nested_crew_state, crew_pools):
+    """Split a redistributed island-outer/type-inner nested structure back
+    into the default (``"*"``) flat pool and each typed pool's ``available`` dict.
+    """
+    default_pool = {
+        island_id: types.get("*", 0) for island_id, types in nested_crew_state.items()
     }
+    if crew_pools is not None:
+        for pool in crew_pools["pools"]:
+            (asset_type,) = pool["asset_types"]
+            pool["available"] = {
+                island_id: types[asset_type]
+                for island_id, types in nested_crew_state.items()
+                if asset_type in types
+            }
+    return default_pool
 
 _DEPTH_REDUCTION_CACHE = {}
 
@@ -792,10 +871,12 @@ def _initialize_simulation(
 
     dependency_config = _config.get('dependency_parameters', {})
     knowledge_graph_rules = dependency_config.get('knowledge_graph', None) or []
-    if knowledge_graph_rules and dependency_config.get('service_area_map', None) is None:
-        dependency_config['service_area_map'] = build_service_area_map_from_rules(
+    if knowledge_graph_rules and dependency_config.get('dependency_edges', None) is None:
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+
+        dependency_config['dependency_edges'] = expand_dependency_edges(
             gdf_assets,
-            knowledge_graph_rules,
+            DependencyKnowledgeGraph.from_config(knowledge_graph_rules),
         )
 
     # Build L1/L2 depth reduction array (with caching)
@@ -887,7 +968,7 @@ def _process_timestep(
     available_repair_crews, previous_rfids_islands, previous_map_counter, asset_type, 
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
     depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
-    repair_crews_by_asset_type=None,
+    crew_pools=None,
     l2_asset_geojson=None, l2_active_timesteps=None,
     societal_access_config=None,
 ):
@@ -904,7 +985,7 @@ def _process_timestep(
             depth_reductions=depth_reductions,  
             l1_area_geojson=l1_area_geojson, 
             l1_active_timesteps=l1_active_timesteps,
-            repair_crews_by_asset_type=repair_crews_by_asset_type,
+            crew_pools=crew_pools,
             l2_asset_geojson=l2_asset_geojson,
             l2_active_timesteps=l2_active_timesteps,
             societal_access_config=societal_access_config,
@@ -918,61 +999,47 @@ def _process_timestep(
 def _assign_repair_crews(
     timestep, available_repair_crews, repair_crews_assigned, accessible, flooded_mask,
     repair_time, island_ids, method, verbose, asset_impact_map=None,
-    asset_type=None, repair_crews_by_asset_type=None
+    asset_type=None, crew_pools=None
 ):
     """Assign repair crews using the assignment method.
 
-    When *repair_crews_by_asset_type* is provided the function runs two
-    integrated crew-assignment passes:
+    When *crew_pools* is provided the function runs two integrated
+    crew-assignment passes:
 
-    1. **Grouped pass** – for each configured asset-type group in
-       *repair_crews_by_asset_type* the assignment is run only against assets
-       in that group, drawing from that group's dedicated crew pool.
-    2. **Default pass** – for all remaining asset types, the existing
-       *available_repair_crews* mechanism is used unchanged.
+    1. **Typed pass** – for each asset type with a dedicated pool in
+       *crew_pools*, assignment is run only against assets of that type,
+       drawing from that type's dedicated crew pool.
+    2. **Default pass** – for all remaining asset types (not covered by any
+       typed pool), the existing *available_repair_crews* mechanism is used
+       unchanged.
     """
-    if repair_crews_by_asset_type is not None and asset_type is not None:
-        pool_state = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
-        if pool_state is not None:
-            # Grouped dedicated pools retain the same island-aware availability
-            # representation as the default pool.
-            for pool in pool_state["pools"]:
-                pool_asset_types = tuple(pool["asset_types"])
-                type_mask = np.isin(asset_type, list(pool_asset_types))
-                if not np.any(type_mask):
-                    continue
-                pool["available"], repair_crews_assigned = (
-                    update_repair_crew_assignment_optimized(
-                        timestep,
-                        pool["available"],
-                        repair_crews_assigned,
-                        accessible & type_mask,
-                        flooded_mask,
-                        repair_time,
-                        island_ids,
-                        method=method,
-                        verbose=verbose,
-                        asset_impact_map=asset_impact_map,
-                    )
+    if crew_pools is not None and asset_type is not None:
+        # Typed pools retain the same island-aware availability
+        # representation as the default pool.
+        for pool in crew_pools["pools"]:
+            pool_asset_types = tuple(pool["asset_types"])
+            type_mask = np.isin(asset_type, list(pool_asset_types))
+            if not np.any(type_mask):
+                continue
+            pool["available"], repair_crews_assigned = (
+                update_repair_crew_assignment_optimized(
+                    timestep,
+                    pool["available"],
+                    repair_crews_assigned,
+                    accessible & type_mask,
+                    flooded_mask,
+                    repair_time,
+                    island_ids,
+                    method=method,
+                    verbose=verbose,
+                    asset_impact_map=asset_impact_map,
                 )
+            )
 
-            # Run default pool assignment for asset types not covered by any grouped pool.
-            handled_types = set(pool_state["asset_type_to_pool"].keys())
-            if asset_type is not None and handled_types:
-                default_mask = ~np.isin(asset_type, list(handled_types))
-            else:
-                default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
-            if np.any(default_mask):
-                available_repair_crews, repair_crews_assigned = update_repair_crew_assignment_optimized(
-                    timestep, available_repair_crews, repair_crews_assigned,
-                    accessible & default_mask, flooded_mask, repair_time, island_ids,
-                    method=method, verbose=verbose, asset_impact_map=asset_impact_map,
-                )
-            return available_repair_crews, repair_crews_assigned
-
-        # fall through if config normalizes to None
-        if asset_type is not None:
-            default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
+        # Run default pool assignment for asset types not covered by any typed pool.
+        handled_types = set(crew_pools["asset_type_to_pool"].keys())
+        if handled_types:
+            default_mask = ~np.isin(asset_type, list(handled_types))
         else:
             default_mask = np.ones(len(repair_crews_assigned), dtype=bool)
         if np.any(default_mask):
@@ -989,7 +1056,7 @@ def _assign_repair_crews(
     )
 
 def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
-                              asset_type=None, repair_crews_by_asset_type=None):
+                              asset_type=None, crew_pools=None):
     """Clear completed repair states and release crews for completed repairs."""
     completed_repairs = (
         all_selected_waits_cleared(
@@ -1004,11 +1071,10 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
         num_completed_repairs = completed_repairs.sum()
 
         # Return crews to the appropriate pool(s).
-        if repair_crews_by_asset_type is not None and asset_type is not None:
-            pool_state = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
-            type_to_pool = pool_state["asset_type_to_pool"] if pool_state else {}
-            pools = pool_state["pools"] if pool_state else []
-            # Per-type (or grouped-type) pool: return each completed asset's crew to its pool.
+        if crew_pools is not None and asset_type is not None:
+            type_to_pool = crew_pools["asset_type_to_pool"]
+            pools = crew_pools["pools"]
+            # Per-type pool: return each completed asset's crew to its pool.
             for asset_idx in np.where(completed_repairs)[0]:
                 atype = str(asset_type[asset_idx])
                 pool_idx = type_to_pool.get(atype)
@@ -1022,7 +1088,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
                     else:
                         pools[pool_idx]["available"] += 1
                     continue
-                # Fallback to the default island/global pool for types not in grouped pools.
+                # Fallback to the default island/global pool for types not in typed pools.
                 if available_repair_crews is not None:
                     if isinstance(available_repair_crews, dict):
                         asset_island_id = int(state.island_ids[asset_idx])
@@ -1040,7 +1106,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
                     )
             else:
                 available_repair_crews += num_completed_repairs
-        state.operational[completed_repairs] = True
+        state.intrinsic_operational[completed_repairs] = True
         state.repair_crews_assigned[completed_repairs] = False
         if verbose:
             completed_repairs_indices = np.where(completed_repairs)[0]
@@ -1057,85 +1123,84 @@ def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
         active_masks={"repair_time": can_repair_mask},
     )
 
-def _update_operational_state(state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None):
-    """Evaluate dependency rules each timestep using current state vectors.
+def _update_operational_state(
+    state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None, dependency_edges=None,
+):
+    """Evaluate hazard + dependency availability each timestep using current state vectors.
 
-    When a knowledge graph is configured this function performs two passes:
+    Computes the fully separated operational-state layers (see
+    :func:`src.dependency_evaluator.evaluate_operational_state`) --
+    ``intrinsic_operational -> hazard_available -> dependency_available ->
+    restart_ready -> effective_operational`` -- and publishes the final
+    result as ``state.operational`` for all existing downstream consumers
+    (plotting, timestep results, societal-access postprocessing, realized-
+    state caching).
 
-    1. **Restore pass** – re-enables assets whose return-to-operational
-       trigger is now satisfied (no longer flooded and repair condition met).
-    2. **Block pass** – suppresses assets that still do not meet conditions
-       (currently flooded or repair not yet complete per the rule trigger).
-
-    The two-pass design means the knowledge graph is the single authority for
-    both directions of operational-state change.  The ``state.operational``
-    array is updated in-place via assignment.
+    ``state.intrinsic_operational`` (not ``state.operational``) is the
+    persisted physical/intrinsic state carried into this call: it is only
+    ever lowered by fragility (see ``_update_hazard_map_states``) and only
+    ever raised by repair completion (see ``_handle_completed_repairs``).
+    ``state.operational`` is always the *effective* state computed by this
+    function -- reading it back as next timestep's intrinsic input would
+    permanently latch any asset that becomes dependency-blocked while
+    otherwise undamaged, since nothing else would ever raise it again. See
+    the regression test
+    ``test_dependency_blocked_undamaged_asset_recovers_after_dependency_clears_via_real_loop``
+    in ``tests/test_dependency_behaviors.py``.
 
     Args:
         state: Current :class:`SimulationState`.
         asset_type: String array of asset types.
         flooded_mask: Boolean array; ``True`` where hazard exceeds threshold.
         config: Simulation configuration dict.
-        repair_threshold: Repair-time value below which an asset is considered
-            not in need of formal repair (used on the legacy path only).
+        repair_threshold: Unused by the graph-aware evaluator; retained for
+            call-signature compatibility.
         knowledge_graph: Pre-built :class:`DependencyKnowledgeGraph` instance,
             or ``None`` to build from ``config['dependency_parameters']`` each
-            call (legacy behaviour; use the pre-built instance for performance).
+            call (use the pre-built instance for performance).
+        dependency_edges: Pre-expanded list of
+            :class:`~src.dependency_topology.DependencyEdge` runtime edges, or
+            ``None`` to expand from ``config['dependency_parameters']`` (not
+            recommended per-timestep; expand once and pass it in).
     """
     dependency_config = config.get('dependency_parameters', {})
     kg_config = dependency_config.get('knowledge_graph', None) or []
-    state.dependency_report = {}
 
-    if kg_config:
-        # Graph-aware path: per-pair rules from the knowledge graph.
-        if knowledge_graph is None:
-            from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-            knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
-        hazard_type = dependency_config.get('hazard_type', 'flooding')
-        service_area_map = dependency_config.get('service_area_map', None)
-        # evaluate_dependencies_from_graph internally calls restore_operational_from_graph
-        # first (restore pass) then applies the block pass, so state.operational is
-        # updated correctly in both directions.
-        state.operational, state.dependency_report = evaluate_dependencies_from_graph(
-            state.operational,
-            asset_type,
-            hazard_type,
-            knowledge_graph,
-            flooded_mask=flooded_mask,
-            repair_time=state.recovery_wait_vectors["repair_time"],
-            wait_vectors=state.recovery_wait_vectors,
-            service_area_map=service_area_map,
-            previous_dependency_blocked_mask=state.dependency_blocked_mask,
-            return_report=True,
-        )
-        state.dependency_blocked_mask = state.dependency_report[
-            "dependency_blocked_mask"
-        ]
-        clear_completed_delayed_triggers(
-            state.operational,
-            state.recovery_wait_vectors,
-            state.recovery_delay_active,
-        )
-    else:
-        # Legacy flat-flags path (backwards compatible).
-        state.operational, state.dependency_report = evaluate_dependencies(
-            state.operational,
-            asset_type,
-            hazard_values=state.current_hazard_values,
-            flooded_mask=flooded_mask,
-            repair_time=state.recovery_wait_vectors["repair_time"],
-            repair_threshold=repair_threshold,
-            dependency_map=dependency_config.get('dependency_map'),
-            area_dependencies=dependency_config.get('area_dependencies'),
-            pairwise_dependencies=dependency_config.get('pairwise_dependencies'),
-            previous_dependency_blocked_mask=state.dependency_blocked_mask,
-            enable_default_rules=dependency_config.get('enable_default_rules', True),
-            require_repair_for_operational=dependency_config.get('require_repair_for_operational', False),
-            return_report=True,
-        )
-        state.dependency_blocked_mask = state.dependency_report[
-            "dependency_blocked_mask"
-        ]
+    if knowledge_graph is None:
+        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+        knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+
+    if dependency_edges is None:
+        dependency_edges = dependency_config.get('dependency_edges', None) or []
+
+    hazard_type = dependency_config.get('hazard_type', 'flooding')
+    restart_delay_steps = dependency_config.get('dependency_restart_delay_steps', 0.0)
+
+    previous_dependency_available = state.dependency_available
+
+    effective_operational, report = evaluate_operational_state(
+        intrinsic_operational=state.intrinsic_operational,
+        asset_type=asset_type,
+        hazard_type=hazard_type,
+        knowledge_graph=knowledge_graph,
+        flooded_mask=flooded_mask,
+        repair_time=state.recovery_wait_vectors["repair_time"],
+        dependency_edges=dependency_edges,
+        wait_vectors=state.recovery_wait_vectors,
+        hazard_active_masks=state.recovery_delay_active,
+        restart_active_masks=state.dependency_restart_active,
+        previous_dependency_available=previous_dependency_available,
+        restart_delay_steps=restart_delay_steps,
+    )
+
+    state.intrinsic_operational = report["intrinsic_operational"]
+    state.hazard_available = report["hazard_available"]
+    state.dependency_available = report["dependency_available"]
+    state.restart_ready = report["restart_ready"]
+    state.effective_operational = effective_operational
+    state.operational = effective_operational
+    state.dependency_blocked_mask = report["dependency_blocked_mask"]
+    state.dependency_report = report
 
     warning = state.dependency_report.get("warning")
     if warning and warning not in state.simulation_warnings:
@@ -1148,7 +1213,7 @@ def _update_unreachable_assets(
     damage_threshold,
     *,
     asset_type=None,
-    repair_crews_by_asset_type=None,
+    crew_pools=None,
 ):
     """Update unreachable assets for island-based assignment.
     
@@ -1160,12 +1225,9 @@ def _update_unreachable_assets(
     has_available_crew = np.zeros(len(state.island_ids), dtype=bool)
     grouped_types = set()
 
-    if repair_crews_by_asset_type is not None and asset_type is not None:
-        pool_state = _normalize_repair_crews_by_asset_type_config(
-            repair_crews_by_asset_type
-        )
-        grouped_types = set(pool_state["asset_type_to_pool"])
-        for pool in pool_state["pools"]:
+    if crew_pools is not None and asset_type is not None:
+        grouped_types = set(crew_pools["asset_type_to_pool"])
+        for pool in crew_pools["pools"]:
             type_mask = np.isin(asset_type, list(pool["asset_types"]))
             pool_available = pool["available"]
             if isinstance(pool_available, dict):
@@ -1297,7 +1359,6 @@ def simulate_asset_damage_recovery_access_breakdown(
     l1_active_timesteps=None,
     l2_asset_geojson=None,
     l2_active_timesteps=None,
-    repair_crews_by_asset_type=None,
     societal_access_config=None,
     profiler=NULL_PROFILER,
     ):
@@ -1307,21 +1368,19 @@ def simulate_asset_damage_recovery_access_breakdown(
     Args:
         gdf_assets (GeoDataFrame): Asset geometries and types.
         hazard_maps (list[str or Path]): List of hazard map file paths (rasters).
-        number_repair_crews (int or dict): Default repair-crew pool (global int or per-island dict),
-            used for asset types not covered by ``repair_crews_by_asset_type``.
+        number_repair_crews (int or dict): Repair-crew configuration. Supports:
+            - scalar global crews: ``10``
+            - island-keyed crews: ``{1: 3, 2: 5}``
+            - global type-specific crews: ``{"msls": 4, "hospital": 2}``
+            - island + type-specific crews: ``{1: {"msls": 3, "hospital": 1}, 2: {"msls": 2, "hospital": 4}}``
+            An optional ``"*"`` key inside a type-specific dict defines an
+            explicit default/untyped pool; asset types not covered by any
+            type-specific pool otherwise receive zero crews.
         repair_crew_assignment_method (str): Crew assignment strategy ('random', 'lowest repair time', 'highest repair time', 'island', etc.).
         flood_threshold (float): Hazard value threshold for flooding.
         recovery_parameters (dict, optional): Recovery model parameters (damage/repair coefficients, thresholds).
         root_dir (str or Path, optional): Root directory for data and cache storage.
         verbose (bool): If True, prints detailed simulation progress.
-        repair_crews_by_asset_type (dict/list, optional): Dedicated grouped crew pools by
-            asset type. Supports:
-            ``{'hospital': 2}``,
-            ``{('ls', 'msls'): 5, 'hospital': 2}``,
-            or list-style entries such as
-            ``[({'ls', 'msls'}, 5), ('hospital', 2)]``.
-            Any asset types not covered by these grouped pools fall back to
-            *number_repair_crews*.
         timestep_output (bool): If True, collects detailed asset states at each timestep.
         execution_id (str, optional): Unique identifier for output file naming.
         config (dict, optional): Simulation configuration dictionary.
@@ -1442,8 +1501,13 @@ def simulate_asset_damage_recovery_access_breakdown(
     # previous_islands = None
     previous_rfids_islands = None
     previous_map_counter = None
-    available_repair_crews = number_repair_crews
-    
+
+    # Normalize every supported number_repair_crews shape (scalar, island-keyed,
+    # type-specific, island+type nested) into a default pool plus typed pools.
+    _normalized_crews_config = _normalize_number_repair_crews_config(number_repair_crews)
+    available_repair_crews = _normalized_crews_config["default"]
+    crew_pools = _build_crew_pools(_normalized_crews_config["typed"])
+
     island_method_active = 'island' in repair_crew_assignment_method
     if island_method_active:
         access_rfids, boundary_asset_indices, boundary_islands_rfids, rfids_lengths = match_assets_access(
@@ -1464,14 +1528,16 @@ def simulate_asset_damage_recovery_access_breakdown(
             l2_active_timesteps=l2_active_timesteps,
         )
         gdf_assets['access_rfid'] = access_rfids
-        if isinstance(number_repair_crews, int):
-            available_repair_crews = {0: number_repair_crews}
-            # print(f"Initialized island method with {number_repair_crews} crews in temporary island 0")
-        else:
-            available_repair_crews = number_repair_crews
+        # Preserve the existing synthetic island-0 wrapping behavior for
+        # scalar crew counts (default pool and each typed pool alike).
+        if isinstance(available_repair_crews, int):
+            available_repair_crews = {0: available_repair_crews}
+        if crew_pools is not None:
+            for pool in crew_pools["pools"]:
+                if isinstance(pool["available"], int):
+                    pool["available"] = {0: pool["available"]}
 
     else:
-        available_repair_crews = number_repair_crews
         rfids_lengths = None
         boundary_asset_indices = None
         boundary_islands_rfids = None
@@ -1489,16 +1555,18 @@ def simulate_asset_damage_recovery_access_breakdown(
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
 
-    # Normalize grouped type-pool configuration to mutable internal state.
-    repair_crews_by_asset_type = _normalize_repair_crews_by_asset_type_config(repair_crews_by_asset_type)
-
-    # Pre-build the knowledge graph once to avoid reconstructing it every timestep.
+    # Pre-build the knowledge graph and runtime dependency edges once to avoid
+    # reconstructing/expanding them every timestep.
     _knowledge_graph = None
+    _dependency_edges = []
     _dep_config = _config.get('dependency_parameters', {})
     _kg_config = _dep_config.get('knowledge_graph', None) or []
     if _kg_config:
         from src.dependency_knowledge_graph import DependencyKnowledgeGraph
         _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
+        _dependency_edges = _dep_config.get('dependency_edges', None)
+        if _dependency_edges is None:
+            _dependency_edges = expand_dependency_edges(gdf_assets, _knowledge_graph)
 
     # Named distinctly from the per-timestep "simulation.total" aggregate produced by
     # profiler.timestep(loop="simulation") below -- both would otherwise share the
@@ -1520,7 +1588,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                         depth_reductions=depth_reductions,
                         l1_area_geojson=l1_area_geojson,
                         l1_active_timesteps=l1_active_timesteps,
-                        repair_crews_by_asset_type=repair_crews_by_asset_type,
+                        crew_pools=crew_pools,
                         l2_asset_geojson=l2_asset_geojson,
                         l2_active_timesteps=l2_active_timesteps,
                         societal_access_config=societal_access_config,
@@ -1531,9 +1599,9 @@ def simulate_asset_damage_recovery_access_breakdown(
                     cache_updated[cache_name] = cache_content
 
                 if _knowledge_graph is not None:
-                    with profiler.section("simulation.activate_delayed_trigger_waits"):
-                        activate_delayed_trigger_waits(
-                            state.operational,
+                    with profiler.section("simulation.activate_hazard_recovery_waits"):
+                        activate_hazard_recovery_waits(
+                            state.hazard_available,
                             asset_type,
                             _dep_config.get('hazard_type', 'flooding'),
                             _knowledge_graph,
@@ -1547,7 +1615,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                     available_repair_crews, state.repair_crews_assigned = _assign_repair_crews(
                         timestep, available_repair_crews, state.repair_crews_assigned, state.accessible,
                         flooded_mask, state.recovery_wait_vectors["repair_time"], state.island_ids, repair_crew_assignment_method, verbose, asset_impact_map=asset_impact_map,
-                        asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
+                        asset_type=asset_type, crew_pools=crew_pools
                     )
                 
                 # 3. Update repair progress
@@ -1564,12 +1632,15 @@ def simulate_asset_damage_recovery_access_breakdown(
                 with profiler.section("simulation._handle_completed_repairs"):
                     available_repair_crews = _handle_completed_repairs(
                         state, available_repair_crews, verbose, timestep,
-                        asset_type=asset_type, repair_crews_by_asset_type=repair_crews_by_asset_type
+                        asset_type=asset_type, crew_pools=crew_pools
                     )
 
                 # 5. Evaluate dependencies using current repair/hazard state
                 with profiler.section("simulation._update_operational_state"):
-                    _update_operational_state(state, asset_type, flooded_mask, _config, repair_threshold, knowledge_graph=_knowledge_graph)
+                    _update_operational_state(
+                        state, asset_type, flooded_mask, _config, repair_threshold,
+                        knowledge_graph=_knowledge_graph, dependency_edges=_dependency_edges,
+                    )
 
                 # 6. Update unreachable assets (island method)
                 if island_method_active:
@@ -1580,7 +1651,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                             flooded_mask,
                             damage_threshold,
                             asset_type=asset_type,
-                            repair_crews_by_asset_type=repair_crews_by_asset_type,
+                            crew_pools=crew_pools,
                         )
 
                 # 7. Collect timestep metrics

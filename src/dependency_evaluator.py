@@ -1,548 +1,113 @@
-"""Dependency evaluation layer for operational-state blocking.
+"""Policy-aware dependency evaluation over the type-level knowledge graph.
 
-This module keeps the original flat-rule evaluation as the baseline path and
-adds an explicit graph-aware path for opt-in dependency relationships.
+This module consumes the runtime :class:`~src.dependency_topology.DependencyEdge`
+groups produced by :mod:`src.dependency_topology` and evaluates them against
+current asset operational state, producing a clean separation between:
+
+* ``intrinsic_operational`` -- physical/repair state, supplied by the caller
+  (never mutated here).
+* ``hazard_available`` -- whether an asset's own hazard rule currently
+  permits operation (hazard exposure + return-to-operational trigger).
+* ``dependency_available`` -- whether an asset's dependency edges (if any)
+  are satisfied, evaluated policy-aware (``exclusive`` / ``any`` /
+  ``at_least_n``) and iterated to a stable fixed point so dependency chains
+  converge.
+* ``restart_ready`` -- whether any *dependency* restart-delay countdown
+  (``restart_wait::<edge_key>``) has finished. Independent of hazard-recovery
+  waits.
+* ``effective_operational`` -- ``intrinsic_operational & hazard_available &
+  dependency_available & restart_ready``. This is the value the simulation
+  publishes as ``state.operational`` for all downstream consumers.
+
+Dependency evaluation is strictly hazard-agnostic: it only ever consumes
+provider *operational* state (``intrinsic_operational & hazard_available``,
+combined recursively with other providers' ``dependency_available``), never
+provider failure cause, physical damage, repair time, or fragility state
+directly. This module never mutates any of those physical arrays.
+
+Wait-vector namespacing
+------------------------
+Two independent families of named wait vectors are used, both stored in the
+same ``wait_vectors: dict[str, np.ndarray]`` mapping (as already used by
+:mod:`src.recovery_scheduler`), but namespaced so they can never collide or be
+conflated:
+
+* ``hazard_recovery_wait::<name>`` -- crew-independent hazard recovery
+  countdowns (``return_to_operational.trigger == "delayed"`` on a *hazard*
+  rule). This replaces the old bare ``dependency_wait``-style naming.
+* ``restart_wait::<edge_key>`` -- one independent restart-delay countdown per
+  dependency edge, keyed by the edge's stable ``edge_key`` so unrelated
+  dependency edges never overwrite one another's timers.
+
+``restart_ready`` only ever inspects ``restart_wait::*`` vectors -- it never
+looks at ``hazard_recovery_wait::*`` vectors, and dependency restart waiting
+is never treated as physical repair.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
 
+from src.dependency_knowledge_graph import (
+    POLICY_ANY,
+    POLICY_AT_LEAST_N,
+    POLICY_EXCLUSIVE,
+    TRIGGER_DELAYED,
+    TRIGGER_IMMEDIATE,
+    TRIGGER_REPAIR_BELOW,
+    TRIGGER_REPAIR_COMPLETE,
+)
+from src.dependency_topology import DependencyEdge, index_edges_by_target
 from src.timing_profiler import NULL_PROFILER, NullProfiler
 
-DependencyContext = dict[str, Any]
 DependencyReport = dict[str, Any]
 
-
-def build_dependency_context(
-    asset_type: np.ndarray,
-    operational: np.ndarray | None = None,
-    hazard_values: np.ndarray | None = None,
-    flooded_mask: np.ndarray | None = None,
-    repair_time: np.ndarray | None = None,
-    repair_threshold: float = 0.0,
-    dependency_map: dict[Any, Iterable[Any]] | None = None,
-    area_dependencies: Iterable[dict[str, Any]] | None = None,
-    pairwise_dependencies: Iterable[tuple[int, int]] | None = None,
-) -> DependencyContext:
-    """Build a normalized dependency context dictionary.
-
-    The context is intentionally lightweight for first-pass integration and can
-    be extended in-place without changing call sites.
-    """
-    num_assets = len(asset_type)
-    if hazard_values is None:
-        hazard_values = np.zeros(num_assets, dtype=np.float64)
-    if flooded_mask is None:
-        flooded_mask = np.zeros(num_assets, dtype=bool)
-    if repair_time is None:
-        repair_time = np.zeros(num_assets, dtype=np.float64)
-    if operational is None:
-        operational = np.ones(num_assets, dtype=bool)
-
-    if isinstance(area_dependencies, Mapping):
-        normalized_area_dependencies = [
-            {
-                "supplier_index": supplier_index,
-                "dependent_indices": dependent_indices,
-            }
-            for supplier_index, dependent_indices in area_dependencies.items()
-        ]
-    else:
-        normalized_area_dependencies = (
-            list(area_dependencies) if area_dependencies is not None else []
-        )
-
-    return {
-        "asset_type": np.asarray(asset_type),
-        "operational": np.asarray(operational, dtype=bool),
-        "hazard_values": np.asarray(hazard_values),
-        "flooded_mask": np.asarray(flooded_mask, dtype=bool),
-        "repair_time": np.asarray(repair_time, dtype=np.float64),
-        "repair_threshold": float(repair_threshold),
-        "dependency_map": dependency_map or {},
-        "area_dependencies": normalized_area_dependencies,
-        "pairwise_dependencies": list(pairwise_dependencies) if pairwise_dependencies is not None else [],
-    }
+# ---------------------------------------------------------------------------
+# Wait-vector namespaces
+# ---------------------------------------------------------------------------
+HAZARD_RECOVERY_WAIT_PREFIX = "hazard_recovery_wait::"
+RESTART_WAIT_PREFIX = "restart_wait::"
 
 
-def _dependency_operational_state(context: DependencyContext) -> np.ndarray:
-    operational = np.asarray(context["operational"], dtype=bool).copy()
-    base_blocked_mask = context.get("base_blocked_mask")
-    if base_blocked_mask is not None:
-        operational &= ~np.asarray(base_blocked_mask, dtype=bool)
-    return operational
+def hazard_recovery_wait_key(wait_vector_name: str) -> str:
+    """Namespace a hazard rule's configured wait-vector name."""
+    return f"{HAZARD_RECOVERY_WAIT_PREFIX}{wait_vector_name}"
 
 
-def _validate_dependency_index(index: Any, num_assets: int, field_name: str) -> int:
-    try:
-        normalized = int(index)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must contain integer asset indices") from exc
-    if normalized < 0 or normalized >= num_assets:
-        raise IndexError(
-            f"{field_name} index {normalized} is outside the asset range 0..{num_assets - 1}"
-        )
-    return normalized
-
-
-def _area_dependency_pairs(context: DependencyContext) -> list[tuple[int, int]]:
-    num_assets = len(context["asset_type"])
-    dependencies = list(context.get("area_dependencies", []))
-    dependencies.extend(
-        {
-            "supplier_index": supplier_index,
-            "dependent_indices": dependent_indices,
-        }
-        for supplier_index, dependent_indices in context.get("dependency_map", {}).items()
-    )
-
-    pairs: list[tuple[int, int]] = []
-    supplier_fields = (
-        "supplier_index",
-        "source_index",
-        "asset_index_a",
-        "supplier",
-        "source",
-    )
-    dependent_fields = (
-        "dependent_indices",
-        "target_indices",
-        "asset_indices_b",
-        "dependents",
-        "targets",
-    )
-    for dependency in dependencies:
-        if isinstance(dependency, (tuple, list)) and len(dependency) == 2:
-            supplier, dependents = dependency
-        elif isinstance(dependency, Mapping):
-            supplier = next(
-                (dependency[name] for name in supplier_fields if name in dependency),
-                None,
-            )
-            dependents = next(
-                (dependency[name] for name in dependent_fields if name in dependency),
-                None,
-            )
-            if supplier is None or dependents is None:
-                raise ValueError(
-                    "Area dependencies require a supplier/source index and dependent/target indices"
-                )
-        else:
-            raise TypeError("Area dependencies must be mappings or (supplier, dependents) pairs")
-
-        supplier_index = _validate_dependency_index(
-            supplier, num_assets, "area dependency supplier"
-        )
-        if np.isscalar(dependents):
-            dependents = [dependents]
-        for dependent in dependents:
-            dependent_index = _validate_dependency_index(
-                dependent, num_assets, "area dependency dependent"
-            )
-            if (
-                context["asset_type"][supplier_index] != "road"
-                and context["asset_type"][dependent_index] != "road"
-            ):
-                pairs.append((supplier_index, dependent_index))
-    return pairs
-
-
-def _pairwise_dependency_pairs(context: DependencyContext) -> list[tuple[int, int]]:
-    num_assets = len(context["asset_type"])
-    pairs: list[tuple[int, int]] = []
-    for dependency in context.get("pairwise_dependencies", []):
-        if isinstance(dependency, Mapping):
-            supplier = dependency.get(
-                "supplier_index",
-                dependency.get("source_index", dependency.get("source")),
-            )
-            dependent = dependency.get(
-                "dependent_index",
-                dependency.get("target_index", dependency.get("target")),
-            )
-        elif isinstance(dependency, (tuple, list)) and len(dependency) == 2:
-            supplier, dependent = dependency
-        else:
-            raise TypeError(
-                "Pairwise dependencies must be mappings or (supplier, dependent) pairs"
-            )
-        if supplier is None or dependent is None:
-            raise ValueError(
-                "Pairwise dependencies require supplier/source and dependent/target indices"
-            )
-        supplier_index = _validate_dependency_index(
-            supplier, num_assets, "pairwise dependency supplier"
-        )
-        dependent_index = _validate_dependency_index(
-            dependent, num_assets, "pairwise dependency dependent"
-        )
-        if (
-            context["asset_type"][supplier_index] != "road"
-            and context["asset_type"][dependent_index] != "road"
-        ):
-            pairs.append((supplier_index, dependent_index))
-    return pairs
-
-
-def _evaluate_dependency_pairs(
-    operational: np.ndarray,
-    pairs: Iterable[tuple[int, int]],
-) -> np.ndarray:
-    blocked = np.zeros(len(operational), dtype=bool)
-    pairs = list(pairs)
-    changed = True
-    while changed:
-        changed = False
-        for supplier_index, dependent_index in pairs:
-            if (
-                (not operational[supplier_index] or blocked[supplier_index])
-                and not blocked[dependent_index]
-            ):
-                blocked[dependent_index] = True
-                changed = True
-    return blocked
-
-
-def _evaluate_combined_dependency_pairs(
-    operational: np.ndarray,
-    area_pairs: Iterable[tuple[int, int]],
-    pairwise_pairs: Iterable[tuple[int, int]],
-) -> tuple[np.ndarray, np.ndarray]:
-    area_blocked = np.zeros(len(operational), dtype=bool)
-    pairwise_blocked = np.zeros(len(operational), dtype=bool)
-    tagged_pairs = [
-        *((supplier, dependent, area_blocked) for supplier, dependent in area_pairs),
-        *(
-            (supplier, dependent, pairwise_blocked)
-            for supplier, dependent in pairwise_pairs
-        ),
-    ]
-    combined_blocked = np.zeros(len(operational), dtype=bool)
-    changed = True
-    while changed:
-        changed = False
-        for supplier_index, dependent_index, relationship_mask in tagged_pairs:
-            if (
-                (
-                    not operational[supplier_index]
-                    or combined_blocked[supplier_index]
-                )
-                and not combined_blocked[dependent_index]
-            ):
-                combined_blocked[dependent_index] = True
-                relationship_mask[dependent_index] = True
-                changed = True
-    return area_blocked, pairwise_blocked
-
-
-def evaluate_area_dependencies(context: DependencyContext) -> np.ndarray:
-    """Block assets supplied by a non-operational service-area supplier."""
-    return _evaluate_dependency_pairs(
-        _dependency_operational_state(context),
-        _area_dependency_pairs(context),
-    )
-
-
-def evaluate_pairwise_dependencies(context: DependencyContext) -> np.ndarray:
-    """Block pairwise dependents when their supplier is non-operational."""
-    return _evaluate_dependency_pairs(
-        _dependency_operational_state(context),
-        _pairwise_dependency_pairs(context),
-    )
-
-
-def evaluate_dependency_rules(
-    context: DependencyContext,
-    *,
-    area_blocked_mask: np.ndarray | None = None,
-    pairwise_blocked_mask: np.ndarray | None = None,
-    enable_default_rules: bool = True,
-    require_repair_for_operational: bool = False,
-) -> np.ndarray:
-    """Combine dependency rules into one blocking mask.
-
-    Road availability is intentionally handled by the simulation's distinct
-    exposure-only path and is never changed here.
-    """
-    num_assets = len(context["asset_type"])
-    blocked_mask = np.zeros(num_assets, dtype=bool)
-
-    if area_blocked_mask is not None:
-        blocked_mask |= np.asarray(area_blocked_mask, dtype=bool)
-    if pairwise_blocked_mask is not None:
-        blocked_mask |= np.asarray(pairwise_blocked_mask, dtype=bool)
-
-    if require_repair_for_operational:
-        repair_time = context["repair_time"]
-        repair_threshold = context["repair_threshold"]
-        blocked_mask |= (
-            (repair_time > repair_threshold)
-            & (context["asset_type"] != "road")
-        )
-
-    return blocked_mask
-
-
-def apply_dependency_blocking(operational: np.ndarray, blocked_mask: np.ndarray) -> np.ndarray:
-    """Apply dependency blocking to the operational state."""
-    return np.asarray(operational, dtype=bool) & ~np.asarray(blocked_mask, dtype=bool)
-
-
-def build_dependency_report(
-    *,
-    blocked_mask: np.ndarray,
-    area_blocked_mask: np.ndarray,
-    pairwise_blocked_mask: np.ndarray,
-    rules_enabled: bool,
-    require_repair_for_operational: bool,
-    dependency_blocked_mask: np.ndarray | None = None,
-    warning: str | None = None,
-) -> DependencyReport:
-    """Build a concise report suitable for logging/debugging."""
-    report = {
-        "blocked_count": int(np.sum(blocked_mask)),
-        "area_blocked_count": int(np.sum(area_blocked_mask)),
-        "pairwise_blocked_count": int(np.sum(pairwise_blocked_mask)),
-        "dependency_blocked_mask": (
-            np.asarray(dependency_blocked_mask, dtype=bool).copy()
-            if dependency_blocked_mask is not None
-            else np.zeros(len(blocked_mask), dtype=bool)
-        ),
-        "rules_enabled": bool(rules_enabled),
-        "require_repair_for_operational": bool(require_repair_for_operational),
-        "active_rules": [
-            "repair_time:threshold" if require_repair_for_operational else None,
-        ],
-    }
-    report["active_rules"] = [rule for rule in report["active_rules"] if rule is not None]
-    if warning is not None:
-        report["warning"] = warning
-    return report
-
-
-def evaluate_dependencies(
-    operational: np.ndarray,
-    asset_type: np.ndarray,
-    *,
-    hazard_values: np.ndarray | None = None,
-    flooded_mask: np.ndarray | None = None,
-    repair_time: np.ndarray | None = None,
-    repair_threshold: float = 0.0,
-    dependency_map: dict[Any, Iterable[Any]] | None = None,
-    area_dependencies: Iterable[dict[str, Any]] | None = None,
-    pairwise_dependencies: Iterable[tuple[int, int]] | None = None,
-    previous_dependency_blocked_mask: np.ndarray | None = None,
-    enable_default_rules: bool = True,
-    require_repair_for_operational: bool = False,
-    return_report: bool = False,
-):
-    """High-level dependency evaluation entry point.
-
-    Returns updated operational state, plus report when requested.
-    """
-    context = build_dependency_context(
-        asset_type,
-        operational=operational,
-        hazard_values=hazard_values,
-        flooded_mask=flooded_mask,
-        repair_time=repair_time,
-        repair_threshold=repair_threshold,
-        dependency_map=dependency_map,
-        area_dependencies=area_dependencies,
-        pairwise_dependencies=pairwise_dependencies,
-    )
-    preserved_dependency_blocked_mask = np.zeros(
-        len(context["operational"]), dtype=bool
-    )
-    if previous_dependency_blocked_mask is not None:
-        previous_dependency_blocked_mask = np.asarray(
-            previous_dependency_blocked_mask, dtype=bool
-        ).copy()
-        if previous_dependency_blocked_mask.shape != context["operational"].shape:
-            raise ValueError(
-                "previous_dependency_blocked_mask must match the operational array"
-            )
-        previous_dependency_blocked_mask &= context["asset_type"] != "road"
-        restorable_dependency_outages = (
-            previous_dependency_blocked_mask
-            & ~context["flooded_mask"]
-            & (context["repair_time"] <= context["repair_threshold"])
-        )
-        context["operational"][restorable_dependency_outages] = True
-        preserved_dependency_blocked_mask = (
-            previous_dependency_blocked_mask
-            & ~restorable_dependency_outages
-        )
-
-    base_blocked_mask = evaluate_dependency_rules(
-        context,
-        enable_default_rules=enable_default_rules,
-        require_repair_for_operational=require_repair_for_operational,
-    )
-    context["base_blocked_mask"] = base_blocked_mask
-    area_blocked_mask, pairwise_blocked_mask = (
-        _evaluate_combined_dependency_pairs(
-            _dependency_operational_state(context),
-            _area_dependency_pairs(context),
-            _pairwise_dependency_pairs(context),
-        )
-    )
-    blocked_mask = evaluate_dependency_rules(
-        context,
-        area_blocked_mask=area_blocked_mask,
-        pairwise_blocked_mask=pairwise_blocked_mask,
-        enable_default_rules=enable_default_rules,
-        require_repair_for_operational=require_repair_for_operational,
-    )
-    updated_operational = apply_dependency_blocking(
-        context["operational"], blocked_mask
-    )
-    dependency_blocked_mask = (
-        preserved_dependency_blocked_mask
-        | (
-            (area_blocked_mask | pairwise_blocked_mask)
-            & context["operational"]
-        )
-    )
-
-    if not return_report:
-        return updated_operational
-
-    warning = None
-    if not enable_default_rules:
-        warning = (
-            "Default dependency rules are disabled; only explicitly configured "
-            "area and pairwise dependencies are being applied."
-        )
-
-    report = build_dependency_report(
-        blocked_mask=blocked_mask,
-        area_blocked_mask=area_blocked_mask,
-        pairwise_blocked_mask=pairwise_blocked_mask,
-        rules_enabled=enable_default_rules,
-        require_repair_for_operational=require_repair_for_operational,
-        dependency_blocked_mask=dependency_blocked_mask,
-        warning=warning,
-    )
-    return updated_operational, report
+def restart_wait_key(edge_key: str) -> str:
+    """Namespace a dependency edge's restart-delay wait vector by its stable edge key."""
+    return f"{RESTART_WAIT_PREFIX}{edge_key}"
 
 
 # ---------------------------------------------------------------------------
-# Graph-aware evaluation path
+# Hazard availability (per-asset-type hazard rule; hazard-only, no dependency
+# concepts here at all)
 # ---------------------------------------------------------------------------
-def activate_delayed_trigger_waits(
-    operational: np.ndarray,
-    asset_type: np.ndarray,
-    hazard_type: str,
-    knowledge_graph,
-    *,
-    flooded_mask: np.ndarray,
-    wait_vectors: dict[str, np.ndarray],
-    active_masks: dict[str, np.ndarray],
-) -> None:
-    """Start direct delayed-trigger countdowns when an asset becomes affected."""
-    from src.dependency_knowledge_graph import TRIGGER_DELAYED
-
-    operational = np.asarray(operational, dtype=bool)
-    flooded_mask = np.asarray(flooded_mask, dtype=bool)
-    num_assets = len(asset_type)
-
-    for a_type in np.unique(asset_type):
-        if a_type == "road":
-            continue
-        asset_mask = asset_type == a_type
-        for rule in knowledge_graph.get_rules(
-            hazard_type, a_type, asset_type_b=None
-        ):
-            if (
-                rule.relationship != "direct"
-                or rule.return_to_operational.trigger != TRIGGER_DELAYED
-            ):
-                continue
-
-            wait_vector_name = rule.return_to_operational.wait_vector
-            wait_vector = wait_vectors.setdefault(
-                wait_vector_name, np.zeros(num_assets, dtype=np.float64)
-            )
-            active = active_masks.setdefault(
-                wait_vector_name, np.zeros(num_assets, dtype=bool)
-            )
-            affected = asset_mask & ~operational
-            if rule.hazard_blocks_operation:
-                affected |= asset_mask & flooded_mask
-            newly_affected = affected & ~active
-            if np.any(newly_affected):
-                wait_vector[newly_affected] = np.maximum(
-                    wait_vector[newly_affected],
-                    rule.return_to_operational.delay_steps,
-                )
-                active[newly_affected] = True
-
-
-def clear_completed_delayed_triggers(
-    operational: np.ndarray,
-    wait_vectors: dict[str, np.ndarray],
-    active_masks: dict[str, np.ndarray],
-) -> None:
-    """Allow a later disruption to start a fresh delayed-trigger countdown."""
-    operational = np.asarray(operational, dtype=bool)
-    for wait_vector_name, active in active_masks.items():
-        wait_vector = wait_vectors.get(wait_vector_name)
-        if wait_vector is None:
-            continue
-        active[operational & (wait_vector <= 0.0)] = False
-
-
-def _compute_repair_blocked_mask(
+def _hazard_repair_blocked_mask(
     repair_time: np.ndarray,
     asset_mask: np.ndarray,
     return_to_operational,
-    wait_vectors: dict[str, np.ndarray] | None = None,
+    wait_vectors: dict[str, np.ndarray] | None,
 ) -> np.ndarray:
-    """Return a boolean mask of assets blocked due to repair status.
-
-    Args:
-        repair_time: Per-asset remaining repair time array.
-        asset_mask: Boolean mask selecting which assets this rule applies to.
-        return_to_operational: A :class:`ReturnToOperational` instance from the
-            knowledge graph rule.
-
-    Returns:
-        Boolean array; ``True`` where an asset is blocked because repair
-        requirements are not yet satisfied.
-    """
-    from src.dependency_knowledge_graph import (
-        TRIGGER_DELAYED,
-        TRIGGER_IMMEDIATE,
-        TRIGGER_REPAIR_BELOW,
-        TRIGGER_REPAIR_COMPLETE,
-    )
-
+    """Boolean mask of assets blocked because their repair/return trigger is not yet met."""
     blocked = np.zeros(len(repair_time), dtype=bool)
     trigger = return_to_operational.trigger
 
     if trigger == TRIGGER_IMMEDIATE:
-        # No repair needed – asset is operational as soon as hazard clears.
         pass
     elif trigger == TRIGGER_REPAIR_COMPLETE:
-        # Asset must have zero remaining repair time.
         blocked[asset_mask] = repair_time[asset_mask] > 0.0
     elif trigger == TRIGGER_REPAIR_BELOW:
-        threshold = return_to_operational.threshold
-        blocked[asset_mask] = repair_time[asset_mask] > threshold
+        blocked[asset_mask] = repair_time[asset_mask] > return_to_operational.threshold
     elif trigger == TRIGGER_DELAYED:
+        key = hazard_recovery_wait_key(return_to_operational.wait_vector)
         if wait_vectors is None:
             blocked[asset_mask] = True
         else:
             wait_vector = np.asarray(
-                wait_vectors.get(
-                    return_to_operational.wait_vector,
-                    np.zeros(len(repair_time), dtype=np.float64),
-                ),
+                wait_vectors.get(key, np.zeros(len(repair_time), dtype=np.float64)),
                 dtype=np.float64,
             )
             blocked[asset_mask] = wait_vector[asset_mask] > 0.0
@@ -550,237 +115,386 @@ def _compute_repair_blocked_mask(
     return blocked
 
 
-def _compute_restore_eligible_mask(
-    repair_time: np.ndarray,
-    flooded_mask: np.ndarray,
-    asset_mask: np.ndarray,
-    return_to_operational,
+def compute_hazard_availability(
+    asset_type: np.ndarray,
+    hazard_type: str,
+    knowledge_graph,
+    *,
+    flooded_mask: np.ndarray | None = None,
+    repair_time: np.ndarray | None = None,
     wait_vectors: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Return a boolean mask of assets eligible to be restored to operational.
+    """Compute ``hazard_available`` purely from current hazard rules + inputs.
 
-    An asset is eligible when it is no longer flooded AND its
-    ``return_to_operational`` trigger condition is met.
-
-    Args:
-        repair_time: Per-asset remaining repair time array.
-        flooded_mask: Boolean array; ``True`` where the asset is currently flooded.
-        asset_mask: Boolean mask selecting which assets this rule applies to.
-        return_to_operational: A :class:`ReturnToOperational` instance from the
-            knowledge graph rule.
-
-    Returns:
-        Boolean array; ``True`` where an asset may be restored to operational.
+    This is a pure function of ``flooded_mask``/``repair_time``/wait-vector
+    contents -- it never mutates ``asset_type``, ``flooded_mask``, or
+    ``repair_time``, and never touches dependency edges.
     """
-    from src.dependency_knowledge_graph import (
-        TRIGGER_DELAYED,
-        TRIGGER_IMMEDIATE,
-        TRIGGER_REPAIR_BELOW,
-        TRIGGER_REPAIR_COMPLETE,
+    num_assets = len(asset_type)
+    if flooded_mask is None:
+        flooded_mask = np.zeros(num_assets, dtype=bool)
+    else:
+        flooded_mask = np.asarray(flooded_mask, dtype=bool)
+    if repair_time is None:
+        repair_time = np.zeros(num_assets, dtype=np.float64)
+    else:
+        repair_time = np.asarray(repair_time, dtype=np.float64)
+
+    hazard_available = np.ones(num_assets, dtype=bool)
+    for a_type in np.unique(asset_type):
+        a_mask = asset_type == a_type
+        rules = knowledge_graph.get_hazard_rules(hazard_type, a_type)
+        if not rules:
+            continue
+        blocked = np.zeros(num_assets, dtype=bool)
+        for rule in rules:
+            if rule.hazard_blocks_operation:
+                blocked |= a_mask & flooded_mask
+            blocked |= _hazard_repair_blocked_mask(
+                repair_time, a_mask, rule.return_to_operational, wait_vectors
+            )
+        hazard_available &= ~blocked
+    return hazard_available
+
+
+def activate_hazard_recovery_waits(
+    hazard_available: np.ndarray,
+    asset_type: np.ndarray,
+    hazard_type: str,
+    knowledge_graph,
+    *,
+    flooded_mask: np.ndarray,
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+) -> None:
+    """Start/refresh ``hazard_recovery_wait::<name>`` countdowns for delayed hazard triggers.
+
+    Mutates *wait_vectors* and *active_masks* in place (the same convention
+    used by :mod:`src.recovery_scheduler`). Never mutates physical damage,
+    repair time, or fragility state.
+    """
+    flooded_mask = np.asarray(flooded_mask, dtype=bool)
+    num_assets = len(asset_type)
+
+    for a_type in np.unique(asset_type):
+        a_mask = asset_type == a_type
+        for rule in knowledge_graph.get_hazard_rules(hazard_type, a_type):
+            if rule.return_to_operational.trigger != TRIGGER_DELAYED:
+                continue
+
+            key = hazard_recovery_wait_key(rule.return_to_operational.wait_vector)
+            wait_vector = wait_vectors.setdefault(key, np.zeros(num_assets, dtype=np.float64))
+            active = active_masks.setdefault(key, np.zeros(num_assets, dtype=bool))
+
+            affected = a_mask & ~hazard_available
+            if rule.hazard_blocks_operation:
+                affected |= a_mask & flooded_mask
+            newly_affected = affected & ~active
+            if np.any(newly_affected):
+                wait_vector[newly_affected] = np.maximum(
+                    wait_vector[newly_affected], rule.return_to_operational.delay_steps
+                )
+                active[newly_affected] = True
+
+
+def clear_completed_hazard_recovery_waits(
+    hazard_available: np.ndarray,
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+) -> None:
+    """Allow a later hazard disruption to start a fresh hazard-recovery countdown."""
+    hazard_available = np.asarray(hazard_available, dtype=bool)
+    for key, active in active_masks.items():
+        if not key.startswith(HAZARD_RECOVERY_WAIT_PREFIX):
+            continue
+        wait_vector = wait_vectors.get(key)
+        if wait_vector is None:
+            continue
+        active[hazard_available & (wait_vector <= 0.0)] = False
+
+
+# ---------------------------------------------------------------------------
+# Policy-aware dependency-edge evaluation
+# ---------------------------------------------------------------------------
+def _provider_available(
+    provider_index: int,
+    baseline_available: np.ndarray,
+    dependency_available: np.ndarray,
+) -> bool:
+    """A provider is available when its own baseline (intrinsic & hazard) state
+    is available *and* its own dependencies (if it is itself a target
+    elsewhere) are currently satisfied -- this is what allows dependency
+    chains to propagate."""
+    return bool(baseline_available[provider_index]) and bool(dependency_available[provider_index])
+
+
+def evaluate_edge_availability(
+    edge: DependencyEdge,
+    baseline_available: np.ndarray,
+    dependency_available: np.ndarray,
+) -> bool:
+    """Evaluate a single :class:`DependencyEdge` per its ``availability_policy``.
+
+    * ``exclusive``: the topology must have produced exactly one governing
+      provider. Zero providers -> unavailable. More than one provider is a
+      topology-contract violation and raises :class:`ValueError` rather than
+      silently picking one.
+    * ``any``: available if at least one qualifying provider is available.
+      Zero providers -> unavailable.
+    * ``at_least_n``: available if at least ``minimum_available`` qualifying
+      providers are available. Zero providers -> unavailable. Fewer
+      qualifying providers than ``minimum_available`` -> unavailable even if
+      every qualifying provider is available.
+    """
+    providers = edge.provider_indices
+
+    if edge.availability_policy == POLICY_EXCLUSIVE:
+        if len(providers) == 0:
+            return False
+        if len(providers) > 1:
+            raise ValueError(
+                f"Exclusive dependency edge '{edge.edge_key}' resolved to "
+                f"{len(providers)} providers ({providers!r}); exclusive "
+                "topology must assign exactly one governing provider with no "
+                "fallback. This indicates a topology-contract violation "
+                "upstream -- refusing to silently select one."
+            )
+        return _provider_available(providers[0], baseline_available, dependency_available)
+
+    if edge.availability_policy == POLICY_ANY:
+        if not providers:
+            return False
+        return any(
+            _provider_available(p, baseline_available, dependency_available)
+            for p in providers
+        )
+
+    if edge.availability_policy == POLICY_AT_LEAST_N:
+        if edge.minimum_available is None or edge.minimum_available < 1:
+            raise ValueError(
+                f"Dependency edge '{edge.edge_key}' uses availability_policy="
+                f"'at_least_n' but minimum_available is missing or invalid "
+                f"({edge.minimum_available!r}); it must be a positive integer."
+            )
+        if not providers:
+            return False
+        if len(providers) < edge.minimum_available:
+            # Fewer qualifying providers than required -- unavailable even if
+            # every qualifying provider is operational.
+            return False
+        available_count = sum(
+            1
+            for p in providers
+            if _provider_available(p, baseline_available, dependency_available)
+        )
+        return available_count >= edge.minimum_available
+
+    raise ValueError(
+        f"Unsupported availability_policy '{edge.availability_policy}' on "
+        f"edge '{edge.edge_key}'."
     )
 
-    eligible = np.zeros(len(repair_time), dtype=bool)
-    trigger = return_to_operational.trigger
-    not_flooded = asset_mask & ~flooded_mask
 
-    if trigger == TRIGGER_IMMEDIATE:
-        # Asset can return as soon as hazard clears, regardless of repair state.
-        eligible[not_flooded] = True
-    elif trigger == TRIGGER_REPAIR_COMPLETE:
-        # Repair must be fully complete (repair_time == 0).
-        eligible[not_flooded] = repair_time[not_flooded] == 0.0
-    elif trigger == TRIGGER_REPAIR_BELOW:
-        threshold = return_to_operational.threshold
-        eligible[not_flooded] = repair_time[not_flooded] <= threshold
-    elif trigger == TRIGGER_DELAYED and wait_vectors is not None:
-        wait_vector = np.asarray(
-            wait_vectors.get(
-                return_to_operational.wait_vector,
-                np.zeros(len(repair_time), dtype=np.float64),
-            ),
-            dtype=np.float64,
-        )
-        eligible[not_flooded] = wait_vector[not_flooded] <= 0.0
-
-    return eligible
-
-
-def restore_operational_from_graph(
-    operational: np.ndarray,
-    asset_type: np.ndarray,
-    hazard_type: str,
-    knowledge_graph,
+def evaluate_dependency_availability(
+    edges: list[DependencyEdge],
+    baseline_available: np.ndarray,
     *,
-    flooded_mask: np.ndarray | None = None,
-    repair_time: np.ndarray | None = None,
-    wait_vectors: dict[str, np.ndarray] | None = None,
-) -> np.ndarray:
-    """Restore assets to operational based on knowledge graph return-to-operational triggers.
+    num_assets: int,
+    max_iterations: int | None = None,
+) -> tuple[np.ndarray, DependencyReport]:
+    """Evaluate ``dependency_available`` for every asset from runtime edges.
 
-    This is the positive-restore counterpart to :func:`evaluate_dependencies_from_graph`.
-    It re-enables assets that were previously marked non-operational and now satisfy
-    both conditions:
+    Every asset starts assumed available (``True``) -- an asset with *no*
+    dependency edges at all has nothing to evaluate and stays available.
+    Assets that are the target of one or more edges are only available if
+    every one of their edges is satisfied per its policy.
 
-    1. The asset is no longer flooded.
-    2. The ``return_to_operational`` trigger for its asset type is satisfied
-       (e.g. ``repair_complete``: repair_time == 0; ``repair_below``: repair_time
-       < threshold; ``immediate``: always satisfied once hazard clears).
-
-    This function only enables assets — it never disables them.  It is therefore
-    always paired with the block pass in :func:`evaluate_dependencies_from_graph`:
-    assets move up only when the trigger is satisfied, then the block pass can
-    immediately re-suppress any asset whose rule conditions are still not met.
+    Dependency chains (a provider that is itself a dependent target
+    elsewhere) are supported by iterating to a fixed point. Because a
+    target's ``dependency_available`` flag is only ever cleared (``True ->
+    False``, never the reverse) once evaluated, and each target is only
+    re-evaluated while still ``True``, the whole array is a monotonically
+    non-increasing sequence with at most ``len(edges_by_target)`` possible
+    ``True -> False`` flips in total -- so the loop is *provably* guaranteed
+    to reach a stable fixed point within ``len(edges_by_target) + 1`` passes,
+    for any graph shape, including cycles. If the loop nonetheless exits
+    still ``changed`` (which should be unreachable given the above -- e.g.
+    only possible if *max_iterations* is deliberately overridden below the
+    natural bound, or a future bug breaks monotonicity), this function
+    raises :class:`RuntimeError` rather than silently returning a stale,
+    under-propagated result.
 
     Args:
-        operational: Boolean array of current operational states (will not be mutated).
-        asset_type: String array of asset types corresponding to each index.
-        hazard_type: The active hazard type (e.g. ``"flooding"``).
-        knowledge_graph: A :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph`
-            instance.
-        flooded_mask: Boolean array; ``True`` where hazard exposure exceeds the flood threshold.
-        repair_time: Per-asset remaining repair time array.
+        max_iterations: Override for the fixed-point pass bound. Defaults to
+            ``len(edges_by_target) + 1`` (the proven-sufficient bound).
+            Exposed mainly for testing the non-convergence guard itself.
 
-    Returns:
-        Updated operational array with eligible assets restored to ``True``.
+    This function is strictly hazard-agnostic: *baseline_available* is
+    expected to already combine intrinsic operational state with hazard
+    availability (``intrinsic_operational & hazard_available``); this
+    function never inspects hazard/flood/repair inputs directly and never
+    mutates *baseline_available*.
     """
-    num_assets = len(asset_type)
-    operational = np.asarray(operational, dtype=bool).copy()
+    baseline_available = np.asarray(baseline_available, dtype=bool)
+    dependency_available = np.ones(num_assets, dtype=bool)
+    edges_by_target = index_edges_by_target(edges)
 
-    if flooded_mask is None:
-        flooded_mask = np.zeros(num_assets, dtype=bool)
-    else:
-        flooded_mask = np.asarray(flooded_mask, dtype=bool)
-
-    if repair_time is None:
-        repair_time = np.zeros(num_assets, dtype=np.float64)
-    else:
-        repair_time = np.asarray(repair_time, dtype=np.float64)
-
-    unique_asset_types = np.unique(asset_type)
-    for a_type in unique_asset_types:
-        if a_type == "road":
-            continue
-        a_mask = asset_type == a_type
-        direct_rules = knowledge_graph.get_rules(
-            hazard_type, a_type, asset_type_b=None
-        )
-        for rule in direct_rules:
-            if rule.relationship != "direct":
+    unavailable_targets: set[int] = set()
+    if max_iterations is None:
+        max_iterations = len(edges_by_target) + 1
+    iterations = 0
+    changed = True
+    while changed and iterations < max_iterations:
+        changed = False
+        iterations += 1
+        for target_index, target_edges in edges_by_target.items():
+            if not dependency_available[target_index]:
                 continue
-            eligible = _compute_restore_eligible_mask(
-                repair_time,
-                flooded_mask,
-                a_mask,
-                rule.return_to_operational,
-                wait_vectors=wait_vectors,
-            )
-            # Only restore assets that were previously non-operational.
-            operational |= eligible & ~operational
+            for edge in target_edges:
+                if not evaluate_edge_availability(edge, baseline_available, dependency_available):
+                    dependency_available[target_index] = False
+                    unavailable_targets.add(target_index)
+                    changed = True
+                    break
 
-    return operational
+    if changed:
+        raise RuntimeError(
+            "Dependency graph evaluation did not converge to a stable fixed "
+            f"point within {max_iterations} pass(es) across "
+            f"{len(edges_by_target)} target(s). Refusing to silently return "
+            "a stale, under-propagated dependency_available result. This "
+            "should be unreachable for the built-in monotonic evaluation -- "
+            "check for a custom max_iterations override or a non-monotonic "
+            "edge-evaluation change."
+        )
+
+    report: DependencyReport = {
+        "evaluated_target_count": len(edges_by_target),
+        "unavailable_target_count": len(unavailable_targets),
+        "unavailable_targets": sorted(unavailable_targets),
+        "blocked_count": len(unavailable_targets),
+        "active_rule_count": len(edges),
+        "active_rules": sorted(
+            {edge.edge_key for edge in edges if not dependency_available[edge.target_index]}
+        ),
+        "iterations": iterations,
+    }
+    return dependency_available, report
 
 
-def evaluate_dependencies_from_graph(
-    operational: np.ndarray,
+# ---------------------------------------------------------------------------
+# Dependency restart waits
+# ---------------------------------------------------------------------------
+def activate_dependency_restart_waits(
+    dependency_available: np.ndarray,
+    previous_dependency_available: np.ndarray | None,
+    edges: list[DependencyEdge],
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+    *,
+    restart_delay_steps: float = 0.0,
+    num_assets: int,
+) -> None:
+    """(Re)start or reset each edge's namespaced ``restart_wait::<edge_key>`` timer.
+
+    * A required dependency transitioning from unavailable to available
+      (re)starts its configured restart delay -- namespaced per edge key so
+      independent edges never overwrite one another's timers.
+    * A required dependency that is (still or newly) unavailable resets its
+      restart timer, so the next recovery starts a fresh countdown.
+    * If a dependency was already available on the previous evaluation (no
+      transition), its existing timer (if any) is left untouched so it can
+      keep counting down via the generic wait-vector decrement mechanism.
+
+    When *previous_dependency_available* is ``None`` (first-ever call), no
+    transition is assumed for targets already available, so no spurious
+    restart delay is applied at start-up.
+    """
+    for edge in edges:
+        key = restart_wait_key(edge.edge_key)
+        vector = wait_vectors.setdefault(key, np.zeros(num_assets, dtype=np.float64))
+        active = active_masks.setdefault(key, np.zeros(num_assets, dtype=bool))
+        target = edge.target_index
+
+        now_available = bool(dependency_available[target])
+        if previous_dependency_available is None:
+            was_available = now_available
+        else:
+            was_available = bool(previous_dependency_available[target])
+
+        if now_available and not was_available:
+            vector[target] = restart_delay_steps
+            active[target] = True
+        elif not now_available:
+            vector[target] = 0.0
+            active[target] = False
+        # else: still available, no new transition -- leave the existing
+        # timer alone so it can continue counting down.
+
+
+def compute_restart_ready(
+    num_assets: int,
+    wait_vectors: dict[str, np.ndarray],
+    active_masks: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Compute ``restart_ready`` from ``restart_wait::*`` vectors only.
+
+    Deliberately ignores ``hazard_recovery_wait::*`` (and any other
+    non-``restart_wait::``-prefixed) vectors -- dependency restart waiting
+    must never be conflated with hazard-recovery waiting or physical repair.
+    """
+    ready = np.ones(num_assets, dtype=bool)
+    for key, active in active_masks.items():
+        if not key.startswith(RESTART_WAIT_PREFIX):
+            continue
+        vector = wait_vectors.get(key)
+        if vector is None:
+            continue
+        blocked = np.asarray(active, dtype=bool) & (np.asarray(vector, dtype=np.float64) > 0.0)
+        ready &= ~blocked
+    return ready
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestration
+# ---------------------------------------------------------------------------
+def evaluate_operational_state(
+    *,
+    intrinsic_operational: np.ndarray,
     asset_type: np.ndarray,
     hazard_type: str,
     knowledge_graph,
-    *,
     flooded_mask: np.ndarray | None = None,
     repair_time: np.ndarray | None = None,
-    wait_vectors: dict[str, np.ndarray] | None = None,
-    service_area_map: dict[int, list[int]] | None = None,
-    previous_dependency_blocked_mask: np.ndarray | None = None,
+    dependency_edges: list[DependencyEdge] | None = None,
+    wait_vectors: dict[str, np.ndarray],
+    hazard_active_masks: dict[str, np.ndarray],
+    restart_active_masks: dict[str, np.ndarray],
+    previous_dependency_available: np.ndarray | None = None,
+    restart_delay_steps: float = 0.0,
     profiler=NULL_PROFILER,
-    return_report: bool = False,
-):
-    """Graph-aware dependency evaluation using a :class:`DependencyKnowledgeGraph`.
+) -> tuple[np.ndarray, DependencyReport]:
+    """Compute the fully separated operational-state layers for one timestep.
 
-    Performs two passes for each asset type:
+    Returns ``(effective_operational, report)``. *report* always contains
+    ``intrinsic_operational``, ``hazard_available``, ``dependency_available``,
+    ``restart_ready``, and ``effective_operational`` (each a fresh copy, safe
+    to store/compare), plus diagnostic dependency-evaluation fields.
 
-    1. **Restore pass** (:func:`restore_operational_from_graph`): re-enables any
-       asset that is no longer flooded and whose ``return_to_operational`` trigger
-       is now satisfied.  This makes the "return to service" logic explicit and
-       driven solely by the knowledge graph — not by ad-hoc side-effects elsewhere
-       in the simulation loop.
-
-    2. **Block pass**: applies hazard blocking and repair-state blocking according
-       to the same rules, so assets that still do not meet conditions are kept or
-       returned to non-operational.
-
-    For each unique ``asset_type_a`` present in *asset_type*, the matching rules
-    (or the default rule) are fetched from *knowledge_graph* and applied:
-
-    * **Direct rules** (``asset_type_b`` is ``None``):
-
-      1. Restore pass: assets not flooded and meeting their trigger are restored to True.
-      2. If ``hazard_blocks_operation`` is ``True``, assets of type A that are
-         currently flooded are marked as blocked.
-      3. The ``return_to_operational`` trigger is applied to determine whether
-         outstanding repair work also blocks the asset.
-
-    * **Service-area rules** (``asset_type_b`` is set):
-
-      Uses *service_area_map* (``{asset_idx_a: [asset_idx_b, ...]}``) to block
-      B-type assets when their governing A-type asset is not operational.
-
-    Args:
-        operational: Boolean array of current operational states (will not be
-            mutated).
-        asset_type: String array of asset types corresponding to each index.
-        hazard_type: The active hazard type (e.g. ``"flooding"``).
-        knowledge_graph: A :class:`~src.dependency_knowledge_graph.DependencyKnowledgeGraph`
-            instance.
-        flooded_mask: Boolean array; ``True`` where hazard exposure exceeds the
-            flood threshold.
-        repair_time: Per-asset remaining repair time array.
-        service_area_map: Mapping ``{asset_idx_a: [asset_idx_b, ...]}``.  Required
-            for service-area rules; ignored otherwise.
-        return_report: If ``True``, also return a report dict.
-
-    Returns:
-        Updated operational array (and report dict if *return_report* is
-        ``True``).
+    Never mutates *intrinsic_operational*, *flooded_mask*, or *repair_time*.
+    Mutates *wait_vectors*, *hazard_active_masks*, and *restart_active_masks*
+    in place (the existing :mod:`src.recovery_scheduler` convention) to
+    record wait-vector countdown state across timesteps.
     """
-    num_assets = len(asset_type)
     if profiler is None:
         profiler = NullProfiler()
-    if flooded_mask is None:
-        flooded_mask = np.zeros(num_assets, dtype=bool)
-    else:
-        flooded_mask = np.asarray(flooded_mask, dtype=bool)
 
-    if repair_time is None:
-        repair_time = np.zeros(num_assets, dtype=np.float64)
-    else:
-        repair_time = np.asarray(repair_time, dtype=np.float64)
+    num_assets = len(asset_type)
+    intrinsic_operational = np.asarray(intrinsic_operational, dtype=bool)
+    dependency_edges = dependency_edges or []
 
-    operational = np.asarray(operational, dtype=bool).copy()
-    preserved_dependency_blocked_mask = np.zeros(num_assets, dtype=bool)
-    if previous_dependency_blocked_mask is not None:
-        previous_dependency_blocked_mask = np.asarray(
-            previous_dependency_blocked_mask, dtype=bool
-        ).copy()
-        if previous_dependency_blocked_mask.shape != operational.shape:
-            raise ValueError(
-                "previous_dependency_blocked_mask must match the operational array"
-            )
-        previous_dependency_blocked_mask &= asset_type != "road"
-        restorable_dependency_outages = (
-            previous_dependency_blocked_mask
-            & ~flooded_mask
-            & (repair_time <= 0.0)
-        )
-        operational[restorable_dependency_outages] = True
-        preserved_dependency_blocked_mask = (
-            previous_dependency_blocked_mask
-            & ~restorable_dependency_outages
-        )
-
-    # Restore pass first: re-enable assets whose return-to-operational condition is met.
-    with profiler.section("dependency.restore_pass"):
-        operational = restore_operational_from_graph(
-            operational,
+    with profiler.section("dependency.hazard_availability"):
+        hazard_available = compute_hazard_availability(
             asset_type,
             hazard_type,
             knowledge_graph,
@@ -788,132 +502,49 @@ def evaluate_dependencies_from_graph(
             repair_time=repair_time,
             wait_vectors=wait_vectors,
         )
-    dependency_candidate_operational = operational.copy()
-
-    blocked_mask = np.zeros(num_assets, dtype=bool)
-    hazard_blocked_count = 0
-    repair_blocked_count = 0
-    service_area_blocked_count = 0
-    active_rules: list[dict[str, Any]] = []
-
-    unique_asset_types = np.unique(asset_type)
-
-    for a_type in unique_asset_types:
-        if a_type == "road":
-            continue
-        a_mask = asset_type == a_type
-
-        # --- Direct rules (rule on A itself) --------------------------------
-        direct_rules = knowledge_graph.get_rules(
-            hazard_type, a_type, asset_type_b=None
+        activate_hazard_recovery_waits(
+            hazard_available,
+            asset_type,
+            hazard_type,
+            knowledge_graph,
+            flooded_mask=(
+                np.zeros(num_assets, dtype=bool) if flooded_mask is None
+                else np.asarray(flooded_mask, dtype=bool)
+            ),
+            wait_vectors=wait_vectors,
+            active_masks=hazard_active_masks,
         )
-        for rule in direct_rules:
-            if rule.relationship != "direct":
-                continue
-            active_rules.append(
-                {
-                    "hazard_type": hazard_type,
-                    "asset_type_a": a_type,
-                    "asset_type_b": None,
-                    "relationship": "direct",
-                    "hazard_blocks_operation": bool(rule.hazard_blocks_operation),
-                    "return_trigger": rule.return_to_operational.trigger,
-                }
-            )
+        clear_completed_hazard_recovery_waits(hazard_available, wait_vectors, hazard_active_masks)
 
-            # 1. Hazard blocking
-            if rule.hazard_blocks_operation:
-                hazard_blocked = a_mask & flooded_mask
-                newly_hazard_blocked = hazard_blocked & ~blocked_mask
-                blocked_mask |= hazard_blocked
-                hazard_blocked_count += int(np.sum(newly_hazard_blocked))
+    baseline_available = intrinsic_operational & hazard_available
 
-            # 2. Repair-state blocking
-            repair_blocked = _compute_repair_blocked_mask(
-                repair_time,
-                a_mask,
-                rule.return_to_operational,
-                wait_vectors=wait_vectors,
-            )
-            newly_repair_blocked = repair_blocked & ~blocked_mask
-            blocked_mask |= repair_blocked
-            repair_blocked_count += int(np.sum(newly_repair_blocked))
+    with profiler.section("dependency.availability"):
+        dependency_available, dependency_report = evaluate_dependency_availability(
+            dependency_edges, baseline_available, num_assets=num_assets
+        )
 
-    # --- Service-area rules (A → B), propagated to a fixed point ------------
-    service_area_blocked_mask = np.zeros(num_assets, dtype=bool)
-    service_edges: list[tuple[int, int]] = []
-    if service_area_map is not None:
-        for rule in knowledge_graph.rules:
-            if (
-                rule.hazard_type != hazard_type
-                or rule.relationship != "service_area"
-                or rule.asset_type_b is None
-                or rule.asset_type_a == "road"
-                or rule.asset_type_b == "road"
-            ):
-                continue
-            active_rules.append(
-                {
-                    "hazard_type": hazard_type,
-                    "asset_type_a": rule.asset_type_a,
-                    "asset_type_b": rule.asset_type_b,
-                    "relationship": "service_area",
-                    "hazard_blocks_operation": bool(
-                        rule.hazard_blocks_operation
-                    ),
-                    "return_trigger": rule.return_to_operational.trigger,
-                }
-            )
-            source_indices = np.where(asset_type == rule.asset_type_a)[0]
-            for source_index in source_indices:
-                for dependent_index in service_area_map.get(
-                    int(source_index), []
-                ):
-                    if (
-                        0 <= dependent_index < num_assets
-                        and asset_type[dependent_index] == rule.asset_type_b
-                    ):
-                        service_edges.append(
-                            (int(source_index), int(dependent_index))
-                        )
+    with profiler.section("dependency.restart_waits"):
+        activate_dependency_restart_waits(
+            dependency_available,
+            previous_dependency_available,
+            dependency_edges,
+            wait_vectors,
+            restart_active_masks,
+            restart_delay_steps=restart_delay_steps,
+            num_assets=num_assets,
+        )
+        restart_ready = compute_restart_ready(num_assets, wait_vectors, restart_active_masks)
 
-    changed = True
-    while changed:
-        changed = False
-        for source_index, dependent_index in service_edges:
-            source_unavailable = (
-                not operational[source_index]
-                or blocked_mask[source_index]
-                or service_area_blocked_mask[source_index]
-            )
-            if (
-                source_unavailable
-                and not service_area_blocked_mask[dependent_index]
-            ):
-                service_area_blocked_mask[dependent_index] = True
-                changed = True
+    effective_operational = baseline_available & dependency_available & restart_ready
 
-    service_area_blocked_count = int(
-        np.sum(service_area_blocked_mask & ~blocked_mask)
-    )
-    blocked_mask |= service_area_blocked_mask
-
-    updated_operational = apply_dependency_blocking(operational, blocked_mask)
-    dependency_blocked_mask = (
-        preserved_dependency_blocked_mask
-        | (service_area_blocked_mask & dependency_candidate_operational)
-    )
-
-    if not return_report:
-        return updated_operational
-
-    report = {
-        "blocked_count": int(np.sum(blocked_mask)),
-        "hazard_blocked_count": hazard_blocked_count,
-        "repair_blocked_count": repair_blocked_count,
-        "service_area_blocked_count": service_area_blocked_count,
-        "dependency_blocked_mask": dependency_blocked_mask,
-        "active_rule_count": len(active_rules),
-        "active_rules": active_rules,
+    report: DependencyReport = {
+        **dependency_report,
+        "intrinsic_operational": intrinsic_operational.copy(),
+        "hazard_available": hazard_available.copy(),
+        "dependency_available": dependency_available.copy(),
+        "restart_ready": restart_ready.copy(),
+        "effective_operational": effective_operational.copy(),
+        "dependency_blocked_mask": ~dependency_available,
+        "warning": None,
     }
-    return updated_operational, report
+    return effective_operational, report

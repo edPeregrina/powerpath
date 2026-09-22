@@ -7,8 +7,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.dependency_evaluator import evaluate_dependencies_from_graph
+from src.dependency_evaluator import evaluate_operational_state
 from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+from src.dependency_topology import DependencyEdge
 from src.timing_profiler import (
     NullProfiler,
     SimulationTimingProfiler,
@@ -61,14 +62,11 @@ def test_graph_dependency_outputs_unchanged_with_profiler():
     kg = DependencyKnowledgeGraph.from_config(
         [
             {
+                "relation": "hazard",
                 "hazard_type": "flooding",
-                "asset_type_a": "msls",
-                "asset_type_b": None,
-                "relationship": "direct",
-                "parameters": {
-                    "hazard_blocks_operation": True,
-                    "return_to_operational": {"trigger": "repair_complete"},
-                },
+                "source_type": "msls",
+                "hazard_blocks_operation": True,
+                "return_to_operational": {"trigger": "repair_complete"},
             }
         ]
     )
@@ -77,27 +75,33 @@ def test_graph_dependency_outputs_unchanged_with_profiler():
     flooded_mask = np.array([True], dtype=bool)
     repair_time = np.array([2.0], dtype=float)
 
-    baseline = evaluate_dependencies_from_graph(
-        operational,
-        asset_type,
-        "flooding",
-        kg,
+    baseline, _ = evaluate_operational_state(
+        intrinsic_operational=operational,
+        asset_type=asset_type,
+        hazard_type="flooding",
+        knowledge_graph=kg,
         flooded_mask=flooded_mask,
         repair_time=repair_time,
+        wait_vectors={},
+        hazard_active_masks={},
+        restart_active_masks={},
     )
     profiler = SimulationTimingProfiler()
-    instrumented = evaluate_dependencies_from_graph(
-        operational,
-        asset_type,
-        "flooding",
-        kg,
+    instrumented, _ = evaluate_operational_state(
+        intrinsic_operational=operational,
+        asset_type=asset_type,
+        hazard_type="flooding",
+        knowledge_graph=kg,
         flooded_mask=flooded_mask,
         repair_time=repair_time,
+        wait_vectors={},
+        hazard_active_masks={},
+        restart_active_masks={},
         profiler=profiler,
     )
 
     assert baseline.tolist() == instrumented.tolist()
-    assert "dependency.restore_pass" in profiler.phase_summary()["phase"].values
+    assert "dependency.hazard_availability" in profiler.phase_summary()["phase"].values
 
 
 def test_self_time_correct_for_nested_sections():

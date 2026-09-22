@@ -579,6 +579,24 @@ def plot_simulation_results_summary(results_df, gdf_assets, config=None, save_pa
     return fig
 
 
+def _sum_number_repair_crews(number_repair_crews):
+    """Sum a ``number_repair_crews`` value into a single total-crews scalar.
+
+    Supports every shape produced by ``config.py``/``src.simulation``:
+    scalar int, island-keyed dict[int, int], type-specific dict[str, int],
+    and island+type nested dict[int, dict[str, int]].
+    """
+    if isinstance(number_repair_crews, dict):
+        total = 0
+        for value in number_repair_crews.values():
+            if isinstance(value, dict):
+                total += sum(value.values())
+            else:
+                total += value
+        return total
+    return number_repair_crews
+
+
 def plot_detailed_analysis_panels(results_df, gdf_assets, config=None, save_path=None):
     """
     Create a detailed 6-panel analysis visualization.
@@ -593,7 +611,12 @@ def plot_detailed_analysis_panels(results_df, gdf_assets, config=None, save_path
         matplotlib.figure.Figure: The created figure
     """
     total_assets = len(gdf_assets)
-    max_crews = config['simulation_config']['number_repair_crews'] if config else 10
+    # number_repair_crews may be a scalar int, an island-keyed dict, a
+    # type-specific dict, or an island+type nested dict (see
+    # config.py/src/simulation.py). Sum across all islands/types to get a
+    # single "total crews" scalar for the idle/active area plot below.
+    raw_number_repair_crews = config['simulation_config']['number_repair_crews'] if config else 10
+    max_crews = _sum_number_repair_crews(raw_number_repair_crews)
     
     # Prepare data for visualization
     timestep_metrics = results_df.copy()
