@@ -439,12 +439,19 @@ def test_dependency_blocking_does_not_trigger_physical_delayed_failure():
 
 def test_evaluate_operational_state_via_simulation_wiring():
     """Integration check that _update_operational_state publishes the same
-    5-way separated state and that state.operational == effective_operational."""
+    5-way separated state and that state.operational == effective_operational.
+
+    ``state.intrinsic_operational`` (not ``state.operational``) is the
+    input contract for the persisted physical/intrinsic state -- see
+    ``test_dependency_blocked_undamaged_asset_recovers_without_manual_reset``
+    below for a regression test that does *not* manually reset state between
+    calls, matching the real simulation loop.
+    """
     asset_type = np.array(["msls", "hospital"])
     edge = _edge("e1", target_index=1, provider_indices=(0,), availability_policy=POLICY_EXCLUSIVE)
 
     state = SimulationState(None, 2)
-    state.operational = np.array([False, True])  # provider physically down
+    state.intrinsic_operational = np.array([False, True])  # provider physically down
 
     config = {
         "dependency_parameters": {
@@ -468,7 +475,7 @@ def test_evaluate_operational_state_via_simulation_wiring():
     # starts counting down, holding the target non-operational until the
     # restart delay elapses (restart-ready gating, independent of the
     # dependency itself already being satisfied).
-    state.operational = np.array([True, True])
+    state.intrinsic_operational = np.array([True, True])
     _update_operational_state(
         state, asset_type, np.zeros(2, dtype=bool), config, repair_threshold=0.0,
         knowledge_graph=_empty_graph(), dependency_edges=[edge],
@@ -478,3 +485,61 @@ def test_evaluate_operational_state_via_simulation_wiring():
     assert state.dependency_available.tolist() == [True, True]
     assert state.restart_ready.tolist() == [True, False]
     assert state.operational.tolist() == [True, False]
+
+
+def test_dependency_blocked_undamaged_asset_recovers_without_manual_reset():
+    """Regression test for the dependency-blocking latching bug.
+
+    An undamaged, never-repaired asset that becomes dependency-blocked must
+    become operational again once its dependency clears -- purely via real
+    state carry-forward across successive ``_update_operational_state``
+    calls, with NO manual reset of the dependent asset's own state between
+    calls (mirroring the real ``run_simulation`` loop, where nothing else
+    would ever raise ``state.operational`` back up for an asset that was
+    never physically damaged/repaired).
+
+    Before the fix, ``_update_operational_state`` read ``state.operational``
+    (the *effective*, already-blocked state) back in as next timestep's
+    ``intrinsic_operational`` input, so the hospital below would remain
+    stuck at ``operational=False`` forever even after the provider fully
+    recovered and the dependency was satisfied again.
+    """
+    asset_type = np.array(["msls", "hospital"])
+    edge = _edge("e1", target_index=1, provider_indices=(0,), availability_policy=POLICY_EXCLUSIVE)
+    config = {
+        "dependency_parameters": {
+            "knowledge_graph": [],
+            "hazard_type": "flooding",
+            "dependency_restart_delay_steps": 0.0,
+        }
+    }
+    state = SimulationState(None, 2)
+    assert state.operational.tolist() == [True, True]
+
+    # Timestep 1: provider (msls) physically fails (e.g. a fragility
+    # failure written by `_update_hazard_map_states`). The hospital (index
+    # 1) is never damaged -- its intrinsic_operational is never touched
+    # directly anywhere in this test; only the provider's own intrinsic
+    # state changes, exactly as the production write-sites would do.
+    state.intrinsic_operational[0] = False
+    _update_operational_state(
+        state, asset_type, np.zeros(2, dtype=bool), config, repair_threshold=0.0,
+        knowledge_graph=_empty_graph(), dependency_edges=[edge],
+    )
+    assert state.operational.tolist() == [False, False]
+    assert state.dependency_available.tolist() == [True, False]
+
+    # Timestep 2: provider recovers intrinsically (e.g. repair completes via
+    # `_handle_completed_repairs`, which only ever writes to
+    # `state.intrinsic_operational`). Nothing touches the hospital's state
+    # at all between calls -- it must recover purely because its own
+    # intrinsic_operational was never altered and the dependency is now
+    # satisfied.
+    state.intrinsic_operational[0] = True
+    _update_operational_state(
+        state, asset_type, np.zeros(2, dtype=bool), config, repair_threshold=0.0,
+        knowledge_graph=_empty_graph(), dependency_edges=[edge],
+    )
+
+    assert state.dependency_available.tolist() == [True, True]
+    assert state.operational.tolist() == [True, True]

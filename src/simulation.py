@@ -339,12 +339,20 @@ def _update_hazard_map_states(
     # Mask of assets flooded above threshold
     flooded_mask = state.current_hazard_values > flood_threshold
 
-    # Apply fragility to assets that are not currently under repair
-    assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.operational
+    # Apply fragility to assets that are not currently under repair.
+    # Gated on `state.intrinsic_operational` (the persisted physical/intrinsic
+    # state), not `state.operational` (the final effective state, which may be
+    # temporarily False due to dependency/hazard blocking alone). Using the
+    # effective state here would incorrectly skip fragility evaluation for an
+    # intrinsically-fine asset that happens to be dependency-blocked.
+    assets_to_evaluate = flooded_mask & ~state.repair_crews_assigned & state.intrinsic_operational
 
-    # Update operational status based on fragility for assets above threshold
+    # Update intrinsic operational status based on fragility for assets above threshold.
+    # This only ever lowers `state.intrinsic_operational` (physical failure), never
+    # `state.operational` directly -- the effective state is recomputed from the
+    # intrinsic state every timestep in `_update_operational_state`.
     if np.any(assets_to_evaluate):
-        fragility_operational = np.ones_like(state.operational, dtype=bool)
+        fragility_operational = np.ones_like(state.intrinsic_operational, dtype=bool)
         hazard_subset = state.current_hazard_values[assets_to_evaluate]
         asset_type_subset = asset_type[assets_to_evaluate]
         fragility_result = default_fragility_function(
@@ -355,7 +363,7 @@ def _update_hazard_map_states(
             fragility_models=_config['recovery_parameters'].get('fragility_models'),
         )
         fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
-        state.operational = np.minimum(state.operational, fragility_operational)
+        state.intrinsic_operational = np.minimum(state.intrinsic_operational, fragility_operational)
 
     # Update damage ratio and repair time for assets flooded above threshold this timestep
     if np.any(flooded_mask):
@@ -1098,7 +1106,7 @@ def _handle_completed_repairs(state, available_repair_crews, verbose, timestep,
                     )
             else:
                 available_repair_crews += num_completed_repairs
-        state.operational[completed_repairs] = True
+        state.intrinsic_operational[completed_repairs] = True
         state.repair_crews_assigned[completed_repairs] = False
         if verbose:
             completed_repairs_indices = np.where(completed_repairs)[0]
@@ -1126,10 +1134,19 @@ def _update_operational_state(
     restart_ready -> effective_operational`` -- and publishes the final
     result as ``state.operational`` for all existing downstream consumers
     (plotting, timestep results, societal-access postprocessing, realized-
-    state caching). ``state.operational`` going *into* this call is treated
-    as this timestep's intrinsic/physical operational state (repair
-    completion etc.); it is never treated as a temporary dependency-only
-    state.
+    state caching).
+
+    ``state.intrinsic_operational`` (not ``state.operational``) is the
+    persisted physical/intrinsic state carried into this call: it is only
+    ever lowered by fragility (see ``_update_hazard_map_states``) and only
+    ever raised by repair completion (see ``_handle_completed_repairs``).
+    ``state.operational`` is always the *effective* state computed by this
+    function -- reading it back as next timestep's intrinsic input would
+    permanently latch any asset that becomes dependency-blocked while
+    otherwise undamaged, since nothing else would ever raise it again. See
+    the regression test
+    ``test_dependency_blocked_undamaged_asset_recovers_after_dependency_clears_via_real_loop``
+    in ``tests/test_dependency_behaviors.py``.
 
     Args:
         state: Current :class:`SimulationState`.
@@ -1162,7 +1179,7 @@ def _update_operational_state(
     previous_dependency_available = state.dependency_available
 
     effective_operational, report = evaluate_operational_state(
-        intrinsic_operational=state.operational,
+        intrinsic_operational=state.intrinsic_operational,
         asset_type=asset_type,
         hazard_type=hazard_type,
         knowledge_graph=knowledge_graph,
