@@ -1,11 +1,10 @@
 # PowerPath module map
 
-This document replaces the old root-level `MODULE_INFOGRAPHIC_MAP.md`.
-It is a contributor-oriented map of the **current** architecture on the simplified knowledge-graph line of work.
+This is a contributor-oriented map of the repository architecture.
 
 ## System overview
 
-PowerPath simulates how flooding affects infrastructure assets over time, how damage and repair evolve, how road-network disruption changes access, and how those realized states are converted into societal-access and impact outputs.
+PowerPath simulates how flooding affects infrastructure assets over time, how damage and repair evolve, how road-network disruption changes access for repairs and for access to services, and how those realized states are converted into societal-access and impact outputs.
 
 Primary entry points:
 
@@ -26,7 +25,7 @@ config.py
       -> load/build caches and adaptation inputs
   -> per timestep
       -> sample hazard at assets
-      -> update road/island accessibility state
+      -> update road connected component ("island") accessibility state
       -> update damage, repair timers, and intrinsic state
       -> evaluate hazard availability + dependency availability + restart waits
       -> assign crews and advance repairs
@@ -52,14 +51,15 @@ config.py
 | Impacts and visualization | [`src/impacts.py`](../src/impacts.py), [`src/visualisations.py`](../src/visualisations.py) | Derives impact summaries and plotting outputs from simulation and societal-access results. |
 | Executable examples | [`book/`](../book/) | Notebooks demonstrate the current workflows, including knowledge-graph, societal-access, and realized-state-cache examples. |
 | Regression coverage | [`tests/`](../tests/) | Focused tests validate dependency schema/topology/behavior, recovery semantics, island crew logic, societal-access behavior, and realized-state cache behavior. |
+| General utility module | [`src/utils.py`](../src/utils.py) | Collects general-purpose functions used across multiple modules. |
 
 ## Knowledge graph and dependency edges
 
-The dependency architecture is intentionally split into three layers:
+The dependency architecture is split into three layers:
 
 1. **Type-level rules** in [`src/dependency_knowledge_graph.py`](../src/dependency_knowledge_graph.py)
    - `KnowledgeGraphRule` stores either hazard rules or dependency rules.
-   - `build_default_knowledge_graph()` defines the shipped flooding defaults.
+   - `build_default_knowledge_graph()` defines the flooding defaults.
    - `config.py` stores those defaults in `config['dependency_parameters']['knowledge_graph']`.
 2. **Topology expansion** in [`expand_dependency_edges()`](../src/dependency_topology.py)
    - Expands type-to-type rules into concrete runtime `DependencyEdge` records once `gdf_assets` is known.
@@ -74,7 +74,7 @@ The dependency architecture is intentionally split into three layers:
      - `restart_ready`
      - final `effective_operational`
 
-That separation is important when changing the system:
+Thus:
 
 - change [`src/dependency_knowledge_graph.py`](../src/dependency_knowledge_graph.py) when the **schema or defaults** change;
 - change [`src/dependency_topology.py`](../src/dependency_topology.py) when the **provider-target matching logic** changes;
@@ -172,11 +172,11 @@ Societal access is a postprocessing step, not part of the per-timestep damage so
 - overrides selected functions with service-area-based metrics when configured;
 - optionally reuses flat scalar results from a shared realized-state cache.
 
-For electricity-style service areas, [`_build_service_area_population_maps()`](../src/societal_access.py):
+For service areas, [`_build_service_area_population_maps()`](../src/societal_access.py):
 
 - precomputes provider-to-population assignments;
 - uses Voronoi or nearest-provider logic depending on provider count;
-- supports service-area-based overrides for functions such as electricity.
+- supports service-area-based overrides for functions such as electricity, where road access is not necessary.
 
 Shared realized-state caching lives in two places:
 
@@ -198,11 +198,15 @@ Those outputs feed:
 - [`src/visualisations.py`](../src/visualisations.py) for aggregated plots;
 - notebooks in [`book/`](../book/) for reproducible workflows and interpretation.
 
-## Where notebooks and tests fit
+## Where to find what
+
+### Source code
+
+Can be found in [`src/`]
 
 ### Notebooks
 
-The most relevant current notebooks are:
+The most relevant demonstration notebooks are:
 
 - [`book/Use_Case_sample_knowledge_graph.ipynb`](../book/Use_Case_sample_knowledge_graph.ipynb) — knowledge-graph dependency workflow;
 - [`book/Use_Case_sample_societal_access.ipynb`](../book/Use_Case_sample_societal_access.ipynb) — societal-access workflow;
@@ -212,7 +216,7 @@ Treat these as executable orientation material layered on top of the Python modu
 
 ### Tests
 
-Useful architectural test anchors include:
+Current architectural test anchors include:
 
 - [`tests/test_dependency_knowledge_graph_schema.py`](../tests/test_dependency_knowledge_graph_schema.py)
 - [`tests/test_dependency_topology.py`](../tests/test_dependency_topology.py)
@@ -239,7 +243,7 @@ A good contributor workflow is:
 
 1. find the entry point used by the notebook or test you care about;
 2. identify whether the behavior is configuration, topology expansion, runtime evaluation, or postprocessing;
-3. update the matching focused tests first or alongside the code change;
+3. update the matching focused tests alongside the code change;
 4. only then widen to notebooks or higher-level workflows.
 
 ## Documentation maintenance
@@ -253,4 +257,3 @@ Update this map when any of the following change:
 - the recommended contributor notebooks or test anchors;
 - the location of this document or links to it.
 
-Do **not** use this file as a backlog, migration scratchpad, or one-row-per-helper inventory. It should stay focused on the current architecture a new contributor needs to navigate safely.
