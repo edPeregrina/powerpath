@@ -8,4 +8,4 @@ This repository contains a time‑explicit disruption and recovery model to repr
 
 ### MIRACA
 This work has received funding from the European Union’s Horizon Europe research and innovation programme under grant agreement No. 101093854 for the project ‘Multi-hazard Infrastructure Risk Assessment for Climate Adaptation’ [MIRACA] (https://miraca-project.eu) is a research project building an evidence-based decision support toolkit that meets real world demands.
-![Model flowchart](MODULE_INFOGRAPHIC_MAP.md)
+[Module architecture map](docs/module-map.md)
