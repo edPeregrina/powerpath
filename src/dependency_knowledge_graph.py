@@ -553,5 +553,33 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "topology": "voronoi",
             "availability_policy": "exclusive",
         },
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "clinic",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        },
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "doctors",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        },
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "apotheek",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        },
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "health",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        },
     ]
     return DependencyKnowledgeGraph.from_config(rules)

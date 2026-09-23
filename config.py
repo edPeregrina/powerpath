@@ -119,7 +119,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 # Health
                 'hospital': 'health',
                 'clinic': 'health',
-                'huisartsenpraktijk': 'health',
+                'doctors': 'health',
                 'apotheek': 'health',
                 # Emergency response
                 'fire_station': 'emergency_response',
