@@ -82,10 +82,11 @@ def load_healthcare_assets(healthcare_dir, asset_types):
     Args:
         healthcare_dir (Path): Directory containing ``healthcare_amenities.gpkg``.
         asset_types (list): Asset ``type`` values to keep, e.g.
-            ``['hospital', 'clinic', 'doctors']``. Each facility keeps its
-            distinct type rather than being collapsed into a single generic
-            category; use ``config['service_node_config']['taxonomy']`` to
-            group them into a function label (e.g. ``'health'``) downstream.
+            ``['ems', 'hospital', 'primary_care', 'pharmacy']``. The GeoPackage
+            already stores the healthcare *function category* directly in
+            ``type`` (classification happens at extraction time in
+            ``book/preprocessing/extract_amenities_from_extent.ipynb``); pass
+            ``None``/empty to keep all categories.
 
     Returns:
         gpd.GeoDataFrame: Healthcare assets with ``geometry`` and ``type`` columns.

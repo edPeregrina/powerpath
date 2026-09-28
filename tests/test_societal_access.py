@@ -61,11 +61,13 @@ def _make_population_gdf():
     )
 
 
-def test_default_config_uses_health_function_category():
+def test_default_config_uses_healthcare_function_categories():
     config = get_config()
     taxonomy = config["service_node_config"]["taxonomy"]
-    assert taxonomy["hospital"] == "health"
-    assert taxonomy["clinic"] == "health"
+    assert taxonomy["ems"] == "ems"
+    assert taxonomy["hospital"] == "hospital"
+    assert taxonomy["primary_care"] == "primary_care"
+    assert taxonomy["pharmacy"] == "pharmacy"
 
 
 def test_build_origin_island_allocations_covers_intersection_nearest_and_unassigned():

@@ -102,36 +102,21 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'performance_monitoring': False  # Enable detailed performance monitoring
         },
 
-        # Service-node configuration for societal access analysis.
-        #
-        # 'taxonomy'         : mapping of node-type string → function-category label.
-        #                      Add entries for new service types without touching the
-        #                      graph or metrics code.
-        # 'population_groups': mapping of display label → CBS population column name.
-        #                      Extend with any column present in the population grid.
-        #                      Reference: CBS, "Statistische gegevens per vierkant en
-        #                      postcode 2022, 2023, 2024 – Beschrijving cijfers"
-        #                      https://www.cbs.nl/nl-nl/longread/diversen/2025/statistische-gegevens-per-vierkant-en-postcode-2022-2023-2024/4-beschrijving-cijfers
-        # 'reference_group'  : the population group used as the baseline when computing
-        #                      equity gaps (must be a key in 'population_groups').
-        # 'service_area_function_provider_types' (optional):
-        #                      override for function categories that should use
-        #                      service-area/Voronoi assignment instead of island
-        #                      connectivity, e.g.
-        #                      {'electricity': frozenset({'msls'}),
-        #                       'health': frozenset({'hospital', 'clinic'})}
-        #                      Provider type strings are exact tokens and must
-        #                      match asset "type" values exactly.
-        #                      If omitted or None, defaults from
-        #                      src.societal_access.SERVICE_AREA_FUNCTION_PROVIDER_TYPES
-        #                      are used.
         'service_node_config': {
             'taxonomy': {
-                # Health
-                'hospital': 'health',
-                'clinic': 'health',
-                'doctors': 'health',
-                'apotheek': 'health',
+                # Healthcare, grouped by primary societal function (see
+                # book/preprocessing/extract_amenities_from_extent.ipynb for the
+                # OSM tag -> category classification applied at extraction time,
+                # which already produces these four category values directly):
+                #   EMS                       -> emergency response (ambulance_station)
+                #   Hospitals                 -> acute/specialist care (hospital)
+                #   Primary & Community Care  -> routine healthcare access
+                #                                (clinic, doctors, health_centre)
+                #   Pharmacies                -> medication access (pharmacy, drugstore)
+                'ems': 'ems',
+                'hospital': 'hospital',
+                'primary_care': 'primary_care',
+                'pharmacy': 'pharmacy',
                 # Emergency response
                 'fire_station': 'emergency_response',
                 'brandweerkazerne': 'emergency_response',
@@ -155,57 +140,6 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'reference_group': 'total',
         },
 
-        # Dependency parameters -- type-level knowledge-graph rules (see
-        # src.dependency_knowledge_graph) plus the runtime knobs that consume
-        # them in the simulation loop.
-        #
-        # 'hazard_type' : the active hazard (e.g. "flooding") used to look up
-        #                 hazard-availability rules from 'knowledge_graph'.
-        #
-        # 'knowledge_graph' : a list of type-level rule dicts (asset *types*
-        #                 only -- never asset IDs/indices), each either:
-        #                   {"relation": "hazard", "hazard_type": ..., "source_type": ...,
-        #                    "hazard_blocks_operation": bool, "return_to_operational": {...}}
-        #                 or:
-        #                   {"relation": "dependency", "source_type": ..., "target_type": ...,
-        #                    "topology": "direct" | "voronoi" | "radius",
-        #                    "availability_policy": "exclusive" | "any" | "at_least_n",
-        #                    "radius_m": float (radius topology only),
-        #                    "minimum_available": int (at_least_n only)}
-        #                 Defaults to
-        #                 ``src.dependency_knowledge_graph.build_default_knowledge_graph()``
-        #                 -- the msls/ms/ls/hospital return-to-operational rules
-        #                 plus a msls -> hospital direct dependency rule -- unless
-        #                 explicitly overridden. Pass an explicit list (including
-        #                 ``[]`` to opt out entirely) to take control of the rules
-        #                 yourself; see ``book/Use_Case_sample_knowledge_graph.ipynb``
-        #                 for a worked example. NOTE: the built-in default rule uses
-        #                 topology="direct" for msls -> hospital, which requires at
-        #                 most one msls asset; datasets with multiple substations
-        #                 must override this rule with topology="voronoi" or
-        #                 "radius" (or supply precomputed 'dependency_edges').
-        #
-        # 'dependency_edges' : optional caller-precomputed list of runtime
-        #                 :class:`~src.dependency_topology.DependencyEdge`
-        #                 instances. When left as ``None`` (the default), the
-        #                 simulation expands 'knowledge_graph' against
-        #                 gdf_assets once via
-        #                 :func:`src.dependency_topology.expand_dependency_edges`.
-        #                 When provided, this precomputed value is preserved
-        #                 and never overwritten by the simulation.
-        #
-        # 'dependency_restart_delay_steps' : number of simulation steps a
-        #                 restored dependency must remain continuously
-        #                 available before the assets it gates resume
-        #                 operating (see restart_wait::<edge_key> in
-        #                 src.dependency_evaluator). Kept separate from
-        #                 hazard-recovery waits.
-        #
-        # Road availability remains governed exclusively by the existing
-        # road-graph exposure filtering and is not part of this dependency model.
-        # Substation/hospital structural damage remains governed by fragility
-        # and repair completion in the simulation loop; dependency blocking
-        # never mutates damage, repair time, or fragility state.
         'dependency_parameters': {
             'hazard_type': 'flooding',  # active hazard type for graph look-up
             'knowledge_graph': build_default_knowledge_graph().to_config(),

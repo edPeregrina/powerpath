@@ -58,11 +58,10 @@ from src.timing_profiler import NULL_PROFILER
 
 #: Default mapping: node *type* string → *function category* label.
 SERVICE_NODE_TAXONOMY: Dict[str, str] = {
-    # Healthcare infrastructure
-    "hospital": "health",
-    "clinic": "health",
-    "huisartsenpraktijk": "health",
-    "apotheek": "health",
+    "ems": "ems",
+    "hospital": "hospital",
+    "primary_care": "primary_care",
+    "pharmacy": "pharmacy",
     # Emergency response
     "fire_station": "emergency_response",
     # Education infrastructure

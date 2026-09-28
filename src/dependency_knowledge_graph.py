@@ -498,16 +498,11 @@ class DependencyKnowledgeGraph:
 def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
     """Return the baseline knowledge graph for flooding and the known asset types.
 
-    Structural damage remains governed by fragility, while type-level hazard
-    rules define when damaged assets may return to operation. The msls ->
-    hospital dependency rule uses ``topology="voronoi"`` with
-    ``availability_policy="exclusive"`` -- each hospital is assigned exactly
-    one governing substation (its nearest msls Voronoi cell) at runtime
-    expansion time, with no fallback provider. ``topology="direct"`` remains
-    supported for callers with a single, unambiguous provider, but is not
-    used as the default here because real datasets typically contain
-    multiple msls substations and direct topology requires at most one
-    source asset per rule.
+    Type-level hazard rules define when damaged assets may return to operation. 
+    The msls -> hospital (and other healthcare providers) dependency rule uses
+    ``topology="voronoi"`` with ``availability_policy="exclusive"`` -- each hospital 
+    is assigned exactly one governing substation (its nearest msls Voronoi cell) at 
+    runtime expansion time, with no fallback provider.
     Roads are intentionally excluded because the existing road-graph exposure
     filtering governs their availability independently.
 
@@ -522,29 +517,51 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "hazard_blocks_operation": False,
             "return_to_operational": {"trigger": TRIGGER_REPAIR_COMPLETE},
         },
-        {
-            "relation": "hazard",
-            "hazard_type": "flooding",
-            "source_type": "ms",
-            "hazard_blocks_operation": False,
-            "return_to_operational": {"trigger": TRIGGER_REPAIR_COMPLETE},
-        },
-        {
-            "relation": "hazard",
-            "hazard_type": "flooding",
-            "source_type": "ls",
-            "hazard_blocks_operation": False,
-            "return_to_operational": {
-                "trigger": TRIGGER_REPAIR_BELOW,
-                "threshold": 2.0,
-            },
-        },
+        # Other examples can use different assets or triggers, e.g.:
+        # {
+        #     "relation": "hazard",
+        #     "hazard_type": "flooding",
+        #     "source_type": "ms",
+        #     "hazard_blocks_operation": False,
+        #     "return_to_operational": {"trigger": TRIGGER_REPAIR_COMPLETE},
+        # },
+        # {
+        #     "relation": "hazard",
+        #     "hazard_type": "flooding",
+        #     "source_type": "ls",
+        #     "hazard_blocks_operation": False,
+        #     "return_to_operational": {
+        #         "trigger": TRIGGER_REPAIR_BELOW,
+        #         "threshold": 2.0,
+        #     },
+        # },
         {
             "relation": "hazard",
             "hazard_type": "flooding",
             "source_type": "hospital",
-            "hazard_blocks_operation": False,
-            "return_to_operational": {"trigger": TRIGGER_REPAIR_COMPLETE},
+            "hazard_blocks_operation": True,
+            "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
+        },
+        {
+            "relation": "hazard",
+            "hazard_type": "flooding",
+            "source_type": "ems",
+            "hazard_blocks_operation": True,
+            "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
+        },
+        {
+            "relation": "hazard",
+            "hazard_type": "flooding",
+            "source_type": "primary_care",
+            "hazard_blocks_operation": True,
+            "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
+        },
+        {
+            "relation": "hazard",
+            "hazard_type": "flooding",
+            "source_type": "pharmacy",
+            "hazard_blocks_operation": True,
+            "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
         },
         {
             "relation": "dependency",
@@ -553,31 +570,18 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "topology": "voronoi",
             "availability_policy": "exclusive",
         },
+        # EMS is considered not to have a dependency on msls by default
         {
             "relation": "dependency",
             "source_type": "msls",
-            "target_type": "clinic",
+            "target_type": "primary_care",
             "topology": "voronoi",
             "availability_policy": "exclusive",
         },
         {
             "relation": "dependency",
             "source_type": "msls",
-            "target_type": "doctors",
-            "topology": "voronoi",
-            "availability_policy": "exclusive",
-        },
-        {
-            "relation": "dependency",
-            "source_type": "msls",
-            "target_type": "apotheek",
-            "topology": "voronoi",
-            "availability_policy": "exclusive",
-        },
-        {
-            "relation": "dependency",
-            "source_type": "msls",
-            "target_type": "health",
+            "target_type": "pharmacy",
             "topology": "voronoi",
             "availability_policy": "exclusive",
         },
