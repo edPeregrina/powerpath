@@ -57,17 +57,37 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
 
 def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
                         l1_area_geojson=None, l2_asset_geojson=None,
+                        event_footprint=None, outside_footprint_policy="permissive",
                         verbose=False) -> nx.Graph:
     """
     Filter graph edges based on hazard values, excluding protected infrastructure.
     Applies active L1/L2 depth reductions by adjusting each edge threshold.
-    
+
+    Connectivity-boundary policy (``outside_footprint_policy``):
+        - ``"permissive"`` (default): roads outside ``event_footprint`` are left
+          untouched by the footprint check (only the usual hazard-threshold
+          filtering applies). This preserves existing behaviour and is the
+          default when no footprint is supplied.
+        - ``"strict"``: roads that do not intersect ``event_footprint`` at all
+          are removed *before* hazard-threshold filtering, so they cannot act
+          as an exterior bypass that reconnects components separated by the
+          hazard inside the footprint. Requires a usable ``event_footprint``;
+          calling with ``"strict"`` and no footprint raises ``ValueError``
+          rather than silently falling back to permissive behaviour.
+
     Args:
         G: NetworkX graph with hazard values on edges
         threshold: Base hazard value threshold for edge removal
         hazard_column: Name of edge attribute containing hazard values
         l1_area_geojson: Optional path/GeoDataFrame for L1 depth reductions
         l2_asset_geojson: Optional path/GeoDataFrame for L2 depth reductions
+        event_footprint: Optional footprint geometry defining the domain within
+            which connectivity is evaluated. Accepts a path/``GeoDataFrame``
+            (assumed/reprojected to EPSG:4326, matching the graph CRS) or a
+            shapely geometry already in the graph CRS. ``None`` means no
+            footprint restriction.
+        outside_footprint_policy: ``"strict"`` or ``"permissive"`` (default).
+            Any other value raises ``ValueError``.
         verbose: Print progress messages
     
     Returns:
@@ -78,6 +98,18 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     import geopandas as gpd
     import pandas as pd
     import shapely
+
+    if outside_footprint_policy not in ("strict", "permissive"):
+        raise ValueError(
+            f"Invalid outside_footprint_policy: {outside_footprint_policy!r}. "
+            "Must be 'strict' or 'permissive'."
+        )
+    if outside_footprint_policy == "strict" and event_footprint is None:
+        raise ValueError(
+            "outside_footprint_policy='strict' requires an 'event_footprint' "
+            "(none was provided). Provide a footprint geometry/GeoDataFrame/path, "
+            "or use outside_footprint_policy='permissive'."
+        )
 
     def is_motorway(highway):
         if isinstance(highway, str):
@@ -164,11 +196,54 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
 
     add_adaptation_depth_reductions(l1_area_geojson, "L1", 0.3)
     add_adaptation_depth_reductions(l2_asset_geojson, "L2", 0.15)
-    
+
+    # Resolve the footprint into a single shapely geometry (graph CRS, EPSG:4326)
+    footprint_geom = None
+    if event_footprint is not None:
+        if isinstance(event_footprint, (str, Path)):
+            footprint_gdf = gpd.read_file(event_footprint)
+        elif isinstance(event_footprint, gpd.GeoDataFrame):
+            footprint_gdf = event_footprint
+        elif isinstance(event_footprint, gpd.GeoSeries):
+            footprint_gdf = gpd.GeoDataFrame(geometry=event_footprint)
+        else:
+            # Assume a shapely geometry already in the graph CRS
+            footprint_gdf = None
+            footprint_geom = event_footprint
+
+        if footprint_gdf is not None:
+            if footprint_gdf.crs is not None and str(footprint_gdf.crs) != "EPSG:4326":
+                footprint_gdf = footprint_gdf.to_crs("EPSG:4326")
+            footprint_geom = (
+                footprint_gdf.union_all()
+                if hasattr(footprint_gdf, "union_all")
+                else footprint_gdf.unary_union
+            )
+
     # Filter edges based on adjusted thresholds
     edges_to_remove = []
-    
+    footprint_edges_removed = 0
+
     for u, v, edge_key, d in iter_edges_with_keys():
+        edge = (u, v, edge_key) if G.is_multigraph() else (u, v)
+
+        # Strict connectivity-boundary policy: an edge that does not intersect
+        # the event footprint at all cannot be used as an exterior bypass to
+        # reconnect components separated by the hazard inside the footprint,
+        # so it is removed regardless of its hazard value.
+        if outside_footprint_policy == "strict" and footprint_geom is not None:
+            edge_geom = d.get("geometry")
+            if edge_geom is None:
+                from shapely.geometry import LineString
+                edge_geom = LineString([
+                    (G.nodes[u]["x"], G.nodes[u]["y"]),
+                    (G.nodes[v]["x"], G.nodes[v]["y"]),
+                ])
+            if not edge_geom.intersects(footprint_geom):
+                edges_to_remove.append(edge)
+                footprint_edges_removed += 1
+                continue
+
         hazard_value = d.get(hazard_column, 0)
         
         # Get edge-specific depth reduction
@@ -181,7 +256,6 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
         if (hazard_value > adjusted_threshold and 
             not is_motorway(d.get("highway")) and 
             not is_protected(d)):
-            edge = (u, v, edge_key) if G.is_multigraph() else (u, v)
             edges_to_remove.append(edge)
     
     G.remove_edges_from(edges_to_remove)
@@ -189,6 +263,8 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     
     if verbose:
         print(f"Removed {len(edges_to_remove)} edges (adjusted thresholds)")
+        if outside_footprint_policy == "strict" and footprint_geom is not None:
+            print(f"  of which {footprint_edges_removed} removed as outside the event footprint (strict policy)")
     
     return G
 

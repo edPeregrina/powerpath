@@ -67,7 +67,17 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
             'verbose': True,
-            'accessibility_model': None  # Default to None, can be set to grid_hex.accessibility_model
+            'accessibility_model': None,  # Default to None, can be set to grid_hex.accessibility_model
+            # Event connectivity-boundary policy (see src.utils.filter_hazard_graph):
+            #   event_footprint_path=None restricts nothing (no footprint).
+            #   outside_footprint_policy='permissive' (default) preserves existing
+            #     behaviour: roads outside the footprint may still provide bypass
+            #     connectivity.
+            #   outside_footprint_policy='strict' requires a usable
+            #     event_footprint_path and prevents roads outside the footprint
+            #     from reconnecting components separated by the hazard.
+            'event_footprint_path': None,
+            'outside_footprint_policy': 'permissive',
         },
         
         # Recovery model parameters

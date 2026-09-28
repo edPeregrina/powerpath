@@ -218,10 +218,17 @@ def compute_island_geodataframe_from_graph(
     verbose: bool = False,
     l1_area_geojson=None,
     l2_asset_geojson=None,
+    event_footprint=None,
+    outside_footprint_policy="permissive",
 ) -> gpd.GeoDataFrame:
     """
     Create GeoDataFrame from graph with buffered road geometries.
     Applies active L1/L2 road adaptations before filtering if provided.
+
+    ``event_footprint``/``outside_footprint_policy`` are forwarded to
+    :func:`src.utils.filter_hazard_graph`: with ``outside_footprint_policy=
+    "strict"``, roads outside ``event_footprint`` cannot provide bypass
+    connectivity around the hazard; with ``"permissive"`` (default) they can.
     """
     with open(graph_pickle_path, "rb") as f:
         G = pickle.load(f)
@@ -232,6 +239,8 @@ def compute_island_geodataframe_from_graph(
         G, hazard_threshold, hazard_column, 
         l1_area_geojson=l1_area_geojson,
         l2_asset_geojson=l2_asset_geojson,
+        event_footprint=event_footprint,
+        outside_footprint_policy=outside_footprint_policy,
         verbose=verbose
     )
 
