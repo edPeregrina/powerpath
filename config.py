@@ -50,6 +50,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'root_dir': root_dir,
         'data_dir': root_dir / 'raw_data/ZH_Delfland',
         'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
+        'healthcare_dir': root_dir / 'data' / 'static',
 
         # Simulation configuration
         'simulation_config': {

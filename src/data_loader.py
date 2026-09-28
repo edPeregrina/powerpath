@@ -73,6 +73,30 @@ def load_electricity_assets(electricity_dir, asset_types):
     
     raise FileNotFoundError(f"No electricity station files found in {electricity_dir}")
 
+
+def load_healthcare_assets(healthcare_dir, asset_types):
+    """Load real healthcare assets (geometry + type) from the pre-extracted
+    OSM-derived GeoPackage produced by
+    ``book/preprocessing/extract_amenities_from_extent.ipynb``.
+
+    Args:
+        healthcare_dir (Path): Directory containing ``healthcare_amenities.gpkg``.
+        asset_types (list): Asset ``type`` values to keep, e.g.
+            ``['hospital', 'clinic', 'doctors']``. Each facility keeps its
+            distinct type rather than being collapsed into a single generic
+            category; use ``config['service_node_config']['taxonomy']`` to
+            group them into a function label (e.g. ``'health'``) downstream.
+
+    Returns:
+        gpd.GeoDataFrame: Healthcare assets with ``geometry`` and ``type`` columns.
+    """
+    data_path = healthcare_dir / "healthcare_amenities.gpkg"
+    hc_gdf = gpd.read_file(data_path)
+    if asset_types:
+        hc_gdf = hc_gdf[hc_gdf['type'].isin(asset_types)]
+    return hc_gdf[['geometry', 'type']].reset_index(drop=True)
+
+
 def load_hazard_maps(hazard_dir, max_days=None):
     """Find and load hazard map files from directory
     Args:
