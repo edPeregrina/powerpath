@@ -30,3 +30,4 @@ __pycache__/
 *.pyc
 *.pyo
 tests/__pycache__/*
+/data/test_samples/static/output_graph/_backup
