@@ -31,3 +31,5 @@ __pycache__/
 *.pyo
 tests/__pycache__/*
 /data/test_samples/static/output_graph/_backup
+
+CLAUDE.md
