@@ -5,6 +5,7 @@ Functions to run the damage and recovery simulation.
 import sys
 import pickle
 import threading
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -708,6 +709,112 @@ def _normalize_number_repair_crews_config(number_repair_crews):
         else:
             typed[asset_type] = count
     return {"default": default, "typed": typed}
+
+
+# ==============================================================================
+# Per-asset-type repair-crew EMA uncertainties
+# ==============================================================================
+# `number_repair_crews` (normalized above) may be a dict keyed by asset type,
+# e.g. {'msls': 12, 'hospital': 2}. ema_workbench uncertainties must be
+# scalar-valued, so it cannot sample such a dict directly. The helpers below
+# expose one scalar uncertainty per asset type (named
+# "<prefix>__<asset_type>") and recombine them into a single
+# {asset_type: count} dict at run time, so EMA experiments can explore
+# independent repair-crew ranges per asset type.
+
+REPAIR_CREWS_PARAM_PREFIX = 'number_repair_crews'
+
+
+def repair_crew_uncertainty(asset_type, min_crews, max_crews):
+    """Build a single EMA uncertainty for one asset type's repair-crew count.
+
+    Args:
+        asset_type (str): Asset type key, e.g. 'msls', 'hospital'.
+        min_crews (int): Lower bound (inclusive) for the crew count.
+        max_crews (int): Upper bound (inclusive) for the crew count.
+
+    Returns:
+        ema_workbench.IntegerParameter: named
+        f"{REPAIR_CREWS_PARAM_PREFIX}__{asset_type}".
+    """
+    from ema_workbench import IntegerParameter
+    return IntegerParameter(f'{REPAIR_CREWS_PARAM_PREFIX}__{asset_type}', min_crews, max_crews)
+
+
+def build_per_type_crew_uncertainties(asset_type_ranges):
+    """Build one repair-crew uncertainty per asset type.
+
+    Args:
+        asset_type_ranges (dict): ``{asset_type: (min_crews, max_crews)}``.
+
+    Returns:
+        list[ema_workbench.IntegerParameter]: One uncertainty per asset type,
+        in the order given by *asset_type_ranges*.
+    """
+    return [
+        repair_crew_uncertainty(asset_type, min_crews, max_crews)
+        for asset_type, (min_crews, max_crews) in asset_type_ranges.items()
+    ]
+
+
+def combine_per_type_crew_kwargs(kwargs):
+    """Pop all per-asset-type repair-crew uncertainty kwargs out of *kwargs*
+    (in place) and, if any were found, set ``kwargs['number_repair_crews']``
+    to the combined ``{asset_type: count}`` dict.
+
+    If *kwargs* already has an explicit ``number_repair_crews`` value (e.g. an
+    older notebook still passing a plain int like ``number_repair_crews=5``,
+    or a ``Model.constants`` entry left over from before this helper existed)
+    *and* per-type uncertainty kwargs are also present, the explicit value is
+    silently overwritten by the per-type dict. A :class:`UserWarning` is
+    raised in that case so old-style callers notice the override instead of
+    quietly getting different crew counts than they intended.
+
+    Args:
+        kwargs (dict): Keyword arguments as received by an EMA model function,
+            potentially containing scalar kwargs named
+            f"{REPAIR_CREWS_PARAM_PREFIX}__{asset_type}" (one per asset type
+            uncertainty created by :func:`repair_crew_uncertainty`).
+
+    Returns:
+        dict: The same *kwargs* object, mutated in place, for convenience.
+    """
+    prefix = f'{REPAIR_CREWS_PARAM_PREFIX}__'
+    crew_counts = {
+        key[len(prefix):]: kwargs.pop(key)
+        for key in list(kwargs.keys())
+        if key.startswith(prefix)
+    }
+    if crew_counts:
+        if REPAIR_CREWS_PARAM_PREFIX in kwargs:
+            warnings.warn(
+                f"'{REPAIR_CREWS_PARAM_PREFIX}' was explicitly set to "
+                f"{kwargs[REPAIR_CREWS_PARAM_PREFIX]!r} (e.g. an old-style plain "
+                f"int/dict), but per-asset-type uncertainty kwargs "
+                f"({sorted(crew_counts)}) were also supplied. The per-type values "
+                f"{crew_counts!r} take precedence and overwrite the explicit value. "
+                f"Use build_per_type_crew_uncertainties()/simulate_with_per_type_crews() "
+                f"consistently, or drop the explicit '{REPAIR_CREWS_PARAM_PREFIX}' kwarg.",
+                UserWarning,
+                stacklevel=2,
+            )
+        kwargs['number_repair_crews'] = crew_counts
+    return kwargs
+
+
+def simulate_with_per_type_crews(**kwargs):
+    """EMA model entry point wrapping
+    :func:`src.adaptation.simulate_asset_damage_recovery_access_breakdown_ema`
+    with support for independent, per-asset-type repair-crew uncertainties.
+
+    Use together with :func:`build_per_type_crew_uncertainties` as
+    ``model.uncertainties`` so ema_workbench can sample a repair-crew count
+    per asset type (e.g. a wider range for 'msls' substations than for
+    'hospital' facilities), instead of a single global scalar.
+    """
+    from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
+    combine_per_type_crew_kwargs(kwargs)
+    return simulate_asset_damage_recovery_access_breakdown_ema(**kwargs)
 
 
 def _build_crew_pools(typed):
