@@ -250,7 +250,7 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
     study_area = gpd.read_file(study_area_path, driver="GeoJSON").to_crs("EPSG:28992")
     population_buffer = study_area.buffer(1000).set_crs("EPSG:28992")
 
-    population_data_path = root_dir / "data" / "population" / "cbs_vk100_2024_v1.gpkg"
+    population_data_path = root_dir / "data" / "population" / "cbs_vk100_2024.gpkg"
     LOGGER.info("Loading population data from %s", population_data_path)
     population_data = gpd.read_file(
         population_data_path, driver="GPKG", bbox=tuple(substation_voronoi.total_bounds),

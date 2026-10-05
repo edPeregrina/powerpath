@@ -7,18 +7,32 @@ dependencies:
   - geopandas
   - jupyter
   - rasterio
+  - rasterstats
   - xarray
   - pytest
   - black
   - ruff
   - openpyxl
   - numpy
+  - matplotlib
+  - rtree
+  # Forces OpenBLAS instead of MKL: conda-forge's default MKL build of
+  # libblas/liblapack conflicts with GDAL's threading/runtime on Windows
+  # and crashes natively (no Python traceback) inside numpy.linalg calls
+  # made by rasterio during real (non-dry-run) raster reads. See CLAUDE.md.
+  - libblas=*=*openblas
+  - libcblas=*=*openblas
+  - liblapack=*=*openblas
   - pip
   - pip:
-    - config
     - pyarrow
     - snkit
     - networkx
     - tqdm
+    - contextily
+    # Pinned <3.0: ema_workbench 3.0 merged Policy/Scenario into a single
+    # Sample class, which breaks all existing Policy(...) usage in this repo
+    # (book/*.py, book/*.ipynb). See CLAUDE.md for notes on migrating.
+    - ema_workbench==2.5.3
 
 
