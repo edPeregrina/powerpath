@@ -157,11 +157,45 @@ def test_get_hazard_rules_or_default_returns_default_for_unlisted_type():
 
 
 def test_get_dependency_rules_filters_by_source_and_target():
-    kg = build_default_knowledge_graph()
+    """Exercises get_dependency_rules' filtering mechanism against a
+    synthetic graph (not build_default_knowledge_graph()), so this test
+    stays valid regardless of how many dependency rules the default
+    config declares (e.g. as asset types are added/removed)."""
+    kg = DependencyKnowledgeGraph.from_config(
+        [
+            {
+                "relation": "dependency",
+                "source_type": "msls",
+                "target_type": "hospital",
+                "topology": "voronoi",
+                "availability_policy": "exclusive",
+            },
+            {
+                "relation": "dependency",
+                "source_type": "msls",
+                "target_type": "pharmacy",
+                "topology": "voronoi",
+                "availability_policy": "exclusive",
+            },
+            {
+                "relation": "dependency",
+                "source_type": "generator",
+                "target_type": "hospital",
+                "topology": "direct",
+                "availability_policy": "any",
+            },
+        ]
+    )
     all_deps = kg.get_dependency_rules()
-    assert len(all_deps) == 1
-    assert kg.get_dependency_rules(source_type="msls")[0].target_type == "hospital"
-    assert kg.get_dependency_rules(target_type="hospital")[0].source_type == "msls"
+    assert len(all_deps) == 3
+
+    msls_deps = kg.get_dependency_rules(source_type="msls")
+    assert {rule.target_type for rule in msls_deps} == {"hospital", "pharmacy"}
+
+    hospital_deps = kg.get_dependency_rules(target_type="hospital")
+    assert {rule.source_type for rule in hospital_deps} == {"msls", "generator"}
+
+    assert kg.get_dependency_rules(source_type="msls", target_type="hospital") == [all_deps[0]]
     assert kg.get_dependency_rules(source_type="nonexistent") == []
 
 
