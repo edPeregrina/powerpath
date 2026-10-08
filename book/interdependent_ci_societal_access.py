@@ -66,7 +66,6 @@ from ema_workbench import (
     Constant,
     Model,
     Policy,
-    RealParameter,
     Samplers,
     SequentialEvaluator,
     TimeSeriesOutcome,
@@ -84,7 +83,12 @@ from src.impacts import (
     prepare_population_impact_data,
     update_voll_rates,
 )
-from src.simulation import build_per_type_crew_uncertainties, simulate_with_per_type_crews
+from src.simulation import (
+    build_per_type_crew_uncertainties,
+    fragility_steepness_from_param,
+    fragility_steepness_uncertainty,
+    simulate_with_per_type_crews,
+)
 from src.societal_access import list_societal_metric_names
 from src.utils import build_voronoi_service_area_map, compile_asset_gdfs
 
@@ -149,9 +153,11 @@ def parse_args():
         ),
     )
     parser.add_argument("--fragility-k-min", type=float, default=5.0,
-                         help="Lower bound for the 'fragility_param_k' uncertainty. Default: 5.0.")
+                         help="Lower bound for msls fragility steepness (k), sampled in 0.5 "
+                              "increments. Default: 5.0.")
     parser.add_argument("--fragility-k-max", type=float, default=7.5,
-                         help="Upper bound for the 'fragility_param_k' uncertainty. Default: 7.5.")
+                         help="Upper bound for msls fragility steepness (k), sampled in 0.5 "
+                              "increments. Default: 7.5.")
     parser.add_argument("--flood-threshold", type=float, default=0.2,
                          help="Flood depth threshold (m) above which an asset is considered flooded. Default: 0.2.")
     parser.add_argument("--adaptation-active-timesteps", type=int, default=198,
@@ -341,8 +347,18 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
 
     model.uncertainties = [
         *build_per_type_crew_uncertainties(crew_ranges),
-        RealParameter("fragility_param_k", args.fragility_k_min, args.fragility_k_max),
+        # Samples msls fragility steepness (k) at 0.5 increments between
+        # args.fragility_k_min and args.fragility_k_max via an IntegerParameter
+        # over k*2 (see src.simulation.fragility_steepness_uncertainty).
+        fragility_steepness_uncertainty(
+            "msls", round(args.fragility_k_min * 2), round(args.fragility_k_max * 2)
+        ),
     ]
+    LOGGER.info(
+        "msls fragility steepness values: %s",
+        [fragility_steepness_from_param(v) for v in
+         range(round(args.fragility_k_min * 2), round(args.fragility_k_max * 2) + 1)],
+    )
 
     model.constants = [
         Constant("flood_threshold", args.flood_threshold),

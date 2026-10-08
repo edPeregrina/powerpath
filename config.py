@@ -166,11 +166,18 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'recovery_parameters': {
             'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
-            # Optional per-asset fragility overrides:
-            #   {'hospital': {'mode': 'probability_curve',
-            #                 'intensity_values': [0.0, 0.5, 1.0],
-            #                 'failure_probabilities': [0.0, 0.4, 1.0]}}
-            'fragility_models': {},
+            # Per-asset fragility overrides. Only applies to asset types the
+            # knowledge graph marks fragility-eligible (hazard_blocks_operation=
+            # False, currently just 'msls'); others are excluded regardless.
+            # No 'steepness'/'steepness_range': steepness comes from the
+            # 'fragility_param_k' EMA uncertainty, which always overrides it.
+            'fragility_models': {
+                'msls': {
+                    'mode': 'depth_logistic',
+                    'median_failure_depth': 0.6,
+                    'activation_threshold': 0.0,
+                },
+            },
             # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
@@ -429,6 +436,7 @@ def print_config_summary(config):
     print("\nConfiguration Summary")
     print(f"Root directory: {config['root_dir']}")
     print(f"Assets data: {config['electricity_dir']}")
+    print(f"OSM asset data: {config.get('osm_asset_dir')}")
     print(f"Hazard data: {config['hazard_dir']}")
     print(f"Interim directory: {config['interim_dir']}")
     print(f"Output directory: {config['output_dir']}")
@@ -441,6 +449,16 @@ def print_config_summary(config):
     
     print("Recovery Parameters:")
     for key, value in config['recovery_parameters'].items():
+        print(f"  {key}: {value}")
+    print()
+
+    print("Service Node Configuration:")
+    for key, value in config.get('service_node_config', {}).items():
+        print(f"  {key}: {value}")
+    print()
+
+    print("Dependency Parameters:")
+    for key, value in config.get('dependency_parameters', {}).items():
         print(f"  {key}: {value}")
     print()
     

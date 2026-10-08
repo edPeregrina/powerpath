@@ -56,12 +56,16 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
     return G
 
 def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
-                        l1_area_geojson=None, l2_asset_geojson=None,
+                        l1_area_geojson=None,
                         event_footprint=None, outside_footprint_policy="permissive",
                         verbose=False) -> nx.Graph:
     """
     Filter graph edges based on hazard values, excluding protected infrastructure.
-    Applies active L1/L2 depth reductions by adjusting each edge threshold.
+    Applies active L1 depth reductions by adjusting each edge threshold.
+
+    L2 (asset-level) adaptations are deliberately NOT accepted here: L2 barriers
+    protect specific CI assets, not roads, and must never be intersected against
+    road edges even if their geometries happen to overlap.
 
     Connectivity-boundary policy (``outside_footprint_policy``):
         - ``"permissive"`` (default): roads outside ``event_footprint`` are left
@@ -80,7 +84,6 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
         threshold: Base hazard value threshold for edge removal
         hazard_column: Name of edge attribute containing hazard values
         l1_area_geojson: Optional path/GeoDataFrame for L1 depth reductions
-        l2_asset_geojson: Optional path/GeoDataFrame for L2 depth reductions
         event_footprint: Optional footprint geometry defining the domain within
             which connectivity is evaluated. Accepts a path/``GeoDataFrame``
             (assumed/reprojected to EPSG:4326, matching the graph CRS) or a
@@ -195,7 +198,8 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
             print(f"Applied {label} to {adapted_edge_count} edges")
 
     add_adaptation_depth_reductions(l1_area_geojson, "L1", 0.3)
-    add_adaptation_depth_reductions(l2_asset_geojson, "L2", 0.15)
+    # L2 (asset-level) adaptations are intentionally not applied to road edges:
+    # they protect specific assets, not roads, regardless of spatial overlap.
 
     # Resolve the footprint into a single shapely geometry (graph CRS, EPSG:4326)
     footprint_geom = None

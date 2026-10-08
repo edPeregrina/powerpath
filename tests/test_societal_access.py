@@ -177,7 +177,11 @@ def test_island_cache_key_includes_l2_road_adaptation():
     assert other_geometry_key != l2_key
 
 
-def test_l2_road_adaptation_changes_computed_topology():
+def test_filter_hazard_graph_rejects_l2_kwarg():
+    """L2 (asset-level) adaptations must never be applied to road edges, even
+    when their geometry spatially overlaps a road. ``filter_hazard_graph``
+    does not accept an ``l2_asset_geojson`` kwarg at all, making this
+    structurally impossible rather than merely unused."""
     nx = pytest.importorskip("networkx")
     from src.utils import filter_hazard_graph
 
@@ -196,30 +200,8 @@ def test_l2_road_adaptation_changes_computed_topology():
         crs="EPSG:4326",
     )
 
-    disrupted = filter_hazard_graph(
-        graph.copy(), 0.2, "EV0_ma"
-    )
-    adapted = filter_hazard_graph(
-        graph.copy(), 0.2, "EV0_ma", l2_asset_geojson=l2
-    )
-
-    assert not disrupted.has_edge(1, 2)
-    assert adapted.has_edge(1, 2)
-
-    parallel_graph = nx.MultiGraph()
-    parallel_graph.add_nodes_from(graph.nodes(data=True))
-    for edge_key in ("a", "b"):
-        parallel_graph.add_edge(
-            1,
-            2,
-            key=edge_key,
-            geometry=LineString([(0, 0), (1, 0)]),
-            EV0_ma=0.5,
-        )
-    adapted_parallel = filter_hazard_graph(
-        parallel_graph, 0.2, "EV0_ma", l2_asset_geojson=l2
-    )
-    assert adapted_parallel.number_of_edges() == 0
+    with pytest.raises(TypeError):
+        filter_hazard_graph(graph.copy(), 0.2, "EV0_ma", l2_asset_geojson=l2)
 
 
 def test_adaptation_geodataframe_is_not_mutated():

@@ -149,14 +149,67 @@ class SimulationState:
         self.road_state_key = None
         # self.temp_gdf = gdf_assets[['type', 'geometry']].copy()
 
+def _fragility_exclusions_from_knowledge_graph(_config, asset_types, hazard_type="flooding"):
+    """Build a ``fragility_exclusions`` map (see
+    :func:`src.damage_recovery.default_fragility_function`) from the
+    dependency knowledge graph's hazard rules.
+
+    An asset type is only eligible for probabilistic fragility if the
+    knowledge graph *explicitly* defers its operational status to physical
+    damage/repair, i.e. it has a flooding hazard rule with
+    ``hazard_blocks_operation=False`` (e.g. ``msls``, which recovers only via
+    ``TRIGGER_REPAIR_COMPLETE``). Asset types with no flooding rule, or with
+    an explicit ``hazard_blocks_operation=True`` rule (e.g. hospital/ems/
+    primary_care/pharmacy/supermarket, which already deterministically go
+    non-operational while flooded and recover immediately once the hazard
+    clears via ``src.dependency_evaluator``), are excluded -- otherwise they
+    would also accrue physical damage requiring repair, contradicting their
+    "no repair required" knowledge-graph rule.
+
+    To make a new asset type fragility-eligible: give it a flooding hazard
+    rule with ``hazard_blocks_operation=False`` (typically paired with
+    ``return_to_operational={"trigger": TRIGGER_REPAIR_COMPLETE}``) in
+    ``src/dependency_knowledge_graph.py``, and add a matching entry to
+    ``config.py``'s ``recovery_parameters['fragility_models']`` so it gets an
+    appropriate curve instead of
+    :func:`~src.damage_recovery.default_fragility_function`'s generic
+    fallback (``median_failure_depth=0.0``, i.e. near-instant failure at any
+    hazard > 0, except the special-cased ``"ls"``/``"msls"`` defaults).
+
+    Returns:
+        dict: ``{asset_type: True}`` for every asset type that should be
+        skipped by fragility; types not present are implicitly included.
+    """
+    dependency_config = _config.get('dependency_parameters', {})
+    kg_config = dependency_config.get('knowledge_graph', None) or []
+    if not kg_config:
+        return {}
+
+    from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+    knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+
+    exclusions = {}
+    for asset_name in np.unique(asset_types):
+        rules = knowledge_graph.get_hazard_rules(hazard_type, str(asset_name))
+        if not rules:
+            # No explicit rule for this type: not opted into fragility.
+            exclusions[str(asset_name)] = True
+        elif not any(not rule.hazard_blocks_operation for rule in rules):
+            # Every matching rule sets hazard_blocks_operation=True: the
+            # knowledge graph already governs this type deterministically.
+            exclusions[str(asset_name)] = True
+    return exclusions
+
+
 def _update_hazard_map_states(
     state, gdf_assets, rfids_lengths, timestep, major_timestep, hazard_maps, haz_dir_name, 
     flood_threshold, repair_crew_assignment_method, _config, accessibility_cache, 
     hazard_extraction_cache, overlap_cache, island_cache, boundary_asset_indices, 
     boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
     previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
-    fragility_param_k=None, depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
-    crew_pools=None, l2_asset_geojson=None, l2_active_timesteps=None,
+    fragility_param_k=None, fragility_steepness_overrides=None,
+    depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
+    crew_pools=None,
     societal_access_config=None,
 ):
     """
@@ -183,11 +236,17 @@ def _update_hazard_map_states(
         num_assets (int): Total number of assets in the simulation
         verbose (bool): If True, print detailed simulation information
         fragility_param_k (float or None): Parameter k for the fragility function, if applicable
-        depth_reductions (np.ndarray or None): 2D array of flood depth reductions
+        fragility_steepness_overrides (dict or None): Per-asset-type steepness overrides,
+            e.g. {'msls': 5.5}, taking precedence over fragility_param_k for those types.
+        depth_reductions (np.ndarray or None): 2D array of flood depth reductions (already
+            combines both L1 and L2 effects on asset-level hazard values)
         l1_area_geojson (str or GeoDataFrame or None): Path to L1 adaptation GeoJSON or GeoDataFrame, if applicable
         l1_active_timesteps (list or None): List of timesteps when L1 adaptation is active, or None for all timesteps
-        l2_asset_geojson (str or GeoDataFrame or None): Path to L2 adaptation GeoJSON or GeoDataFrame, if applicable
-        l2_active_timesteps (list or None): List of timesteps when L2 adaptation is active, or None for all timesteps
+
+        Note: L2 (asset-level) adaptations are intentionally not accepted here.
+        L2 only reduces hazard depth for specific assets (via ``depth_reductions``
+        above) and must never affect road/island computation, so it has no
+        parameters in this function.
 
     Returns:
         tuple: Updated available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated (dictionary of updated caches)
@@ -244,17 +303,12 @@ def _update_hazard_map_states(
         active_l1_area_geojson = _get_active_adaptation(
             l1_area_geojson, l1_active_timesteps, timestep
         )
-        active_l2_asset_geojson = _get_active_adaptation(
-            l2_asset_geojson, l2_active_timesteps, timestep
-        )
         cache_key = create_island_cache_key(
             haz_col_str, 
             flood_threshold, 
             asset_hash,
             l1_area_geojson=active_l1_area_geojson,
             l1_active_timesteps=l1_active_timesteps,
-            l2_asset_geojson=active_l2_asset_geojson,
-            l2_active_timesteps=l2_active_timesteps,
         )
         state.road_state_key = cache_key
         try:
@@ -283,8 +337,6 @@ def _update_hazard_map_states(
                 hazard_dir=hazard_dir,
                 l1_area_geojson=active_l1_area_geojson,
                 l1_active_timesteps=l1_active_timesteps,
-                l2_asset_geojson=active_l2_asset_geojson,
-                l2_active_timesteps=l2_active_timesteps,
                 societal_allocation_cache=allocation_cache,
                 pop_grid_gdf=pop_grid_gdf,
                 cell_id_column=cell_id_column,
@@ -364,12 +416,33 @@ def _update_hazard_map_states(
         fragility_operational = np.ones_like(state.intrinsic_operational, dtype=bool)
         hazard_subset = state.current_hazard_values[assets_to_evaluate]
         asset_type_subset = asset_type[assets_to_evaluate]
+        # Only asset types the knowledge graph explicitly defers to physical
+        # damage/repair (hazard_blocks_operation=False) are fragility-eligible;
+        # types it governs deterministically (hazard_blocks_operation=True,
+        # e.g. hospital/ems/primary_care/pharmacy/supermarket) are excluded so
+        # they aren't also forced through a repair cycle. See
+        # `_fragility_exclusions_from_knowledge_graph`.
+        fragility_exclusions = _fragility_exclusions_from_knowledge_graph(_config, asset_type_subset)
+        # Non-destructively layer per-asset-type steepness overrides (e.g. from
+        # EMA uncertainties, see combine_per_type_fragility_steepness_kwargs)
+        # on top of the configured fragility_models, without mutating the
+        # shared config dict (it is reused across every EMA experiment).
+        base_fragility_models = _config['recovery_parameters'].get('fragility_models') or {}
+        fragility_models = base_fragility_models
+        if fragility_steepness_overrides:
+            fragility_models = dict(base_fragility_models)
+            for override_type, steepness in fragility_steepness_overrides.items():
+                fragility_models[override_type] = {
+                    **fragility_models.get(override_type, {}),
+                    'steepness': steepness,
+                }
         fragility_result = default_fragility_function(
             hazard_subset,
             asset_type_subset,
             k=fragility_param_k,
             major_timestep=major_timestep,
-            fragility_models=_config['recovery_parameters'].get('fragility_models'),
+            fragility_models=fragility_models,
+            fragility_exclusions=fragility_exclusions,
         )
         fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
         state.intrinsic_operational = np.minimum(state.intrinsic_operational, fragility_operational)
@@ -810,19 +883,104 @@ def combine_per_type_crew_kwargs(kwargs):
     return kwargs
 
 
+# ==============================================================================
+# Per-asset-type fragility steepness EMA uncertainties
+# ==============================================================================
+# ema_workbench uncertainties must be integer- or real-valued; it has no
+# notion of a stepped/discretized float range. To sample fragility steepness
+# (the fragility curve's 'k') at 0.5 increments (e.g. 5.0, 5.5, ..., 7.5) with
+# an IntegerParameter, we sample k*2 as a plain integer and divide by 2 when
+# building the fragility model. The "_divby2" suffix in the parameter name is
+# a reminder that EMA samples the doubled integer, not the steepness itself.
+
+FRAGILITY_STEEPNESS_PARAM_PREFIX = 'fragility_param_k_divby2'
+
+
+def fragility_steepness_from_param(doubled_value):
+    """Convert an EMA-sampled ``fragility_param_k_divby2`` integer into the
+    actual steepness value used by the fragility curve (e.g. ``11`` -> ``5.5``)."""
+    return doubled_value / 2.0
+
+
+def fragility_steepness_uncertainty(asset_type, min_doubled, max_doubled):
+    """Build a single EMA uncertainty for one asset type's fragility steepness.
+
+    Args:
+        asset_type (str): Asset type key, e.g. 'msls'.
+        min_doubled (int): Lower bound (inclusive) for steepness*2, e.g. 10 for k=5.0.
+        max_doubled (int): Upper bound (inclusive) for steepness*2, e.g. 15 for k=7.5.
+
+    Returns:
+        ema_workbench.IntegerParameter: named
+        f"{FRAGILITY_STEEPNESS_PARAM_PREFIX}__{asset_type}".
+    """
+    from ema_workbench import IntegerParameter
+    return IntegerParameter(f'{FRAGILITY_STEEPNESS_PARAM_PREFIX}__{asset_type}', min_doubled, max_doubled)
+
+
+def build_per_type_fragility_steepness_uncertainties(asset_type_doubled_ranges):
+    """Build one fragility-steepness uncertainty per asset type.
+
+    Args:
+        asset_type_doubled_ranges (dict): ``{asset_type: (min_doubled, max_doubled)}``.
+
+    Returns:
+        list[ema_workbench.IntegerParameter]: One uncertainty per asset type.
+    """
+    return [
+        fragility_steepness_uncertainty(asset_type, min_doubled, max_doubled)
+        for asset_type, (min_doubled, max_doubled) in asset_type_doubled_ranges.items()
+    ]
+
+
+def combine_per_type_fragility_steepness_kwargs(kwargs):
+    """Pop all per-asset-type fragility-steepness uncertainty kwargs out of
+    *kwargs* (in place) and, if any were found, set
+    ``kwargs['fragility_steepness_overrides']`` to the combined
+    ``{asset_type: steepness}`` dict (steepness already converted from the
+    doubled integer sampled by EMA).
+
+    Args:
+        kwargs (dict): Keyword arguments as received by an EMA model function,
+            potentially containing scalar kwargs named
+            f"{FRAGILITY_STEEPNESS_PARAM_PREFIX}__{asset_type}" (one per
+            uncertainty created by :func:`fragility_steepness_uncertainty`).
+
+    Returns:
+        dict: The same *kwargs* object, mutated in place, for convenience.
+    """
+    prefix = f'{FRAGILITY_STEEPNESS_PARAM_PREFIX}__'
+    steepness_overrides = {
+        key[len(prefix):]: fragility_steepness_from_param(kwargs.pop(key))
+        for key in list(kwargs.keys())
+        if key.startswith(prefix)
+    }
+    if steepness_overrides:
+        kwargs['fragility_steepness_overrides'] = {
+            **kwargs.get('fragility_steepness_overrides', {}),
+            **steepness_overrides,
+        }
+    return kwargs
+
+
 def simulate_with_per_type_crews(**kwargs):
     """EMA model entry point wrapping
     :func:`src.adaptation.simulate_asset_damage_recovery_access_breakdown_ema`
-    with support for independent, per-asset-type repair-crew uncertainties.
+    with support for independent, per-asset-type repair-crew and
+    fragility-steepness uncertainties.
 
-    Use together with :func:`build_per_type_crew_uncertainties` as
+    Use together with :func:`build_per_type_crew_uncertainties` /
+    :func:`build_per_type_fragility_steepness_uncertainties` as
     ``model.uncertainties`` so ema_workbench can sample a repair-crew count
-    per asset type (e.g. a wider range for 'msls' substations than for
-    'hospital' facilities), instead of a single global scalar.
+    and/or fragility steepness per asset type (e.g. a wider range for 'msls'
+    substations than for 'hospital' facilities), instead of a single global
+    scalar.
     """
     from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
     combine_per_type_crew_kwargs(kwargs)
+    combine_per_type_fragility_steepness_kwargs(kwargs)
     return simulate_asset_damage_recovery_access_breakdown_ema(**kwargs)
+
 
 
 def _build_crew_pools(typed):
@@ -884,7 +1042,7 @@ _DEPTH_REDUCTION_CACHE = {}
 def _initialize_simulation(
     gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,
     accessibility_cache=None, hazard_extraction_cache=None, overlap_cache=None, island_cache=None, 
-    fragility_param_k=None, major_timestep=24,
+    fragility_param_k=None, fragility_steepness_overrides=None, major_timestep=24,
     l1_area_geojson=None, l1_active_timesteps=None, 
     l2_asset_geojson=None, l2_active_timesteps=None, 
     verbose=False  
@@ -1073,6 +1231,7 @@ def _initialize_simulation(
         'overlap_cache': overlap_cache,
         'island_cache': island_cache,
         'fragility_param_k': fragility_param_k,
+        'fragility_steepness_overrides': fragility_steepness_overrides,
         'depth_reductions': depth_reductions,
         'l1_area_geojson': l1_area_geojson
     }
@@ -1084,8 +1243,8 @@ def _process_timestep(
     num_assets, verbose, flood_threshold, repair_crew_assignment_method, fragility_param_k,
     depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
     crew_pools=None,
-    l2_asset_geojson=None, l2_active_timesteps=None,
     societal_access_config=None,
+    fragility_steepness_overrides=None,
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -1097,12 +1256,11 @@ def _process_timestep(
             boundary_islands_rfids, interim_dir, hazard_dir, available_repair_crews, 
             previous_rfids_islands, previous_map_counter, asset_type, num_assets, verbose, 
             fragility_param_k=fragility_param_k, 
+            fragility_steepness_overrides=fragility_steepness_overrides,
             depth_reductions=depth_reductions,  
             l1_area_geojson=l1_area_geojson, 
             l1_active_timesteps=l1_active_timesteps,
             crew_pools=crew_pools,
-            l2_asset_geojson=l2_asset_geojson,
-            l2_active_timesteps=l2_active_timesteps,
             societal_access_config=societal_access_config,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
@@ -1468,6 +1626,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     overlap_cache=None,
     island_cache=None,
     fragility_param_k=None,
+    fragility_steepness_overrides=None,
     asset_population_map=None,
     asset_to_lu=None,
     l1_area_geojson=None,
@@ -1505,6 +1664,9 @@ def simulate_asset_damage_recovery_access_breakdown(
         overlap_cache (dict): Cache for overlap results.
         island_cache (dict): Cache for island analysis results.
         fragility_param_k (float, optional): Fragility parameter for operational status modeling.
+        fragility_steepness_overrides (dict, optional): Per-asset-type fragility steepness
+            overrides, e.g. {'msls': 5.5}, taking precedence over fragility_param_k for
+            those types. See build_per_type_fragility_steepness_uncertainties().
         asset_population_map (dict, optional): Mapping of asset indices to population impact values.
         asset_to_lu (dict, optional): Mapping of asset indices to land-use impact values.
         l1_area_geojson (GeoDataFrame or str, optional): GeoJSON defining L1 adaptation areas.
@@ -1544,7 +1706,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     init = _initialize_simulation(
         gdf_assets, hazard_maps, recovery_parameters, root_dir, config, repair_crew_assignment_method,
         accessibility_cache, hazard_extraction_cache, overlap_cache, island_cache, 
-        fragility_param_k, major_timestep,
+        fragility_param_k, fragility_steepness_overrides, major_timestep,
         l1_area_geojson, l1_active_timesteps, 
         l2_asset_geojson, l2_active_timesteps,
         verbose=verbose  
@@ -1560,6 +1722,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     num_assets = init['num_assets']
     asset_type = init['asset_type']
     fragility_param_k = init['fragility_param_k']
+    fragility_steepness_overrides = init['fragility_steepness_overrides']
     depth_reductions = init['depth_reductions']  
     l1_area_geojson = init['l1_area_geojson']  
 
@@ -1637,10 +1800,6 @@ def simulate_asset_damage_recovery_access_breakdown(
                 l1_area_geojson, l1_active_timesteps, 0
             ),
             l1_active_timesteps=l1_active_timesteps,
-            l2_asset_geojson=_get_active_adaptation(
-                l2_asset_geojson, l2_active_timesteps, 0
-            ),
-            l2_active_timesteps=l2_active_timesteps,
         )
         gdf_assets['access_rfid'] = access_rfids
         # Preserve the existing synthetic island-0 wrapping behavior for
@@ -1704,9 +1863,8 @@ def simulate_asset_damage_recovery_access_breakdown(
                         l1_area_geojson=l1_area_geojson,
                         l1_active_timesteps=l1_active_timesteps,
                         crew_pools=crew_pools,
-                        l2_asset_geojson=l2_asset_geojson,
-                        l2_active_timesteps=l2_active_timesteps,
                         societal_access_config=societal_access_config,
+                        fragility_steepness_overrides=fragility_steepness_overrides,
                     )
                 
                 # Merge cache updates

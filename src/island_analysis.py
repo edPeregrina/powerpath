@@ -217,13 +217,14 @@ def compute_island_geodataframe_from_graph(
     buffer_distance: float = 2.5, 
     verbose: bool = False,
     l1_area_geojson=None,
-    l2_asset_geojson=None,
     event_footprint=None,
     outside_footprint_policy="permissive",
 ) -> gpd.GeoDataFrame:
     """
     Create GeoDataFrame from graph with buffered road geometries.
-    Applies active L1/L2 road adaptations before filtering if provided.
+    Applies active L1 road adaptations before filtering if provided. L2
+    (asset-level) adaptations are deliberately not accepted here: they only
+    ever protect specific assets, never roads/islands.
 
     ``event_footprint``/``outside_footprint_policy`` are forwarded to
     :func:`src.utils.filter_hazard_graph`: with ``outside_footprint_policy=
@@ -238,7 +239,6 @@ def compute_island_geodataframe_from_graph(
     G = filter_hazard_graph(
         G, hazard_threshold, hazard_column, 
         l1_area_geojson=l1_area_geojson,
-        l2_asset_geojson=l2_asset_geojson,
         event_footprint=event_footprint,
         outside_footprint_policy=outside_footprint_policy,
         verbose=verbose
@@ -368,11 +368,14 @@ def compute_island_geodataframe_from_graph(
 
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
-                       l1_area_geojson=None, l1_active_timesteps=None,
-                       l2_asset_geojson=None, l2_active_timesteps=None):
+                       l1_area_geojson=None, l1_active_timesteps=None):
     """
     Assign each asset in temp_gdf to the closest road section in islands_gdf using spatial index. 
     This step is executed at initialization only since the access rfid is an attribute of the graph that does not change.
+
+    Only L1 (area-based) adaptations are accepted: L2 (asset-level) adaptations
+    never affect roads/islands, so they are intentionally excluded from both
+    the road graph computation and this function's cache key.
     """
     if config is None:
         _config = get_config()
@@ -390,8 +393,6 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
-        l2_asset_geojson=l2_asset_geojson,
-        l2_active_timesteps=l2_active_timesteps,
     )
 
     # Check if cached or initialize empty dictionaries
@@ -431,7 +432,6 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
-            l2_asset_geojson=l2_asset_geojson,
         )
         rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
 
@@ -555,14 +555,14 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                             hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
                             island_cache=None, cache_dir=None, hazard_dir=None,
                             l1_area_geojson=None, l1_active_timesteps=None,
-                            l2_asset_geojson=None, l2_active_timesteps=None,
                             societal_allocation_cache=None, pop_grid_gdf=None,
                             cell_id_column='cell_id', island_id_column='island_id',
                             nearest_max_distance=200.0):
        
     """
     Match assets to island IDs based on spatial intersection with road network islands.
-    Cache key now includes L1 adaptation hash if L1 is active.
+    Cache key now includes L1 adaptation hash if L1 is active. L2 (asset-level)
+    adaptations are intentionally excluded: they never affect roads/islands.
     """
     if config is None:
         _config = get_config()
@@ -576,8 +576,6 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
-        l2_asset_geojson=l2_asset_geojson,
-        l2_active_timesteps=l2_active_timesteps,
     )
 
     cache_hit = (
@@ -647,7 +645,6 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
-            l2_asset_geojson=l2_asset_geojson,
         )
 
         # Drop the boundary rfids and find the main island
