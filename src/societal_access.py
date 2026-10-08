@@ -81,6 +81,11 @@ ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
 }
+#: Sentinel ``road_state_key`` used when the simulation runs a non-island
+#: repair-crew assignment method (e.g. "monetary impacts" without "islands").
+#: Roads are then implicitly assumed fully connected, so access depends only
+#: on function operational status, not shared-island membership.
+FLAT_CONNECTIVITY_ROAD_STATE_KEY = "flat_connectivity_no_islands"
 _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),

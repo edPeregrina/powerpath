@@ -74,28 +74,30 @@ def load_electricity_assets(electricity_dir, asset_types):
     raise FileNotFoundError(f"No electricity station files found in {electricity_dir}")
 
 
-def load_healthcare_assets(healthcare_dir, asset_types):
-    """Load real healthcare assets (geometry + type) from the pre-extracted
-    OSM-derived GeoPackage produced by
-    ``book/preprocessing/extract_amenities_from_extent.ipynb``.
+def load_osm_assets(osm_asset_dir, asset_types):
+    """Load real OSM-derived service assets (geometry + type) from the
+    pre-extracted GeoPackage produced by
+    ``book/preprocessing/extract_amenities_from_extent.ipynb``. Covers both
+    healthcare facilities (hospital, primary_care, pharmacy, ems) and other
+    service amenities that serve a distinct function (e.g. supermarket).
 
     Args:
-        healthcare_dir (Path): Directory containing ``healthcare_amenities.gpkg``.
+        osm_asset_dir (Path): Directory containing ``osm_assets.gpkg``.
         asset_types (list): Asset ``type`` values to keep, e.g.
-            ``['ems', 'hospital', 'primary_care', 'pharmacy']``. The GeoPackage
-            already stores the healthcare *function category* directly in
+            ``['ems', 'hospital', 'primary_care', 'pharmacy', 'supermarket']``.
+            The GeoPackage already stores the function category directly in
             ``type`` (classification happens at extraction time in
             ``book/preprocessing/extract_amenities_from_extent.ipynb``); pass
             ``None``/empty to keep all categories.
 
     Returns:
-        gpd.GeoDataFrame: Healthcare assets with ``geometry`` and ``type`` columns.
+        gpd.GeoDataFrame: OSM assets with ``geometry`` and ``type`` columns.
     """
-    data_path = healthcare_dir / "healthcare_amenities.gpkg"
-    hc_gdf = gpd.read_file(data_path)
+    data_path = osm_asset_dir / "osm_assets.gpkg"
+    osm_gdf = gpd.read_file(data_path)
     if asset_types:
-        hc_gdf = hc_gdf[hc_gdf['type'].isin(asset_types)]
-    return hc_gdf[['geometry', 'type']].reset_index(drop=True)
+        osm_gdf = osm_gdf[osm_gdf['type'].isin(asset_types)]
+    return osm_gdf[['geometry', 'type']].reset_index(drop=True)
 
 
 def load_hazard_maps(hazard_dir, max_days=None):

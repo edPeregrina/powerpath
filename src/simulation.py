@@ -336,6 +336,14 @@ def _update_hazard_map_states(
 
         else:
             print(f"Reachability not available for {cache_key}, using global crew assignment")
+    elif societal_access_config is not None:
+        # Non-island repair-crew methods never compute road/island state, so
+        # roads are implicitly assumed fully connected (state.island_ids stays
+        # its default single-island value). Use a constant road_state_key so
+        # societal access treats every timestep as one fully-connected island
+        # and access depends only on function operational status.
+        from src.societal_access import FLAT_CONNECTIVITY_ROAD_STATE_KEY
+        state.road_state_key = FLAT_CONNECTIVITY_ROAD_STATE_KEY
 
     # Mask of assets flooded above threshold
     flooded_mask = state.current_hazard_values > flood_threshold

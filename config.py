@@ -17,6 +17,88 @@ import shutil
 from src.dependency_knowledge_graph import build_default_knowledge_graph
 
 
+def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=None,
+                                cell_id_column="cell_id", namespace="societal_access"):
+    """Build the ``societal_access_config`` dict consumed by
+    ``src.simulation``/``src.adaptation`` (EMA ``Constant``) and
+    ``src.societal_access.postprocess_societal_access_results``.
+
+    Reuses ``config['service_node_config']`` (taxonomy, population groups,
+    reference group) so the function/population-group definitions stay
+    consistent across notebooks and scripts. ``asset_types`` restricts the
+    taxonomy/functions to the asset types actually present in the run's data
+    (e.g. ``['msls', 'ems', 'hospital', ...]``); electricity ('msls') is
+    always included since it is resolved via Voronoi service areas rather
+    than road-network reachability.
+
+    Electricity access is resolved via substation Voronoi service areas
+    (``src.societal_access.SERVICE_AREA_FUNCTION_PROVIDER_TYPES``), since
+    population exposure to a substation does not depend on road access.
+    All other functions (healthcare categories, supermarket, ...) are
+    resolved via shared-island road-network reachability, since reaching
+    them requires an intact road connection.
+
+    A shared SQLite-backed realized-state cache is configured so that
+    repeated island/accessibility states found across many EMA experiments
+    are memoised on disk instead of recomputed.
+    """
+    service_node_config = config["service_node_config"]
+    taxonomy = {"msls": "electricity", **service_node_config["taxonomy"]}
+    if asset_types is not None:
+        asset_types = {"msls", *asset_types}
+        taxonomy = {k: v for k, v in taxonomy.items() if k in asset_types}
+
+    caches = caches or {}
+    allocation_cache = caches.get("societal_allocation_cache") or {}
+    _seed_flat_connectivity_allocation(pop_grid_gdf, cell_id_column, allocation_cache)
+
+    shared_db_path = config["interim_dir"] / "societal_realized_state_cache.sqlite"
+
+    return {
+        "pop_grid_gdf": pop_grid_gdf,
+        "cell_id_column": cell_id_column,
+        "pop_group_columns": service_node_config["population_groups"],
+        "reference_group": service_node_config["reference_group"],
+        "taxonomy": taxonomy,
+        "asset_type_column": "type",
+        "all_functions": sorted(set(taxonomy.values())),
+        "allocation_cache": allocation_cache,
+        "shared_realized_state_cache_config": {
+            "enabled": True,
+            "backend": "sqlite",
+            "path": str(shared_db_path),
+            "namespace": namespace,
+        },
+        "cache_telemetry": {},
+    }
+
+
+def _seed_flat_connectivity_allocation(pop_grid_gdf, cell_id_column, allocation_cache):
+    """Pre-build a single-island (fully-connected) allocation covering the
+    entire population grid, so non-island repair-crew methods (which never
+    compute road/island state) can still resolve societal access via
+    ``src.societal_access.FLAT_CONNECTIVITY_ROAD_STATE_KEY``.
+    """
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from src.societal_access import FLAT_CONNECTIVITY_ROAD_STATE_KEY, get_or_build_allocation
+
+    flat_islands_gdf = gpd.GeoDataFrame(
+        {"island_id": [0]},
+        geometry=[box(*pop_grid_gdf.total_bounds)],
+        crs=pop_grid_gdf.crs,
+    )
+    get_or_build_allocation(
+        allocation_cache,
+        pop_grid_gdf,
+        cell_id_column,
+        flat_islands_gdf,
+        island_id_column="island_id",
+        road_state_key=FLAT_CONNECTIVITY_ROAD_STATE_KEY,
+    )
+
+
 def get_config(root_dir=None, hazard_dir_override=None):
     """
     Get configuration dictionary with all simulation parameters.
@@ -50,7 +132,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'root_dir': root_dir,
         'data_dir': root_dir / 'raw_data/ZH_Delfland',
         'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
-        'healthcare_dir': root_dir / 'data' / 'static',
+        'osm_asset_dir': root_dir / 'data' / 'static',
 
         # Simulation configuration
         'simulation_config': {
@@ -117,6 +199,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 'hospital': 'hospital',
                 'primary_care': 'primary_care',
                 'pharmacy': 'pharmacy',
+                'supermarket': 'supermarket',
                 # Emergency response
                 'fire_station': 'emergency_response',
                 'brandweerkazerne': 'emergency_response',

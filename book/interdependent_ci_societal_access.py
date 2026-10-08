@@ -5,16 +5,19 @@ Cleaned, CLI-runnable version of the exploratory ``interdependent_ci_societal_ac
 notebook export (the script form of ``time_explicit_electricity_analysis.ipynb``).
 
 It mirrors the combined-asset workflow demonstrated in ``Use_Case_sample.ipynb``
-(electricity substations + healthcare facilities, linked through the shared
-dependency knowledge graph, with Voronoi-based population exposure) but runs
-against the FULL extent dataset instead of the sample/development dataset:
+(electricity substations + OSM-derived service amenities, linked through the
+shared dependency knowledge graph, with Voronoi-based population exposure) but
+runs against the FULL extent dataset instead of the sample/development dataset:
 
   - Electricity substations: ``raw_data/ZH_Delfland/electricity`` (msls), as used
     in ``time_explicit_electricity_analysis.ipynb``.
-  - Healthcare facilities (EMS / hospital / primary care / pharmacy): the
-    full-extent OpenStreetMap extraction produced by
+  - OSM-derived service amenities (EMS / hospital / primary care / pharmacy /
+    supermarket): the full-extent OpenStreetMap extraction produced by
     ``book/preprocessing/extract_amenities_from_extent.ipynb``
-    (``config['healthcare_dir']/healthcare_amenities.gpkg``).
+    (``config['osm_asset_dir']/osm_assets.gpkg``). Supermarkets serve a
+    distinct function from the healthcare categories (food access rather than
+    healthcare access) but share the same ``msls``-dependency/flooding rules
+    as hospitals in the default knowledge graph.
 
 Scope: this script sets up and runs ONLY the EMA workbench experiment with
 adaptation measures (L1 area-based depth reduction + L2 asset-level barriers,
@@ -23,10 +26,16 @@ and their combinations). It intentionally omits:
   - exploratory plots/visualisations from the source notebooks,
   - generation of the L1/L2 adaptation GeoJSON files themselves (those are
     pre-generated artifacts already present under
-    ``data/test_samples/adaptation/*``; this script only *reads* them),
-  - the deeper per-demographic-group societal access breakdown (a separate,
-    single-run post-processing step -- see
-    ``src.impacts.calculate_societal_access_impacts``).
+    ``data/test_samples/adaptation/*``; this script only *reads* them).
+
+Population access to each function is computed by ``src.societal_access``
+(per-experiment, via the ``societal_access_config`` EMA constant built by
+``config.get_societal_access_config``): electricity through substation
+Voronoi service areas (no road access needed to receive electricity), and
+every other function (EMS/hospital/primary care/pharmacy/supermarket)
+through shared-island road-network reachability, since reaching them
+requires an intact road connection. A shared SQLite-backed cache memoises
+realized-state results across EMA experiments.
 
 Repair-crew counts can be sampled independently per asset type (e.g. a wider
 range for 'msls' substations than for 'hospital' facilities) via
@@ -65,9 +74,9 @@ from ema_workbench import (
 )
 from ema_workbench.util.utilities import save_results
 
-from config import get_config, print_config_summary, setup_directories, validate_config
+from config import get_config, get_societal_access_config, print_config_summary, setup_directories, validate_config
 from src.caching import load_simulation_caches
-from src.data_loader import load_electricity_assets, load_hazard_maps, load_healthcare_assets
+from src.data_loader import load_electricity_assets, load_hazard_maps, load_osm_assets
 from src.dependency_knowledge_graph import build_default_knowledge_graph
 from src.impacts import (
     create_voronoi_for_asset_type,
@@ -76,15 +85,17 @@ from src.impacts import (
     update_voll_rates,
 )
 from src.simulation import build_per_type_crew_uncertainties, simulate_with_per_type_crews
+from src.societal_access import list_societal_metric_names
 from src.utils import build_voronoi_service_area_map, compile_asset_gdfs
 
 LOGGER = logging.getLogger(__name__)
 
-HEALTHCARE_CATEGORY_LABELS = {
+AMENITY_CATEGORY_LABELS = {
     "ems": "EMS",
     "hospital": "Hospitals",
     "primary_care": "Primary Care",
     "pharmacy": "Pharmacies",
+    "supermarket": "Supermarkets",
 }
 
 # Aggregated 2D outcome variables (per-timestep, summed across assets).
@@ -99,8 +110,9 @@ MONETARY_CATEGORIES = [
 ]
 
 # Asset types that may receive their own repair-crew uncertainty range.
-# 'msls' = electricity substations; the rest are the healthcare categories.
-ASSET_TYPES_FOR_CREWS = ["msls", *HEALTHCARE_CATEGORY_LABELS.keys()]
+# 'msls' = electricity substations; the rest are the OSM-derived amenity
+# categories (healthcare + supermarket).
+ASSET_TYPES_FOR_CREWS = ["msls", *AMENITY_CATEGORY_LABELS.keys()]
 
 # Default (min, max) repair-crew ranges per asset type.
 DEFAULT_CREW_RANGES = {
@@ -109,6 +121,7 @@ DEFAULT_CREW_RANGES = {
     "hospital": (1, 3),
     "primary_care": (1, 3),
     "pharmacy": (1, 3),
+    "supermarket": (1, 1),
 }
 
 
@@ -153,6 +166,14 @@ def parse_args():
         help="Directory with L2 (asset-based) adaptation GeoJSON files. "
              "Default: <root_dir>/data/test_samples/adaptation/L2_asset_barriers",
     )
+    parser.add_argument(
+        "--max-l1-files", type=int, default=None,
+        help="Limit the number of L1 adaptation files used (for quick smoke tests). Default: use all.",
+    )
+    parser.add_argument(
+        "--max-l2-files", type=int, default=None,
+        help="Limit the number of L2 adaptation files used (for quick smoke tests). Default: use all.",
+    )
     parser.add_argument("--output-name", type=str, default=None,
                          help="Base filename (without extension) for the saved EMA results archive. "
                               "Default: ema_results_<execution_id>_full_extent_adaptation")
@@ -183,46 +204,47 @@ def resolve_crew_ranges(args):
 
 
 def load_combined_assets(config):
-    """Load full-extent electricity substations + healthcare facilities and
-    combine them into a single GeoDataFrame with a shared positional index.
+    """Load full-extent electricity substations + OSM-derived service
+    amenities and combine them into a single GeoDataFrame with a shared
+    positional index.
 
     Returns:
-        tuple: (gdf_assets_combined, substation_idx, healthcare_idx)
+        tuple: (gdf_assets_combined, substation_idx, osm_asset_idx)
     """
     gdf_electricity = load_electricity_assets(config["electricity_dir"], asset_types=["msls"])
 
-    hc_assets = load_healthcare_assets(
-        config["healthcare_dir"],
-        asset_types=list(HEALTHCARE_CATEGORY_LABELS.keys()),
+    hc_assets = load_osm_assets(
+        config["osm_asset_dir"],
+        asset_types=list(AMENITY_CATEGORY_LABELS.keys()),
     ).to_crs("EPSG:4326")
 
     gdf_assets_combined = compile_asset_gdfs([gdf_electricity, hc_assets])
 
     substation_idx = list(gdf_assets_combined[gdf_assets_combined["type"] == "msls"].index)
-    healthcare_idx = list(gdf_assets_combined[gdf_assets_combined["type"].isin(HEALTHCARE_CATEGORY_LABELS)].index)
+    osm_asset_idx = list(gdf_assets_combined[gdf_assets_combined["type"].isin(AMENITY_CATEGORY_LABELS)].index)
 
     LOGGER.info(
-        "Combined assets: %d (substations: %d, healthcare facilities: %d)",
-        len(gdf_assets_combined), len(substation_idx), len(healthcare_idx),
+        "Combined assets: %d (substations: %d, OSM service amenities: %d)",
+        len(gdf_assets_combined), len(substation_idx), len(osm_asset_idx),
     )
-    hc_counts = gdf_assets_combined.loc[healthcare_idx, "type"].value_counts()
-    for category, label in HEALTHCARE_CATEGORY_LABELS.items():
+    hc_counts = gdf_assets_combined.loc[osm_asset_idx, "type"].value_counts()
+    for category, label in AMENITY_CATEGORY_LABELS.items():
         LOGGER.info("  %s: %d", label, int(hc_counts.get(category, 0)))
 
-    return gdf_assets_combined, substation_idx, healthcare_idx
+    return gdf_assets_combined, substation_idx, osm_asset_idx
 
 
-def build_dependency_config(config, gdf_assets_combined, substation_voronoi, healthcare_idx):
+def build_dependency_config(config, gdf_assets_combined, substation_voronoi, osm_asset_idx):
     """Attach the shared dependency knowledge graph (electricity -> healthcare)
-    to a copy of *config*. The substation <-> healthcare Voronoi service-area
+    to a copy of *config*. The substation <-> OSM-asset Voronoi service-area
     map is also attached for traceability, even though the simulation's
     dependency engine derives its own provider assignment internally.
     """
     knowledge_graph = build_default_knowledge_graph()
 
-    gdf_healthcare_proj = gdf_assets_combined.loc[healthcare_idx].to_crs(substation_voronoi.crs)
+    gdf_osm_assets_proj = gdf_assets_combined.loc[osm_asset_idx].to_crs(substation_voronoi.crs)
     service_area_map, _ = build_voronoi_service_area_map(
-        substation_voronoi, gdf_healthcare_proj, return_diagnostics=True,
+        substation_voronoi, gdf_osm_assets_proj, return_diagnostics=True,
     )
 
     config_combined = {**config}
@@ -234,17 +256,23 @@ def build_dependency_config(config, gdf_assets_combined, substation_voronoi, hea
     return config_combined, service_area_map
 
 
-def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx, healthcare_idx,
-                                     substation_voronoi, service_area_map, root_dir):
-    """Build a flat {asset_id: population} exposure map covering every asset in
-    *gdf_assets_combined*, plus the substation land-use/VOLL lookup used for
-    monetary impact outcomes.
+def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
+                                     substation_voronoi, root_dir):
+    """Build a flat {asset_id: population} exposure map for the electricity
+    substations, the substation land-use/VOLL lookup used for monetary
+    impact outcomes, and the population grid used by societal-access
+    postprocessing.
 
-    Substations get their directly-served population (area-weighted
-    intersection of their Voronoi cell with the population grid). Healthcare
-    facilities get a proxy: the population of their supplying substation's
-    Voronoi cell, split evenly across all healthcare facilities served by that
-    substation (mirrors Use_Case_sample.ipynb's societal-access setup).
+    Only substations get a population entry: each one directly serves the
+    population within its Voronoi cell. OSM service amenities (hospital,
+    primary_care, pharmacy, ems, supermarket) are intentionally excluded --
+    population-weighted access to them is computed separately by
+    ``src.societal_access`` (see this script's module docstring), which
+    builds its own population-to-function mapping from the population grid.
+    Merging a substation-derived proxy population into this same map would
+    double-count population already counted via the substation entry in the
+    generic ``affected_population``/``served_population``/``total_population``
+    outcomes.
     """
     study_area_path = root_dir / "data" / "utilities" / "stedin_area.geojson"
     study_area = gpd.read_file(study_area_path, driver="GeoJSON").to_crs("EPSG:28992")
@@ -262,25 +290,18 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
     population_study_area = gpd.clip(population_data, population_buffer)
     population_above_0 = population_study_area[["aantal_inwoners", "geometry"]].set_crs("EPSG:28992")
 
-    electricity_population_map = prepare_population_impact_data(
+    # Population grid for societal-access postprocessing (demographic group
+    # columns + a stable cell_id), independent of asset_population_map.
+    pop_group_cols = list(config["service_node_config"]["population_groups"].values())
+    population_for_societal = population_study_area[[*pop_group_cols, "geometry"]].set_crs("EPSG:28992")
+    population_for_societal = population_for_societal.reset_index(drop=True)
+    population_for_societal["cell_id"] = population_for_societal.index.astype(str)
+
+    asset_population_map = prepare_population_impact_data(
         population_data=population_above_0, voronoi_gdf=substation_voronoi,
     )
-    LOGGER.info("Population data prepared for %d substations", len(electricity_population_map))
-
-    # Proxy population for healthcare facilities, via their supplying substation.
-    healthcare_population_map = {}
-    for sub_idx, served_healthcare_ids in service_area_map.items():
-        supplier_population = electricity_population_map.get(sub_idx, 0)
-        n_served = max(len(served_healthcare_ids), 1)
-        for h_idx in served_healthcare_ids:
-            healthcare_population_map[h_idx] = supplier_population / n_served
-    # Ensure every healthcare facility has an entry, even unserved ones.
-    for h_idx in healthcare_idx:
-        healthcare_population_map.setdefault(h_idx, 0)
-
-    asset_population_map = {**electricity_population_map, **healthcare_population_map}
     LOGGER.info(
-        "Combined asset_population_map ready for %d assets (total population: %.0f)",
+        "asset_population_map ready for %d substations (total population: %.0f)",
         len(asset_population_map), sum(asset_population_map.values()),
     )
 
@@ -308,11 +329,12 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
         LOGGER.info("Saved asset_to_lu to cache: %s", asset_to_lu_cache_path)
 
     LOGGER.info("asset_to_lu ready with %d substations", len(asset_to_lu))
-    return asset_population_map, asset_to_lu
+    return asset_population_map, asset_to_lu, population_for_societal
 
 
 def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
-                     asset_population_map, asset_to_lu, execution_id, args, crew_ranges):
+                     asset_population_map, asset_to_lu, societal_access_config,
+                     execution_id, args, crew_ranges):
     """Construct the EMA workbench Model: uncertainties, constants and outcomes."""
     model = Model("ElectricitySocietalAccessSimulation",
                    function=simulate_with_per_type_crews)
@@ -341,6 +363,9 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
         # Impact data
         Constant("asset_population_map", asset_population_map),
         Constant("asset_to_lu", asset_to_lu),
+        # Societal access (electricity Voronoi + road-network reachability
+        # for OSM service amenities)
+        Constant("societal_access_config", societal_access_config),
         # Dimensionality control
         Constant("keep_3d_vars", []),
         Constant("keep_2d_vars", KEEP_2D_VARS),
@@ -357,6 +382,13 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
     outcomes_list.extend(
         TimeSeriesOutcome(f"monetary_impact_{category}") for category in MONETARY_CATEGORIES
     )
+    outcomes_list.extend(
+        TimeSeriesOutcome(name) for name in list_societal_metric_names(
+            all_functions=societal_access_config["all_functions"],
+            pop_group_columns=societal_access_config["pop_group_columns"],
+            reference_group=societal_access_config.get("reference_group", "total"),
+        )
+    )
     model.outcomes = outcomes_list
 
     return model
@@ -372,6 +404,10 @@ def build_adaptation_policies(root_dir, args):
 
     l1_files = sorted(l1_dir.glob("*.geojson")) if l1_dir.exists() else []
     l2_files = sorted(l2_dir.glob("*.geojson")) if l2_dir.exists() else []
+    if args.max_l1_files is not None:
+        l1_files = l1_files[: args.max_l1_files]
+    if args.max_l2_files is not None:
+        l2_files = l2_files[: args.max_l2_files]
     LOGGER.info("Found %d L1 adaptation files in %s", len(l1_files), l1_dir)
     LOGGER.info("Found %d L2 adaptation files in %s", len(l2_files), l2_dir)
 
@@ -429,6 +465,11 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
     ema_logging.log_to_stderr(ema_logging.INFO)
 
+    t_start = time.time()
+
+    def _checkpoint(label):
+        LOGGER.info("[warm-up] %s (+%.1fs)", label, time.time() - t_start)
+
     config = get_config()
     is_valid, missing_dirs, warnings = validate_config(config)
     if not is_valid:
@@ -441,11 +482,13 @@ def main():
 
     root_dir = Path(config["root_dir"])
 
-    gdf_assets_combined, substation_idx, healthcare_idx = load_combined_assets(config)
+    gdf_assets_combined, substation_idx, osm_asset_idx = load_combined_assets(config)
+    _checkpoint("combined assets loaded")
 
     LOGGER.info("Loading hazard maps from %s", config["hazard_dir"])
     hazard_maps = load_hazard_maps(config["hazard_dir"], max_days=None)
     LOGGER.info("Loaded %d hazard maps", len(hazard_maps))
+    _checkpoint("hazard maps loaded")
 
     LOGGER.info("Building Voronoi service areas for electricity substations...")
     substation_voronoi = create_voronoi_for_asset_type(
@@ -453,23 +496,35 @@ def main():
         boundary=gpd.read_file(root_dir / "data" / "utilities" / "stedin_area.geojson",
                                 driver="GeoJSON").to_crs("EPSG:28992").geometry.unary_union,
     )
+    _checkpoint("substation Voronoi built")
 
     config_combined, service_area_map = build_dependency_config(
-        config, gdf_assets_combined, substation_voronoi, healthcare_idx,
+        config, gdf_assets_combined, substation_voronoi, osm_asset_idx,
     )
+    _checkpoint("dependency config + service-area map built")
 
-    asset_population_map, asset_to_lu = prepare_population_and_land_use(
-        config_combined, gdf_assets_combined, substation_idx, healthcare_idx,
-        substation_voronoi, service_area_map, root_dir,
+    asset_population_map, asset_to_lu, population_for_societal = prepare_population_and_land_use(
+        config_combined, gdf_assets_combined, substation_idx,
+        substation_voronoi, root_dir,
     )
+    _checkpoint("population + land-use data ready")
 
     caches = load_simulation_caches(config["interim_dir"], config["hazard_dir"])
     LOGGER.info("Loaded caches: %s", [k for k in caches if caches[k] is not None])
+    _checkpoint("simulation caches loaded")
+
+    societal_access_config = get_societal_access_config(
+        config_combined, population_for_societal, caches=caches,
+        asset_types=["msls", *AMENITY_CATEGORY_LABELS.keys()],
+        namespace="interdependent_ci_societal_access",
+    )
+    LOGGER.info("Societal access functions: %s", societal_access_config["all_functions"])
 
     execution_id = int(time.time())
     model = build_ema_model(
         config_combined, gdf_assets_combined, hazard_maps, caches,
-        asset_population_map, asset_to_lu, execution_id, args, crew_ranges,
+        asset_population_map, asset_to_lu, societal_access_config,
+        execution_id, args, crew_ranges,
     )
 
     policies = build_adaptation_policies(root_dir, args)
