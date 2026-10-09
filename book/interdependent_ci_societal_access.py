@@ -42,6 +42,11 @@ range for 'msls' substations than for 'hospital' facilities) via
 ``--repair-crews-range ASSET_TYPE MIN MAX`` (repeatable); see
 ``src.simulation.build_per_type_crew_uncertainties``.
 
+Fragility-steepness (k) ranges follow the same per-asset-type pattern via
+``--fragility-steepness-range ASSET_TYPE MIN MAX`` (repeatable; only
+fragility-eligible types, currently 'msls'); see
+``src.simulation.build_per_type_fragility_steepness_uncertainties``.
+
 WARNING: a full run (default: 100 scenarios x ~150 policies) can take several
 hours. Use ``--scenarios``/``--max-days``/``--dry-run`` for a quick smoke test
 before committing to a full run.
@@ -85,8 +90,8 @@ from src.impacts import (
 )
 from src.simulation import (
     build_per_type_crew_uncertainties,
+    build_per_type_fragility_steepness_uncertainties,
     fragility_steepness_from_param,
-    fragility_steepness_uncertainty,
     simulate_with_per_type_crews,
 )
 from src.societal_access import list_societal_metric_names
@@ -128,6 +133,19 @@ DEFAULT_CREW_RANGES = {
     "supermarket": (1, 1),
 }
 
+# Asset types that may receive their own fragility-steepness uncertainty
+# range. Only types with an explicit hazard_blocks_operation=False flooding
+# rule in the knowledge graph are fragility-eligible (see
+# src.simulation._fragility_exclusions_from_knowledge_graph); currently only
+# 'msls' substations.
+ASSET_TYPES_FOR_FRAGILITY = ["msls"]
+
+# Default (min, max) fragility-steepness (k) ranges per asset type, sampled
+# in 0.5 increments (see src.simulation.fragility_steepness_uncertainty).
+DEFAULT_FRAGILITY_STEEPNESS_RANGES = {
+    "msls": (5.0, 7.5),
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -152,12 +170,15 @@ def parse_args():
             f"Defaults: {DEFAULT_CREW_RANGES}."
         ),
     )
-    parser.add_argument("--fragility-k-min", type=float, default=5.0,
-                         help="Lower bound for msls fragility steepness (k), sampled in 0.5 "
-                              "increments. Default: 5.0.")
-    parser.add_argument("--fragility-k-max", type=float, default=7.5,
-                         help="Upper bound for msls fragility steepness (k), sampled in 0.5 "
-                              "increments. Default: 7.5.")
+    parser.add_argument("--fragility-steepness-range", nargs=3, metavar=("ASSET_TYPE", "MIN", "MAX"),
+                         action="append", default=None,
+                         help=(
+                             "Override the fragility-steepness (k) uncertainty range for one "
+                             "fragility-eligible asset type, sampled in 0.5 increments, e.g. "
+                             "'--fragility-steepness-range msls 5.0 7.5'. Repeat for multiple "
+                             f"asset types. Valid asset types: {', '.join(ASSET_TYPES_FOR_FRAGILITY)}. "
+                             f"Defaults: {DEFAULT_FRAGILITY_STEEPNESS_RANGES}."
+                         ))
     parser.add_argument("--flood-threshold", type=float, default=0.2,
                          help="Flood depth threshold (m) above which an asset is considered flooded. Default: 0.2.")
     parser.add_argument("--adaptation-active-timesteps", type=int, default=198,
@@ -207,6 +228,25 @@ def resolve_crew_ranges(args):
             )
         crew_ranges[asset_type] = (int(min_crews), int(max_crews))
     return crew_ranges
+
+
+def resolve_fragility_steepness_ranges(args):
+    """Merge CLI ``--fragility-steepness-range`` overrides into
+    `DEFAULT_FRAGILITY_STEEPNESS_RANGES`.
+
+    Returns:
+        dict: ``{asset_type: (min_k, max_k)}`` for every asset type in
+        `ASSET_TYPES_FOR_FRAGILITY`.
+    """
+    steepness_ranges = dict(DEFAULT_FRAGILITY_STEEPNESS_RANGES)
+    for asset_type, min_k, max_k in args.fragility_steepness_range or []:
+        if asset_type not in ASSET_TYPES_FOR_FRAGILITY:
+            raise ValueError(
+                f"Unknown asset type '{asset_type}' in --fragility-steepness-range; "
+                f"expected one of {ASSET_TYPES_FOR_FRAGILITY}."
+            )
+        steepness_ranges[asset_type] = (float(min_k), float(max_k))
+    return steepness_ranges
 
 
 def load_combined_assets(config):
@@ -340,25 +380,28 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
 
 def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
                      asset_population_map, asset_to_lu, societal_access_config,
-                     execution_id, args, crew_ranges):
+                     execution_id, args, crew_ranges, fragility_steepness_ranges):
     """Construct the EMA workbench Model: uncertainties, constants and outcomes."""
     model = Model("ElectricitySocietalAccessSimulation",
                    function=simulate_with_per_type_crews)
 
+    # Samples each asset type's fragility steepness (k) at 0.5 increments via
+    # an IntegerParameter over k*2 (see
+    # src.simulation.fragility_steepness_uncertainty).
+    fragility_doubled_ranges = {
+        asset_type: (round(min_k * 2), round(max_k * 2))
+        for asset_type, (min_k, max_k) in fragility_steepness_ranges.items()
+    }
     model.uncertainties = [
         *build_per_type_crew_uncertainties(crew_ranges),
-        # Samples msls fragility steepness (k) at 0.5 increments between
-        # args.fragility_k_min and args.fragility_k_max via an IntegerParameter
-        # over k*2 (see src.simulation.fragility_steepness_uncertainty).
-        fragility_steepness_uncertainty(
-            "msls", round(args.fragility_k_min * 2), round(args.fragility_k_max * 2)
-        ),
+        *build_per_type_fragility_steepness_uncertainties(fragility_doubled_ranges),
     ]
-    LOGGER.info(
-        "msls fragility steepness values: %s",
-        [fragility_steepness_from_param(v) for v in
-         range(round(args.fragility_k_min * 2), round(args.fragility_k_max * 2) + 1)],
-    )
+    for asset_type, (min_doubled, max_doubled) in fragility_doubled_ranges.items():
+        LOGGER.info(
+            "%s fragility steepness values: %s",
+            asset_type,
+            [fragility_steepness_from_param(v) for v in range(min_doubled, max_doubled + 1)],
+        )
 
     model.constants = [
         Constant("flood_threshold", args.flood_threshold),
@@ -496,6 +539,9 @@ def main():
     crew_ranges = resolve_crew_ranges(args)
     LOGGER.info("Per-asset-type repair-crew uncertainty ranges: %s", crew_ranges)
 
+    fragility_steepness_ranges = resolve_fragility_steepness_ranges(args)
+    LOGGER.info("Per-asset-type fragility-steepness uncertainty ranges: %s", fragility_steepness_ranges)
+
     root_dir = Path(config["root_dir"])
 
     gdf_assets_combined, substation_idx, osm_asset_idx = load_combined_assets(config)
@@ -540,7 +586,7 @@ def main():
     model = build_ema_model(
         config_combined, gdf_assets_combined, hazard_maps, caches,
         asset_population_map, asset_to_lu, societal_access_config,
-        execution_id, args, crew_ranges,
+        execution_id, args, crew_ranges, fragility_steepness_ranges,
     )
 
     policies = build_adaptation_policies(root_dir, args)
