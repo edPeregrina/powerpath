@@ -376,7 +376,7 @@ def load_island_cache(cache_dir, hazard_dir=None):
         return {}
 
 
-def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None):
+def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None, verbose=False):
     """Save societal-access population allocations to an interim pickle."""
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -387,7 +387,8 @@ def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None):
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_dict, f)
-        print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
+        if verbose:
+            print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
         print(f"ERROR: Failed to save societal allocation cache: {e}")
         raise

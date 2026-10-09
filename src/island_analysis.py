@@ -187,6 +187,7 @@ from src.caching import (
     get_asset_centroid_hash,
     save_island_cache,
     save_overlap_cache,
+    save_societal_allocation_cache,
 )
 from src.utils import create_spatial_index, filter_hazard_graph, project_graph_coords
 
@@ -686,6 +687,14 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 nearest_max_distance=nearest_max_distance,
                 road_state_key=cache_key,
             )
+            if allocation_cache_updated and cache_dir is not None:
+                # Persist immediately, mirroring the island cache's
+                # save-on-write behavior above, so newly built allocations
+                # survive across process restarts instead of only living in
+                # the in-memory dict for the remainder of this run.
+                save_societal_allocation_cache(
+                    societal_allocation_cache, cache_dir, hazard_dir, verbose=verbose
+                )
             if verbose:
                 allocation_cache_state = "miss" if allocation_cache_updated else "hit"
                 print(
