@@ -632,8 +632,9 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 print(f"Societal allocation cache hit: {allocation_cache_key}")
                 print("Skipping hazard graph reconstruction")
             return asset_island_ids, rfids_islands
-        if verbose:
-            print(f"Societal allocation cache miss for road state: {cache_key}")
+        # Misses are always reported, regardless of verbosity, since they
+        # trigger an expensive hazard-graph reconstruction worth surfacing.
+        print(f"Societal allocation cache miss for road state: {cache_key}")
 
     try:
         hazard_graph_path = _config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
@@ -695,8 +696,14 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 save_societal_allocation_cache(
                     societal_allocation_cache, cache_dir, hazard_dir, verbose=verbose
                 )
-            if verbose:
-                allocation_cache_state = "miss" if allocation_cache_updated else "hit"
+            allocation_cache_state = "miss" if allocation_cache_updated else "hit"
+            if allocation_cache_updated:
+                # Misses are always reported, regardless of verbosity.
+                print(
+                    f"Societal allocation cache {allocation_cache_state}: "
+                    f"{allocation_cache_key}"
+                )
+            elif verbose:
                 print(
                     f"Societal allocation cache {allocation_cache_state}: "
                     f"{allocation_cache_key}"
