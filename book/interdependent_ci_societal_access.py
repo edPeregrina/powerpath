@@ -207,6 +207,11 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true",
                          help="Build the model, caches and policy list, print a summary, and exit "
                               "without running any EMA experiments.")
+    parser.add_argument("--profile", action="store_true",
+                         help="Attach a SimulationTimingProfiler (shared across all experiments in "
+                              "this run) and print phase/timestep timing summary tables after the "
+                              "EMA experiments complete. Adds negligible overhead; intended for "
+                              "quick smoke-test/optimisation runs (small --scenarios / policy counts).")
     parser.add_argument("--log-level", type=str, default="INFO",
                          choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging verbosity. Default: INFO.")
     return parser.parse_args()
@@ -380,8 +385,15 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
 
 def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
                      asset_population_map, asset_to_lu, societal_access_config,
-                     execution_id, args, crew_ranges, fragility_steepness_ranges):
-    """Construct the EMA workbench Model: uncertainties, constants and outcomes."""
+                     execution_id, args, crew_ranges, fragility_steepness_ranges,
+                     profiler=None):
+    """Construct the EMA workbench Model: uncertainties, constants and outcomes.
+
+    *profiler*, when given a :class:`src.timing_profiler.SimulationTimingProfiler`,
+    is attached as a shared ``Constant`` so every experiment in the run
+    accumulates into the same phase/timestep timing tables (useful for
+    identifying optimisation targets across a small diagnostic batch).
+    """
     model = Model("ElectricitySocietalAccessSimulation",
                    function=simulate_with_per_type_crews)
 
@@ -403,7 +415,7 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
             [fragility_steepness_from_param(v) for v in range(min_doubled, max_doubled + 1)],
         )
 
-    model.constants = [
+    model_constants = [
         Constant("flood_threshold", args.flood_threshold),
         Constant("gdf_assets", gdf_assets_combined),
         Constant("hazard_maps", hazard_maps[: args.max_days]),
@@ -429,6 +441,9 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
         Constant("keep_3d_vars", []),
         Constant("keep_2d_vars", KEEP_2D_VARS),
     ]
+    if profiler is not None:
+        model_constants.append(Constant("profiler", profiler))
+    model.constants = model_constants
 
     outcomes_list = [TimeSeriesOutcome(var) for var in KEEP_2D_VARS]
     outcomes_list.extend([
@@ -583,10 +598,17 @@ def main():
     LOGGER.info("Societal access functions: %s", societal_access_config["all_functions"])
 
     execution_id = int(time.time())
+    profiler = None
+    if args.profile:
+        from src.timing_profiler import SimulationTimingProfiler
+        profiler = SimulationTimingProfiler(enabled=True)
+        LOGGER.info("Profiling enabled: attaching a shared SimulationTimingProfiler.")
+
     model = build_ema_model(
         config_combined, gdf_assets_combined, hazard_maps, caches,
         asset_population_map, asset_to_lu, societal_access_config,
         execution_id, args, crew_ranges, fragility_steepness_ranges,
+        profiler=profiler,
     )
 
     policies = build_adaptation_policies(root_dir, args)
@@ -603,6 +625,9 @@ def main():
         experiments, outcomes = evaluator.perform_experiments(
             scenarios=args.scenarios, policies=policies, uncertainty_sampling=Samplers.LHS,
         )
+
+    if profiler is not None:
+        profiler.print_summary_tables()
 
     experiments_df = pd.DataFrame(experiments)
     LOGGER.info("Completed all experiments with execution id %d. Total runs: %d",

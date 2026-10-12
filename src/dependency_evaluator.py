@@ -46,6 +46,7 @@ is never treated as physical repair.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -71,13 +72,26 @@ HAZARD_RECOVERY_WAIT_PREFIX = "hazard_recovery_wait::"
 RESTART_WAIT_PREFIX = "restart_wait::"
 
 
+@lru_cache(maxsize=None)
 def hazard_recovery_wait_key(wait_vector_name: str) -> str:
-    """Namespace a hazard rule's configured wait-vector name."""
+    """Namespace a hazard rule's configured wait-vector name.
+
+    Cached: the namespaced key is a pure function of ``wait_vector_name``,
+    which is drawn from a small, fixed set of configured names for the whole
+    run -- caching avoids re-formatting/re-hashing the same string on every
+    timestep.
+    """
     return f"{HAZARD_RECOVERY_WAIT_PREFIX}{wait_vector_name}"
 
 
+@lru_cache(maxsize=None)
 def restart_wait_key(edge_key: str) -> str:
-    """Namespace a dependency edge's restart-delay wait vector by its stable edge key."""
+    """Namespace a dependency edge's restart-delay wait vector by its stable edge key.
+
+    Cached: ``edge_key`` is stable for the lifetime of a run (edges are
+    expanded once per experiment), so caching avoids rebuilding/re-hashing
+    the same namespaced string on every timestep for every edge.
+    """
     return f"{RESTART_WAIT_PREFIX}{edge_key}"
 
 
@@ -183,8 +197,12 @@ def activate_hazard_recovery_waits(
                 continue
 
             key = hazard_recovery_wait_key(rule.return_to_operational.wait_vector)
-            wait_vector = wait_vectors.setdefault(key, np.zeros(num_assets, dtype=np.float64))
-            active = active_masks.setdefault(key, np.zeros(num_assets, dtype=bool))
+            if key not in wait_vectors:
+                wait_vectors[key] = np.zeros(num_assets, dtype=np.float64)
+            if key not in active_masks:
+                active_masks[key] = np.zeros(num_assets, dtype=bool)
+            wait_vector = wait_vectors[key]
+            active = active_masks[key]
 
             affected = a_mask & ~hazard_available
             if rule.hazard_blocks_operation:
@@ -385,6 +403,31 @@ def evaluate_dependency_availability(
 # ---------------------------------------------------------------------------
 # Dependency restart waits
 # ---------------------------------------------------------------------------
+# Per-``edges`` object memoization of the (target_indices, namespaced_keys)
+# arrays used to vectorize `activate_dependency_restart_waits`. Keyed by
+# `id(edges)` with an identity check against the stored object itself (not
+# just the id) to guard against id reuse after garbage collection. `edges`
+# is built once per experiment (see `expand_dependency_edges`) and passed by
+# reference unchanged across every timestep, so this cache is populated once
+# per experiment and then reused for the rest of that experiment's run.
+_RESTART_EDGE_INDEX_CACHE: dict[int, tuple[list, np.ndarray, tuple[str, ...]]] = {}
+
+
+def _restart_edge_index(edges: list[DependencyEdge]) -> tuple[np.ndarray, tuple[str, ...]]:
+    """Return (target_indices, namespaced_keys) for *edges*, memoized by identity."""
+    cache_key = id(edges)
+    cached = _RESTART_EDGE_INDEX_CACHE.get(cache_key)
+    if cached is not None and cached[0] is edges:
+        return cached[1], cached[2]
+
+    target_indices = np.fromiter(
+        (edge.target_index for edge in edges), dtype=np.int64, count=len(edges)
+    )
+    keys = tuple(restart_wait_key(edge.edge_key) for edge in edges)
+    _RESTART_EDGE_INDEX_CACHE[cache_key] = (edges, target_indices, keys)
+    return target_indices, keys
+
+
 def activate_dependency_restart_waits(
     dependency_available: np.ndarray,
     previous_dependency_available: np.ndarray | None,
@@ -409,27 +452,62 @@ def activate_dependency_restart_waits(
     When *previous_dependency_available* is ``None`` (first-ever call), no
     transition is assumed for targets already available, so no spurious
     restart delay is applied at start-up.
+
+    Performance note: the per-edge ``now_available``/``was_available``
+    comparison is vectorized across all edges at once (a single gather per
+    array), and the actual per-edge wait-vector/active-mask writes -- the
+    only part that cannot be vectorized, since each edge owns an
+    independently namespaced array -- are restricted to edges whose
+    availability actually transitioned this timestep (typically a small
+    subset, since a flooded-state transition only occurs at the start/end
+    of a flood event, not on every timestep within one), rather than
+    looping over every edge unconditionally.
     """
-    for edge in edges:
-        key = restart_wait_key(edge.edge_key)
-        vector = wait_vectors.setdefault(key, np.zeros(num_assets, dtype=np.float64))
-        active = active_masks.setdefault(key, np.zeros(num_assets, dtype=bool))
-        target = edge.target_index
+    if not edges:
+        return
 
-        now_available = bool(dependency_available[target])
-        if previous_dependency_available is None:
-            was_available = now_available
+    target_indices, keys = _restart_edge_index(edges)
+
+    # Every edge's namespaced entries must exist in `wait_vectors`/
+    # `active_masks` after this call, even if nothing transitions this
+    # timestep (downstream/test callers rely on the zero-initialized entry
+    # being present from the first evaluation onward). This membership
+    # check is O(num_edges) but cheap (a dict lookup, not an allocation) --
+    # the actual `np.zeros(...)` allocation only ever happens once per edge,
+    # the first time its key is seen.
+    for key in keys:
+        if key not in wait_vectors:
+            wait_vectors[key] = np.zeros(num_assets, dtype=np.float64)
+        if key not in active_masks:
+            active_masks[key] = np.zeros(num_assets, dtype=bool)
+
+    now_available = dependency_available[target_indices]
+    if previous_dependency_available is None:
+        was_available = now_available
+    else:
+        was_available = previous_dependency_available[target_indices]
+
+    became_available = now_available & ~was_available
+    still_unavailable_or_newly_unavailable = ~now_available
+    # An edge needs a write this timestep iff it just recovered (start its
+    # restart delay) or it is (still or newly) unavailable (keep resetting
+    # its timer, matching the original per-edge `elif not now_available`
+    # branch exactly). Edges that are unchanged-and-available need no write
+    # at all -- their existing timer, if any, keeps counting down untouched.
+    needs_write = became_available | still_unavailable_or_newly_unavailable
+    if not np.any(needs_write):
+        return
+
+    for i in np.flatnonzero(needs_write):
+        key = keys[i]
+        target = target_indices[i]
+
+        if became_available[i]:
+            wait_vectors[key][target] = restart_delay_steps
+            active_masks[key][target] = True
         else:
-            was_available = bool(previous_dependency_available[target])
-
-        if now_available and not was_available:
-            vector[target] = restart_delay_steps
-            active[target] = True
-        elif not now_available:
-            vector[target] = 0.0
-            active[target] = False
-        # else: still available, no new transition -- leave the existing
-        # timer alone so it can continue counting down.
+            wait_vectors[key][target] = 0.0
+            active_masks[key][target] = False
 
 
 def compute_restart_ready(
@@ -524,16 +602,27 @@ def evaluate_operational_state(
         )
 
     with profiler.section("dependency.restart_waits"):
-        activate_dependency_restart_waits(
-            dependency_available,
-            previous_dependency_available,
-            dependency_edges,
-            wait_vectors,
-            restart_active_masks,
-            restart_delay_steps=restart_delay_steps,
-            num_assets=num_assets,
-        )
-        restart_ready = compute_restart_ready(num_assets, wait_vectors, restart_active_masks)
+        if restart_delay_steps <= 0:
+            # A non-positive global restart delay means every dependency
+            # restart is immediate by definition -- `compute_restart_ready`
+            # would always evaluate to all-True regardless of activation
+            # history (see `activate_dependency_restart_waits`: a started
+            # wait is recorded with `vector[target] = restart_delay_steps`,
+            # and `compute_restart_ready` only blocks while `vector > 0.0`).
+            # Skip the whole activate/compute pass rather than doing
+            # provably-inert bookkeeping on every timestep.
+            restart_ready = np.ones(num_assets, dtype=bool)
+        else:
+            activate_dependency_restart_waits(
+                dependency_available,
+                previous_dependency_available,
+                dependency_edges,
+                wait_vectors,
+                restart_active_masks,
+                restart_delay_steps=restart_delay_steps,
+                num_assets=num_assets,
+            )
+            restart_ready = compute_restart_ready(num_assets, wait_vectors, restart_active_masks)
 
     effective_operational = baseline_available & dependency_available & restart_ready
 

@@ -211,6 +211,7 @@ def _update_hazard_map_states(
     depth_reductions=None, l1_area_geojson=None, l1_active_timesteps=None,
     crew_pools=None,
     societal_access_config=None,
+    profiler=NULL_PROFILER,
 ):
     """
     Update the simulation states that depend on the hazard map (only on major timesteps)
@@ -256,6 +257,8 @@ def _update_hazard_map_states(
     damage_ratio_coefficients = _config['recovery_parameters'].get('damage_ratio_coefficients', (0.0468, 0.0077))
     repair_time_coefficients = _config['recovery_parameters'].get('repair_time_coefficients', [702.72, 3.14, 1.9891])
     cache_updated = {}
+    if profiler is None:
+        profiler = NULL_PROFILER
 
     map_counter = int(timestep / major_timestep)
     if map_counter >= len(hazard_maps):
@@ -269,31 +272,32 @@ def _update_hazard_map_states(
         print(f"\n=== Processing timestep {timestep} (map {map_counter}) ===")
     
     # Update hazard values
-    temp_gdf = gdf_assets[['type', 'geometry', 'access_rfid']].copy()
-    temp_gdf = find_hazard_value_at_points_optimized(
-        hazard_map,
-        temp_gdf,
-        map_counter,
-        extraction_method=_config['analysis_config']['hazard_extraction_method'],
-        hazard_cache=hazard_extraction_cache,
-        hazard_dir=hazard_dir, 
-        _config=_config
-    )
-    cache_updated['hazard_extraction_cache'] = hazard_extraction_cache
-    haz_val_str = f'hazard_value_{map_counter}'
+    with profiler.section("simulation._update_hazard_map_states.hazard_extraction"):
+        temp_gdf = gdf_assets[['type', 'geometry', 'access_rfid']].copy()
+        temp_gdf = find_hazard_value_at_points_optimized(
+            hazard_map,
+            temp_gdf,
+            map_counter,
+            extraction_method=_config['analysis_config']['hazard_extraction_method'],
+            hazard_cache=hazard_extraction_cache,
+            hazard_dir=hazard_dir, 
+            _config=_config
+        )
+        cache_updated['hazard_extraction_cache'] = hazard_extraction_cache
+        haz_val_str = f'hazard_value_{map_counter}'
 
-    if haz_val_str in temp_gdf.columns:
-        state.current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
-    else:
-        state.current_hazard_values = temp_gdf[haz_col_str].fillna(0.0).values
+        if haz_val_str in temp_gdf.columns:
+            state.current_hazard_values = temp_gdf[haz_val_str].fillna(0.0).values
+        else:
+            state.current_hazard_values = temp_gdf[haz_col_str].fillna(0.0).values
 
-    # Apply L1/L2 adaptations (once per map, not accumulated per hour)
-    if depth_reductions is not None:
-        if timestep < depth_reductions.shape[0]:
-            state.current_hazard_values = np.maximum(
-                0.0, 
-                state.current_hazard_values - depth_reductions[timestep, :]
-            )
+        # Apply L1/L2 adaptations (once per map, not accumulated per hour)
+        if depth_reductions is not None:
+            if timestep < depth_reductions.shape[0]:
+                state.current_hazard_values = np.maximum(
+                    0.0, 
+                    state.current_hazard_values - depth_reductions[timestep, :]
+                )
 
     # Island-based crew management
     if 'island' in repair_crew_assignment_method:
@@ -312,45 +316,46 @@ def _update_hazard_map_states(
         )
         state.road_state_key = cache_key
         try:
-            temp_gdf_for_islands = temp_gdf
-            allocation_cache = None
-            pop_grid_gdf = None
-            cell_id_column = "cell_id"
-            island_id_column = "island_id"
-            nearest_max_distance = 200.0
-            if societal_access_config is not None:
-                allocation_cache = societal_access_config.get("allocation_cache")
-                pop_grid_gdf = societal_access_config.get("pop_grid_gdf")
-                cell_id_column = societal_access_config.get("cell_id_column", "cell_id")
-                island_id_column = societal_access_config.get("island_id_column", "island_id")
-                nearest_max_distance = societal_access_config.get("nearest_max_distance", 200.0)
+            with profiler.section("simulation._update_hazard_map_states.island_match"):
+                temp_gdf_for_islands = temp_gdf
+                allocation_cache = None
+                pop_grid_gdf = None
+                cell_id_column = "cell_id"
+                island_id_column = "island_id"
+                nearest_max_distance = 200.0
+                if societal_access_config is not None:
+                    allocation_cache = societal_access_config.get("allocation_cache")
+                    pop_grid_gdf = societal_access_config.get("pop_grid_gdf")
+                    cell_id_column = societal_access_config.get("cell_id_column", "cell_id")
+                    island_id_column = societal_access_config.get("island_id_column", "island_id")
+                    nearest_max_distance = societal_access_config.get("nearest_max_distance", 200.0)
 
-            asset_island_ids, rfids_islands = match_island_ids_assets(
-                temp_gdf_for_islands,
-                boundary_asset_indices=boundary_asset_indices,
-                boundary_islands_rfids=boundary_islands_rfids,
-                hazard_threshold=flood_threshold,
-                hazard_column=haz_col_str,
-                config=_config,
-                island_cache=island_cache,
-                cache_dir=interim_dir,
-                hazard_dir=hazard_dir,
-                l1_area_geojson=active_l1_area_geojson,
-                l1_active_timesteps=l1_active_timesteps,
-                societal_allocation_cache=allocation_cache,
-                pop_grid_gdf=pop_grid_gdf,
-                cell_id_column=cell_id_column,
-                island_id_column=island_id_column,
-                nearest_max_distance=nearest_max_distance,
-            )
-            if asset_island_ids is None or rfids_islands is None:
-                raise RuntimeError("Island assignment returned no road state")
-            state.island_ids = asset_island_ids
-            cache_updated['island_cache'] = island_cache
-            if allocation_cache is not None:
-                cache_updated['societal_allocation_cache'] = allocation_cache
-            if verbose:
-                print(f"Successfully resolved islands for {cache_key}")
+                asset_island_ids, rfids_islands = match_island_ids_assets(
+                    temp_gdf_for_islands,
+                    boundary_asset_indices=boundary_asset_indices,
+                    boundary_islands_rfids=boundary_islands_rfids,
+                    hazard_threshold=flood_threshold,
+                    hazard_column=haz_col_str,
+                    config=_config,
+                    island_cache=island_cache,
+                    cache_dir=interim_dir,
+                    hazard_dir=hazard_dir,
+                    l1_area_geojson=active_l1_area_geojson,
+                    l1_active_timesteps=l1_active_timesteps,
+                    societal_allocation_cache=allocation_cache,
+                    pop_grid_gdf=pop_grid_gdf,
+                    cell_id_column=cell_id_column,
+                    island_id_column=island_id_column,
+                    nearest_max_distance=nearest_max_distance,
+                )
+                if asset_island_ids is None or rfids_islands is None:
+                    raise RuntimeError("Island assignment returned no road state")
+                state.island_ids = asset_island_ids
+                cache_updated['island_cache'] = island_cache
+                if allocation_cache is not None:
+                    cache_updated['societal_allocation_cache'] = allocation_cache
+                if verbose:
+                    print(f"Successfully resolved islands for {cache_key}")
         except Exception as e:
             print(f"Error computing islands for {cache_key}: {e}")
             print("Falling back to simple island assignment")
@@ -363,28 +368,29 @@ def _update_hazard_map_states(
             # together in a single pass so they share the same overlap-cache
             # key (current_map/previous_map) -- the transition-probability
             # computation happens once and is reused across every pool.
-            combined_crew_state = _assemble_nested_crew_state(available_repair_crews, crew_pools)
-            combined_crew_state = update_repair_crew_islands(
-                combined_crew_state,
-                previous_rfids_islands,
-                rfids_islands,
-                rfids_lengths,
-                verbose=verbose,
-                overlap_cache=overlap_cache,
-                current_map=cache_key,
-                previous_map=previous_road_state_key,
-                hazard_threshold=flood_threshold,
-                hazard_dir=hazard_dir,
-                _config=_config,
-                cache_updated=cache_updated,
-                l1_area_geojson=l1_area_geojson,
-                l1_active_timesteps=l1_active_timesteps,
-            )
-            available_repair_crews = _disassemble_nested_crew_state(combined_crew_state, crew_pools)
+            with profiler.section("simulation._update_hazard_map_states.crew_island_reassignment"):
+                combined_crew_state = _assemble_nested_crew_state(available_repair_crews, crew_pools)
+                combined_crew_state = update_repair_crew_islands(
+                    combined_crew_state,
+                    previous_rfids_islands,
+                    rfids_islands,
+                    rfids_lengths,
+                    verbose=verbose,
+                    overlap_cache=overlap_cache,
+                    current_map=cache_key,
+                    previous_map=previous_road_state_key,
+                    hazard_threshold=flood_threshold,
+                    hazard_dir=hazard_dir,
+                    _config=_config,
+                    cache_updated=cache_updated,
+                    l1_area_geojson=l1_area_geojson,
+                    l1_active_timesteps=l1_active_timesteps,
+                )
+                available_repair_crews = _disassemble_nested_crew_state(combined_crew_state, crew_pools)
 
-            previous_map_counter = map_counter
-            previous_rfids_islands = rfids_islands.copy()
-            temp_gdf['island_id'] = state.island_ids                
+                previous_map_counter = map_counter
+                previous_rfids_islands = rfids_islands.copy()
+                temp_gdf['island_id'] = state.island_ids                
 
         else:
             print(f"Reachability not available for {cache_key}, using global crew assignment")
@@ -412,72 +418,74 @@ def _update_hazard_map_states(
     # This only ever lowers `state.intrinsic_operational` (physical failure), never
     # `state.operational` directly -- the effective state is recomputed from the
     # intrinsic state every timestep in `_update_operational_state`.
-    if np.any(assets_to_evaluate):
-        fragility_operational = np.ones_like(state.intrinsic_operational, dtype=bool)
-        hazard_subset = state.current_hazard_values[assets_to_evaluate]
-        asset_type_subset = asset_type[assets_to_evaluate]
-        # Only asset types the knowledge graph explicitly defers to physical
-        # damage/repair (hazard_blocks_operation=False) are fragility-eligible;
-        # types it governs deterministically (hazard_blocks_operation=True,
-        # e.g. hospital/ems/primary_care/pharmacy/supermarket) are excluded so
-        # they aren't also forced through a repair cycle. See
-        # `_fragility_exclusions_from_knowledge_graph`.
-        fragility_exclusions = _fragility_exclusions_from_knowledge_graph(_config, asset_type_subset)
-        # Non-destructively layer per-asset-type steepness overrides (e.g. from
-        # EMA uncertainties, see combine_per_type_fragility_steepness_kwargs)
-        # on top of the configured fragility_models, without mutating the
-        # shared config dict (it is reused across every EMA experiment).
-        base_fragility_models = _config['recovery_parameters'].get('fragility_models') or {}
-        fragility_models = base_fragility_models
-        if fragility_steepness_overrides:
-            fragility_models = dict(base_fragility_models)
-            for override_type, steepness in fragility_steepness_overrides.items():
-                fragility_models[override_type] = {
-                    **fragility_models.get(override_type, {}),
-                    'steepness': steepness,
-                }
-        fragility_result = default_fragility_function(
-            hazard_subset,
-            asset_type_subset,
-            k=fragility_param_k,
-            major_timestep=major_timestep,
-            fragility_models=fragility_models,
-            fragility_exclusions=fragility_exclusions,
-        )
-        fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
-        state.intrinsic_operational = np.minimum(state.intrinsic_operational, fragility_operational)
+    with profiler.section("simulation._update_hazard_map_states.fragility"):
+        if np.any(assets_to_evaluate):
+            fragility_operational = np.ones_like(state.intrinsic_operational, dtype=bool)
+            hazard_subset = state.current_hazard_values[assets_to_evaluate]
+            asset_type_subset = asset_type[assets_to_evaluate]
+            # Only asset types the knowledge graph explicitly defers to physical
+            # damage/repair (hazard_blocks_operation=False) are fragility-eligible;
+            # types it governs deterministically (hazard_blocks_operation=True,
+            # e.g. hospital/ems/primary_care/pharmacy/supermarket) are excluded so
+            # they aren't also forced through a repair cycle. See
+            # `_fragility_exclusions_from_knowledge_graph`.
+            fragility_exclusions = _fragility_exclusions_from_knowledge_graph(_config, asset_type_subset)
+            # Non-destructively layer per-asset-type steepness overrides (e.g. from
+            # EMA uncertainties, see combine_per_type_fragility_steepness_kwargs)
+            # on top of the configured fragility_models, without mutating the
+            # shared config dict (it is reused across every EMA experiment).
+            base_fragility_models = _config['recovery_parameters'].get('fragility_models') or {}
+            fragility_models = base_fragility_models
+            if fragility_steepness_overrides:
+                fragility_models = dict(base_fragility_models)
+                for override_type, steepness in fragility_steepness_overrides.items():
+                    fragility_models[override_type] = {
+                        **fragility_models.get(override_type, {}),
+                        'steepness': steepness,
+                    }
+            fragility_result = default_fragility_function(
+                hazard_subset,
+                asset_type_subset,
+                k=fragility_param_k,
+                major_timestep=major_timestep,
+                fragility_models=fragility_models,
+                fragility_exclusions=fragility_exclusions,
+            )
+            fragility_operational[assets_to_evaluate] = fragility_result.astype(bool)
+            state.intrinsic_operational = np.minimum(state.intrinsic_operational, fragility_operational)
 
     # Update damage ratio and repair time for assets flooded above threshold this timestep
-    if np.any(flooded_mask):
-        dr_new = default_damage_ratio_function(state.current_hazard_values[flooded_mask], damage_ratio_coefficients)
-        newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
-        flooded_indices = np.where(flooded_mask)[0]
-        new_damage_check = dr_new > state.damage_ratio[flooded_mask]
-        newly_damaged_mask[flooded_indices] = new_damage_check
-        state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
-        repair_time = state.recovery_wait_vectors["repair_time"]
-        repair_time[flooded_mask] = default_repair_time_function(
-            state.damage_ratio[flooded_mask], repair_time_coefficients
-        )
-        if verbose:
-            try:
-                damage_count = newly_damaged_mask.sum()
-                print(f"  New damage at timestep {timestep}: {damage_count} assets")
-                if damage_count > 0:
-                    print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
-                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
-            except Exception as e:
-                print(f"  Error occurred while logging damage information: {e}, {timestep}")
+    with profiler.section("simulation._update_hazard_map_states.damage_repair_update"):
+        if np.any(flooded_mask):
+            dr_new = default_damage_ratio_function(state.current_hazard_values[flooded_mask], damage_ratio_coefficients)
+            newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
+            flooded_indices = np.where(flooded_mask)[0]
+            new_damage_check = dr_new > state.damage_ratio[flooded_mask]
+            newly_damaged_mask[flooded_indices] = new_damage_check
+            state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
+            repair_time = state.recovery_wait_vectors["repair_time"]
+            repair_time[flooded_mask] = default_repair_time_function(
+                state.damage_ratio[flooded_mask], repair_time_coefficients
+            )
+            if verbose:
+                try:
+                    damage_count = newly_damaged_mask.sum()
+                    print(f"  New damage at timestep {timestep}: {damage_count} assets")
+                    if damage_count > 0:
+                        print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
+                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+                except Exception as e:
+                    print(f"  Error occurred while logging damage information: {e}, {timestep}")
 
-    # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
-    repair_time = state.recovery_wait_vectors["repair_time"]
-    recalc_repair_mask = (repair_time > repair_threshold)
-    if np.any(recalc_repair_mask):
-        repair_times_under_repair = repair_time[recalc_repair_mask]
-        damage_ratios_from_repair = vectorized_damage_ratio_solver(
-            repair_times_under_repair, repair_time_coefficients
-        )
-        state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
+        # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
+        repair_time = state.recovery_wait_vectors["repair_time"]
+        recalc_repair_mask = (repair_time > repair_threshold)
+        if np.any(recalc_repair_mask):
+            repair_times_under_repair = repair_time[recalc_repair_mask]
+            damage_ratios_from_repair = vectorized_damage_ratio_solver(
+                repair_times_under_repair, repair_time_coefficients
+            )
+            state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
 
     accessibility_model = _config['simulation_config']['accessibility_model']
     if accessibility_model is not None:
@@ -1245,6 +1253,7 @@ def _process_timestep(
     crew_pools=None,
     societal_access_config=None,
     fragility_steepness_overrides=None,
+    profiler=NULL_PROFILER,
 ):
     """Process hazard map and update state/caches if on major timestep."""
     cache_updated = {}
@@ -1262,6 +1271,7 @@ def _process_timestep(
             l1_active_timesteps=l1_active_timesteps,
             crew_pools=crew_pools,
             societal_access_config=societal_access_config,
+            profiler=profiler,
         )
         flooded_mask = state.current_hazard_values > flood_threshold
         cache_updated = timestep_cache_updated
@@ -1398,6 +1408,7 @@ def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
 
 def _update_operational_state(
     state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None, dependency_edges=None,
+    profiler=NULL_PROFILER,
 ):
     """Evaluate hazard + dependency availability each timestep using current state vectors.
 
@@ -1464,6 +1475,7 @@ def _update_operational_state(
         restart_active_masks=state.dependency_restart_active,
         previous_dependency_available=previous_dependency_available,
         restart_delay_steps=restart_delay_steps,
+        profiler=profiler,
     )
 
     state.intrinsic_operational = report["intrinsic_operational"]
@@ -1865,6 +1877,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                         crew_pools=crew_pools,
                         societal_access_config=societal_access_config,
                         fragility_steepness_overrides=fragility_steepness_overrides,
+                        profiler=profiler,
                     )
                 
                 # Merge cache updates
@@ -1913,6 +1926,7 @@ def simulate_asset_damage_recovery_access_breakdown(
                     _update_operational_state(
                         state, asset_type, flooded_mask, _config, repair_threshold,
                         knowledge_graph=_knowledge_graph, dependency_edges=_dependency_edges,
+                        profiler=profiler,
                     )
 
                 # 6. Update unreachable assets (island method)

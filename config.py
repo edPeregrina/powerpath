@@ -148,7 +148,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'number_repair_crews': 20,
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
-            'verbose': True,
+            'verbose': False,
             'accessibility_model': None,  # Default to None, can be set to grid_hex.accessibility_model
             # Event connectivity-boundary policy (see src.utils.filter_hazard_graph):
             #   event_footprint_path=None restricts nothing (no footprint).
