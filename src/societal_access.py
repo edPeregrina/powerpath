@@ -211,6 +211,28 @@ def _column_hash(df: pd.DataFrame, column: str) -> str:
     return digest.hexdigest()[:16]
 
 
+# ``pop_grid_gdf`` is an EMA ``Constant`` -- the same object on every call
+# across every timestep/experiment of a run -- so its geometry/cell-id
+# hashes are invariant. Memoize them by identity (keyed by ``id()``, with an
+# identity check against the stored object to guard against id reuse after
+# garbage collection) so per-timestep callers such as
+# ``island_analysis.match_island_ids_assets`` don't re-hash the whole
+# population grid on every call.
+_POP_GRID_HASH_CACHE: Dict[int, Tuple[gpd.GeoDataFrame, str, str, str]] = {}
+
+
+def pop_grid_hashes(pop_grid_gdf: gpd.GeoDataFrame, cell_id_column: str) -> Tuple[str, str]:
+    """Return ``(pop_grid_geom_hash, pop_cell_id_hash)``, memoized by identity."""
+    cache_key = id(pop_grid_gdf)
+    cached = _POP_GRID_HASH_CACHE.get(cache_key)
+    if cached is not None and cached[0] is pop_grid_gdf and cached[1] == cell_id_column:
+        return cached[2], cached[3]
+    geom_hash = _geometry_hash(pop_grid_gdf)
+    cell_id_hash = _column_hash(pop_grid_gdf, cell_id_column)
+    _POP_GRID_HASH_CACHE[cache_key] = (pop_grid_gdf, cell_id_column, geom_hash, cell_id_hash)
+    return geom_hash, cell_id_hash
+
+
 def build_allocation_cache_key(
     pop_grid_gdf: gpd.GeoDataFrame,
     cell_id_column: str,

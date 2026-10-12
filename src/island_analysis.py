@@ -618,14 +618,17 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         return asset_island_ids, rfids_islands
 
     if cache_hit and needs_transient_islands:
-        from src.societal_access import _find_allocation_cache_entry
+        from src.societal_access import _find_allocation_cache_entry, pop_grid_hashes
 
+        _pop_geom_hash, _pop_cell_id_hash = pop_grid_hashes(pop_grid_gdf, cell_id_column)
         allocation_cache_key, _ = _find_allocation_cache_entry(
             societal_allocation_cache,
             pop_grid_gdf,
             cell_id_column,
             cache_key,
             nearest_max_distance,
+            pop_grid_geom_hash=_pop_geom_hash,
+            pop_cell_id_hash=_pop_cell_id_hash,
         )
         if allocation_cache_key is not None:
             if verbose:
@@ -677,8 +680,9 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 print(f"Saved island assignment to cache with key {cache_key}")
 
         if needs_transient_islands:
-            from src.societal_access import get_or_build_allocation
+            from src.societal_access import get_or_build_allocation, pop_grid_hashes
 
+            _pop_geom_hash, _pop_cell_id_hash = pop_grid_hashes(pop_grid_gdf, cell_id_column)
             _, allocation_cache_key, allocation_cache_updated = get_or_build_allocation(
                 societal_allocation_cache,
                 pop_grid_gdf,
@@ -687,6 +691,8 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 island_id_column=island_id_column,
                 nearest_max_distance=nearest_max_distance,
                 road_state_key=cache_key,
+                pop_grid_geom_hash=_pop_geom_hash,
+                pop_cell_id_hash=_pop_cell_id_hash,
             )
             if allocation_cache_updated and cache_dir is not None:
                 # Persist immediately, mirroring the island cache's
