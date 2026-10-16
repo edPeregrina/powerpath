@@ -1,0 +1,17 @@
+[
+  {
+    "societal_access_pct__hospital__total": 100.0,
+    "societal_access_pct__electricity__total": 100.0,
+    "societal_access_pct__education__total": 100.0
+  },
+  {
+    "societal_access_pct__hospital__total": 0.0,
+    "societal_access_pct__electricity__total": 0.0,
+    "societal_access_pct__education__total": 16.0
+  },
+  {
+    "societal_access_pct__hospital__total": 100.0,
+    "societal_access_pct__electricity__total": 100.0,
+    "societal_access_pct__education__total": 100.0
+  }
+]

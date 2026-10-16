@@ -571,6 +571,13 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
         },
         {
+            "relation": "hazard",
+            "hazard_type": "flooding",
+            "source_type": "school",
+            "hazard_blocks_operation": True,
+            "return_to_operational": {"trigger": TRIGGER_IMMEDIATE},
+        },
+        {
             "relation": "dependency",
             "source_type": "msls",
             "target_type": "hospital",
@@ -596,6 +603,13 @@ def build_default_knowledge_graph() -> DependencyKnowledgeGraph:
             "relation": "dependency",
             "source_type": "msls",
             "target_type": "supermarket",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        },
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "school",
             "topology": "voronoi",
             "availability_policy": "exclusive",
         },
