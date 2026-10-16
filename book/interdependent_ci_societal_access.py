@@ -78,7 +78,14 @@ from ema_workbench import (
 )
 from ema_workbench.util.utilities import save_results
 
-from config import get_config, get_societal_access_config, print_config_summary, setup_directories, validate_config
+from config import (
+    get_config,
+    get_development_config,
+    get_societal_access_config,
+    print_config_summary,
+    setup_directories,
+    validate_config,
+)
 from src.caching import load_simulation_caches
 from src.data_loader import load_electricity_assets, load_hazard_maps, load_osm_assets
 from src.dependency_knowledge_graph import build_default_knowledge_graph
@@ -214,6 +221,12 @@ def parse_args():
                               "quick smoke-test/optimisation runs (small --scenarios / policy counts).")
     parser.add_argument("--log-level", type=str, default="INFO",
                          choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging verbosity. Default: INFO.")
+    parser.add_argument("--dev-config", action="store_true",
+                         help="Use get_development_config() (data/test_samples) instead of the "
+                              "full-extent get_config(). Intended for quick smoke tests/parity checks.")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="Seed numpy's global RNG before EMA sampling, for reproducible "
+                              "scenario draws across runs (e.g. before/after comparisons).")
     return parser.parse_args()
 
 
@@ -544,7 +557,7 @@ def main():
     def _checkpoint(label):
         LOGGER.info("[warm-up] %s (+%.1fs)", label, time.time() - t_start)
 
-    config = get_config()
+    config = get_development_config() if args.dev_config else get_config()
     is_valid, missing_dirs, warnings = validate_config(config)
     if not is_valid:
         LOGGER.warning("Configuration issues detected: missing=%s warnings=%s", missing_dirs, warnings)
@@ -621,6 +634,11 @@ def main():
 
     LOGGER.info("Starting EMA experiment execution %d (%d scenarios x %d policies = %d runs)",
                 execution_id, args.scenarios, len(policies), args.scenarios * len(policies))
+    if args.seed is not None:
+        import numpy as np
+
+        np.random.seed(args.seed)
+        LOGGER.info("Seeded numpy's global RNG with %d for reproducible scenario sampling.", args.seed)
     with SequentialEvaluator(model) as evaluator:
         experiments, outcomes = evaluator.perform_experiments(
             scenarios=args.scenarios, policies=policies, uncertainty_sampling=Samplers.LHS,
