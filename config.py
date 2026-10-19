@@ -16,6 +16,19 @@ import shutil
 
 from src.dependency_knowledge_graph import build_default_knowledge_graph
 
+# weight_scale_factor per school asset type (EPSG:28992 m^2), derived from
+# each bucket's real median nearest-neighbor spacing squared -- see
+# book/preprocessing/extract_amenities_from_extent.ipynb. Order-of-magnitude
+# reasoning only, not independently calibrated:
+#   school:     median NN spacing ~450m  (n=225)
+#   school_vso: median NN spacing ~1040m (n=19)
+#   school_so:  median NN spacing ~2780m (n=8, thin sample)
+SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS = {
+    "school": 2e5,
+    "school_vso": 1e6,
+    "school_so": 8e6,
+}
+
 
 def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=None,
                                 cell_id_column="cell_id", namespace="societal_access"):
@@ -54,6 +67,19 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
 
     shared_db_path = config["interim_dir"] / "societal_realized_state_cache.sqlite"
 
+    service_area_function_provider_types = {
+        "electricity": {"provider_types": {"msls"}, "method": "simple_voronoi"},
+    }
+    for asset_type, scale_factor in SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS.items():
+        if asset_type not in taxonomy:
+            continue
+        service_area_function_provider_types[taxonomy[asset_type]] = {
+            "provider_types": {asset_type},
+            "method": "weighted_voronoi",
+            "weight_column": "pupils",
+            "weight_scale_factor": scale_factor,
+        }
+
     return {
         "pop_grid_gdf": pop_grid_gdf,
         "cell_id_column": cell_id_column,
@@ -63,6 +89,7 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         "asset_type_column": "type",
         "all_functions": sorted(set(taxonomy.values())),
         "allocation_cache": allocation_cache,
+        "service_area_function_provider_types": service_area_function_provider_types,
         "shared_realized_state_cache_config": {
             "enabled": True,
             "backend": "sqlite",
@@ -216,7 +243,9 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 'water_supply_point': 'climate_resilience',
                 'drinking_water': 'climate_resilience',
                 # Social continuity
-                'school': 'education',
+                'school': 'education_bo',
+                'school_so': 'education_so',
+                'school_vso': 'education_vso',
                 'basisonderwijs': 'education',
                 'voortgezet_onderwijs': 'education',
                 'repair_depot': 'repair_logistics',

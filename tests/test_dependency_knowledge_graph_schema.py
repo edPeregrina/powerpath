@@ -225,6 +225,24 @@ def test_default_knowledge_graph_covers_school_like_hospital():
     assert school_dep_rules[0].availability_policy == "exclusive"
 
 
+@pytest.mark.parametrize("school_asset_type", ["school_so", "school_vso"])
+def test_default_knowledge_graph_covers_school_subtypes_like_school(school_asset_type):
+    """school_so/school_vso (the SO/VSO weighted-Voronoi education functions)
+    get the same flooding hazard rule and msls Voronoi dependency as the
+    regular school/BO asset type."""
+    kg = build_default_knowledge_graph()
+
+    hazard_rules = kg.get_hazard_rules("flooding", school_asset_type)
+    assert len(hazard_rules) == 1
+    assert hazard_rules[0].hazard_blocks_operation is True
+    assert hazard_rules[0].return_to_operational.trigger == TRIGGER_IMMEDIATE
+
+    dep_rules = kg.get_dependency_rules(source_type="msls", target_type=school_asset_type)
+    assert len(dep_rules) == 1
+    assert dep_rules[0].topology == "voronoi"
+    assert dep_rules[0].availability_policy == "exclusive"
+
+
 # ---------------------------------------------------------------------------
 # Rule validation
 # ---------------------------------------------------------------------------

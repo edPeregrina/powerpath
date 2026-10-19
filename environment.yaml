@@ -30,6 +30,7 @@ dependencies:
     - networkx
     - tqdm
     - contextily
+    - osmnx
     # Pinned <3.0: ema_workbench 3.0 merged Policy/Scenario into a single
     # Sample class, which breaks all existing Policy(...) usage in this repo
     # (book/*.py, book/*.ipynb). See CLAUDE.md for notes on migrating.

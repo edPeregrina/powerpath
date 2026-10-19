@@ -193,16 +193,17 @@ def create_voronoi_for_asset_type(
     polygons = []
     valid_asset_ids = []
 
-    centroids_union = (
-        assets_filtered.geometry.union_all()
-        if hasattr(assets_filtered.geometry, "union_all")
-        else assets_filtered.geometry.unary_union
-    )
-    convex_hull = centroids_union.convex_hull.buffer(200)
+    # The convex hull is only a fallback clip region for boundary=None; when a
+    # real boundary is supplied, cells should cover the whole boundary (points
+    # outside the hull of the generators are still closer to *some* site and
+    # must be assigned to it, not left uncovered).
     if boundary is None:
-        boundary = convex_hull
-    else:
-        boundary = boundary.intersection(convex_hull)
+        centroids_union = (
+            assets_filtered.geometry.union_all()
+            if hasattr(assets_filtered.geometry, "union_all")
+            else assets_filtered.geometry.unary_union
+        )
+        boundary = centroids_union.convex_hull.buffer(200)
 
     if verbose:
         print(f"Sample points: {points[:3]}")
@@ -450,16 +451,20 @@ def create_weighted_voronoi_for_asset_type(
     mean_weight = mean_weight if mean_weight != 0 else 1.0
     weights = (raw_weights / mean_weight) * float(weight_scale_factor)
 
-    centroids_union = (
-        assets_filtered.geometry.union_all()
-        if hasattr(assets_filtered.geometry, "union_all")
-        else assets_filtered.geometry.unary_union
-    )
-    convex_hull = centroids_union.convex_hull.buffer(200)
     normalized_boundary = _normalize_voronoi_boundary(boundary)
-    clip_boundary = (
-        convex_hull if normalized_boundary is None else normalized_boundary.intersection(convex_hull)
-    )
+    # The convex hull is only a fallback clip region for boundary=None; when a
+    # real boundary is supplied, cells should cover the whole boundary (points
+    # outside the hull of the generators are still closer to *some* site and
+    # must be assigned to it, not left uncovered).
+    if normalized_boundary is None:
+        centroids_union = (
+            assets_filtered.geometry.union_all()
+            if hasattr(assets_filtered.geometry, "union_all")
+            else assets_filtered.geometry.unary_union
+        )
+        clip_boundary = centroids_union.convex_hull.buffer(200)
+    else:
+        clip_boundary = normalized_boundary
 
     # Bound the half-space intersection with a generous bounding box so it's
     # always well-posed even for providers on the convex-hull edge; the real
