@@ -168,6 +168,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'data_dir': root_dir / 'raw_data/ZH_Delfland',
         'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
         'osm_asset_dir': root_dir / 'data' / 'static',
+        # Use committed *_sample.gpkg population/land-use files (dev mode).
+        'use_sample_population_data': False,
 
         # Simulation configuration
         'simulation_config': {
@@ -558,6 +560,7 @@ def get_development_config():
     config['analysis_config']['max_simulation_days'] = 3  # Limit for faster testing
     config['analysis_config']['performance_monitoring'] = True
     config['simulation_config']['verbose'] = True
+    config['use_sample_population_data'] = True
 
     # Smallest data samples directories
     config['data_dir'] = config['root_dir'] / 'data' / 'test_samples'

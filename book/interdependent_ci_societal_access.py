@@ -98,6 +98,7 @@ from src.caching import (
     save_island_cache,
     save_overlap_cache,
     save_societal_allocation_cache,
+    get_asset_centroid_hash,
 )
 from src.data_loader import load_electricity_assets, load_hazard_maps, load_osm_assets
 from src.dependency_knowledge_graph import build_default_knowledge_graph
@@ -391,7 +392,8 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
     """
     population_buffer = gpd.GeoDataFrame(geometry=[model_extent], crs="EPSG:28992")
 
-    population_data_path = root_dir / "data" / "population" / "cbs_vk100_2025_v1.gpkg"
+    pop_suffix = "_sample" if config.get("use_sample_population_data") else ""
+    population_data_path = root_dir / "data" / "population" / f"cbs_vk100_2025_v1{pop_suffix}.gpkg"
     LOGGER.info("Loading population data from %s", population_data_path)
     population_data = gpd.read_file(
         population_data_path, driver="GPKG", bbox=tuple(model_extent.bounds),
@@ -425,8 +427,12 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
     )
 
     # Land use / VOLL monetary-impact lookup, computed on the substation Voronoi only.
-    land_use_path = root_dir / "data" / "land_use" / "CBS_Publicatiebestand_BBG2017_v1.gpkg"
-    asset_to_lu_cache_path = config["interim_dir"] / f"{land_use_path.stem}_asset_to_lu.pkl"
+    land_use_suffix = "_sample" if config.get("use_sample_population_data") else ""
+    land_use_path = root_dir / "data" / "land_use" / f"CBS_Publicatiebestand_BBG2017_v1{land_use_suffix}.gpkg"
+    # Voronoi geometry hash keeps the cache from going stale when the extent
+    # (e.g. model_extent_raw) changes but the land-use filename doesn't.
+    voronoi_hash = get_asset_centroid_hash(substation_voronoi[["geometry"]])
+    asset_to_lu_cache_path = config["interim_dir"] / f"{land_use_path.stem}_{voronoi_hash}_asset_to_lu.pkl"
 
     if asset_to_lu_cache_path.exists():
         LOGGER.info("Loading asset_to_lu from cache: %s", asset_to_lu_cache_path)
