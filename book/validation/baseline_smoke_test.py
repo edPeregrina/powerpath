@@ -47,6 +47,7 @@ Usage
 """
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -265,7 +266,9 @@ def verify(results):
         for metric in METRICS_TO_CAPTURE:
             exp_val = expected[metric]
             act_val = actual[metric]
-            if abs(exp_val - act_val) > TOLERANCE:
+            finite_exp = math.isfinite(exp_val)
+            finite_act = math.isfinite(act_val)
+            if finite_exp != finite_act or (finite_exp and abs(exp_val - act_val) > TOLERANCE):
                 ok = False
                 print(
                     f"FAIL t={t} {metric}: baseline={exp_val!r} current={act_val!r}",
