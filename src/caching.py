@@ -11,6 +11,8 @@ The cache is saved as pickle files for efficient loading and saving.
 """
 import pickle
 import json
+import os
+import time
 from pathlib import Path
 import hashlib
 import warnings
@@ -21,6 +23,49 @@ def _get_hazard_dir_name(hazard_dir):
     if hazard_dir:
         return Path(hazard_dir).name
     return "unknown"
+
+
+def _atomic_merge_save(cache_dict, cache_file, *, lock_timeout=30.0):
+    """Merge cache_dict into cache_file's on-disk contents and save atomically.
+
+    Concurrent MultiprocessingEvaluator workers each hold an independent
+    in-memory copy of a cache dict, so a plain overwrite would let the last
+    writer clobber entries other workers already saved. This instead: (1)
+    takes an exclusive lock (atomic lock-file creation, busy-wait), (2) loads
+    whatever is currently on disk and merges it under cache_dict (so entries
+    from sibling workers are kept, not lost), (3) writes the merged result to
+    a temp file and renames it into place (atomic on both POSIX and Windows).
+    """
+    lock_path = Path(str(cache_file) + ".lock")
+    waited = 0.0
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if waited >= lock_timeout:
+                break  # stale lock from a crashed process; proceed anyway
+            time.sleep(0.05)
+            waited += 0.05
+    try:
+        merged = dict(cache_dict)
+        if cache_file.exists():
+            try:
+                with open(cache_file, "rb") as f:
+                    on_disk = pickle.load(f)
+                merged = {**on_disk, **merged}
+            except Exception:
+                pass  # corrupt/partial on-disk file: fall back to this process's cache
+        tmp_path = cache_file.with_suffix(cache_file.suffix + f".tmp{os.getpid()}")
+        with open(tmp_path, "wb") as f:
+            pickle.dump(merged, f)
+        os.replace(tmp_path, cache_file)
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 # Cache saves below re-pickle their entire dict on every call, which gets
 # expensive as a cache grows within one run. save_cache_if_due() batches
@@ -247,8 +292,7 @@ def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
     
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
+    _atomic_merge_save(cache_dict, cache_file)
     
     print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
 
@@ -368,8 +412,7 @@ def save_island_cache(cache_dict, cache_dir, hazard_dir=None, verbose=False):
     cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
         
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache_dict, f)
+        _atomic_merge_save(cache_dict, cache_file)
         if verbose:
             print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
@@ -415,8 +458,7 @@ def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None, verbo
     cache_file = cache_dir / f"societal_allocation_cache_{hazard_dir_name}.pkl"
 
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache_dict, f)
+        _atomic_merge_save(cache_dict, cache_file)
         if verbose:
             print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
@@ -490,8 +532,7 @@ def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
     
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
+    _atomic_merge_save(cache_dict, cache_file)
     
     print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
 
