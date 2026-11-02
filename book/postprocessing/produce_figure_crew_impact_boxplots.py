@@ -46,7 +46,14 @@ from ema_workbench.util.utilities import load_results  # noqa: E402
 from config import get_config, setup_directories  # noqa: E402
 
 DEFAULT_RESULTS_NAME = "ema_results_1776271700_combinations_4.tar.gz"
-BASELINE_POLICY = "monetary_impacts_policy"
+# Newest naming first (current default repair_priority is "population
+# impacts islands"); falls back through legacy names for older archives.
+BASELINE_POLICY_CANDIDATES = [
+    "population_impacts_islands_policy",
+    "monetary_impacts_policy",
+    "baseline_no_prioritisation",
+]
+BASELINE_POLICY = BASELINE_POLICY_CANDIDATES[0]
 CREW_MIN, CREW_MAX = 10, 20
 
 PLOT_STYLE = {
@@ -99,6 +106,17 @@ def parse_policy(pol: str):
                     l2_cov=int(m.group(5)), l2_elev=float(m.group(6)))
 
     return None
+
+
+def resolve_baseline_policy(available_policies) -> str:
+    """Pick the first BASELINE_POLICY_CANDIDATES entry present in the archive."""
+    available = set(available_policies)
+    for candidate in BASELINE_POLICY_CANDIDATES:
+        if candidate in available:
+            return candidate
+    raise ValueError(
+        f"None of the baseline candidates {BASELINE_POLICY_CANDIDATES} found in archive."
+    )
 
 
 def pareto_mask(costs: np.ndarray) -> np.ndarray:
@@ -274,7 +292,11 @@ def main() -> None:
     experiments_df = pd.DataFrame(experiments)
     outcomes = {k: np.array(v) for k, v in outcomes_raw.items()}
 
-    crew_mask = ((experiments_df["number_repair_crews"] >= CREW_MIN) &
+    global BASELINE_POLICY
+    BASELINE_POLICY = resolve_baseline_policy(experiments_df["policy"].unique())
+    print(f"Baseline policy: '{BASELINE_POLICY}'")
+
+    crew_mask =  ((experiments_df["number_repair_crews"] >= CREW_MIN) &
                  (experiments_df["number_repair_crews"] <= CREW_MAX))
     print(f"Loaded {len(experiments_df)} experiments "
           f"({crew_mask.sum()} within crew range {CREW_MIN}-{CREW_MAX})")

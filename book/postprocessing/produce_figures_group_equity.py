@@ -87,12 +87,19 @@ REFERENCE_GROUP = "total"
 # filtered/reordered against this rather than used in alphabetical order.
 GROUP_DISPLAY_ORDER = ["total", "elderly", "children", "working_age"]
 
-# "monetary_impacts_policy" (repair_crew_assignment_method="monetary impacts
-# islands") preferred as the no-adaptation baseline; falls back to
-# "baseline_no_prioritisation" (plain "islands") if absent from the archive.
-BASELINE_POLICY_CANDIDATES = ["monetary_impacts_policy", "baseline_no_prioritisation"]
+# Preferred no-adaptation baseline candidates, newest-naming first (current
+# default repair_priority is "population impacts islands" ->
+# "population_impacts_islands_policy"); falls back through legacy names and
+# finally "baseline_no_prioritisation" (plain "islands", always present).
+BASELINE_POLICY_CANDIDATES = [
+    "population_impacts_islands_policy",
+    "monetary_impacts_policy",
+    "baseline_no_prioritisation",
+]
 NON_ADAPTATION_POLICIES = {
     "baseline_no_prioritisation",
+    "population_impacts_islands_policy",
+    "population_impacts_unconstrained",
     "monetary_impacts_policy",
     "monetary_impacts_unconstrained",
 }
