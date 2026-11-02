@@ -583,9 +583,15 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
                 elif metric in detailed_ts:
                     result[metric][t_idx, :] = np.asarray(detailed_ts[metric])[:n_assets]
 
-            # Asset metrics (2D aggregated): unchanged scalar-based path.
+            # Asset metrics (2D aggregated): unchanged scalar-based path, plus
+            # detailed_ts fallback for metrics only present per-asset
+            # (intrinsic_operational/hazard_available/dependency_available
+            # have no summary column, so _get_metric_value would always
+            # return None for them otherwise).
             for metric in keep_2d_vars:
                 value = _get_metric_value(ts, metric, summary_to_metric, count_to_binary)
+                if value is None and metric in detailed_ts:
+                    value = detailed_ts[metric]
                 
                 if value is None:
                     continue  # Skip if data not available
