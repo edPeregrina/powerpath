@@ -15,6 +15,7 @@ data/population/cbs_vk100_2025_v1.gpkg
 /data/static/*
 !/data/static/osm_assets.gpkg
 /data/static_OD/
+/cache/
 /__pycache__
 .vscode/settings.json
 /data/test_samples/adaptation/L1_peilgeb
