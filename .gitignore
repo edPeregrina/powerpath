@@ -11,12 +11,15 @@
 !/data/output/to_repo/
 !/data/output/to_repo/**
 
-data/population/cbs_vk100_2024_v1.gpkg
+data/population/cbs_vk100_2025_v1.gpkg
+/data/static/*
+!/data/static/osm_assets.gpkg
+/data/static_OD/
 /__pycache__
 .vscode/settings.json
 /data/test_samples/adaptation/L1_peilgeb
 /data/test_samples/adaptation/L2_asset_barriers
-data/population/cbs_vk100_2024.gpkg
+data/population/cbs_vk100_2025.gpkg
 /data/land_use/Stijllagen_BBG2017
 data/land_use/Productbeschrijving Bestand Bodemgebruik 2017 (BBG2017) (2017.NL.V1).pdf
 /data/interim
