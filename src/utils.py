@@ -42,6 +42,12 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
                 transformed_coords = [transformer.transform(x, y) for x, y in coords]
                 transformed_geometry = sg.LineString(transformed_coords)
                 d["length"] = transformed_geometry.length
+                # Cache the projected geometry itself (not just its length) so
+                # downstream consumers (e.g. compute_island_geodataframe_from_graph,
+                # called once per hazard-state cache miss) don't repeat this
+                # transform -- 'geometry' is kept in from_crs for callers that
+                # need it (e.g. event_footprint intersection, assumed EPSG:4326).
+                d["geometry_m"] = transformed_geometry
             else:
                 # Fallback to straight-line distance if geometry doesn't have coords
                 x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
