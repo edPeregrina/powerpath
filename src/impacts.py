@@ -268,6 +268,7 @@ def build_weighted_voronoi_cache_key(
     exclude_column=None,
     asset_cache_key=None,
     buffer_distance=200.0,
+    min_interior_margin=1e-6,
 ):
     """Build a deterministic cache key for weighted-Voronoi (power diagram) generation."""
     from src.caching import get_asset_centroid_hash
@@ -315,6 +316,7 @@ def build_weighted_voronoi_cache_key(
         ),
         "target_crs": "EPSG:28992",
         "buffer_distance": float(buffer_distance),
+        "min_interior_margin": float(min_interior_margin),
     }
     return hashlib.sha256(json.dumps(key_dict, sort_keys=True).encode()).hexdigest()[:24]
 
@@ -406,6 +408,7 @@ def create_weighted_voronoi_for_asset_type(
         weight_scale_factor=weight_scale_factor,
         exclude_column=exclude_column,
         asset_cache_key=asset_cache_key,
+        min_interior_margin=min_interior_margin,
     )
     if use_cache and cache_key in _WEIGHTED_VORONOI_CACHE:
         cached_gdf, cached_diagnostics = _WEIGHTED_VORONOI_CACHE[cache_key]
@@ -438,6 +441,28 @@ def create_weighted_voronoi_for_asset_type(
         assets_filtered.geometry.x.to_numpy(dtype=float),
         assets_filtered.geometry.y.to_numpy(dtype=float),
     ))
+
+    # Exactly-coincident provider locations (e.g. co-located facilities) make
+    # the pairwise half-space between them degenerate: a = 2*(p_j - p_i) is
+    # [0, 0], and with equal weights b is also 0, giving scipy's
+    # HalfspaceIntersection a zero-normal [0, 0, 0] row it cannot resolve --
+    # both providers then fail and are marked "empty". Nudge duplicate points
+    # apart by a deterministic, sub-millimetre offset (ordered by position so
+    # the tie-break is reproducible) before building the half-spaces; this is
+    # negligible against real geometry (CRS units are metres) but guarantees
+    # every pairwise normal vector is non-zero.
+    _COINCIDENT_NUDGE = 1e-6
+    coord_to_positions: dict = {}
+    for pos, pt in enumerate(points):
+        key = (round(float(pt[0]), 6), round(float(pt[1]), 6))
+        coord_to_positions.setdefault(key, []).append(pos)
+    for dup_positions in coord_to_positions.values():
+        if len(dup_positions) < 2:
+            continue
+        for rank, pos in enumerate(sorted(dup_positions)):
+            angle = 2.0 * np.pi * rank / len(dup_positions)
+            points[pos, 0] += _COINCIDENT_NUDGE * np.cos(angle)
+            points[pos, 1] += _COINCIDENT_NUDGE * np.sin(angle)
 
     if weight_column in assets_filtered.columns:
         raw_weights = (
@@ -617,12 +642,17 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
         asset_impacts[asset_id] = total_weighted_impact
 
     # Cells with no Voronoi coverage (e.g. clipped-edge gaps) go to the
-    # nearest polygon instead of being silently dropped.
+    # nearest polygon instead of being silently dropped. Distance is measured
+    # to the polygon geometry itself (not its centroid) -- for elongated or
+    # irregular service areas, centroid-to-centroid distance can pick the
+    # wrong (farther) polygon, matching the pattern already used in
+    # build_voronoi_service_area_map (src/utils.py).
     uncovered = impact_grid[impact_grid["_covered_area"] < impact_grid["cell_area"] * 1e-6]
     if not uncovered.empty:
-        voronoi_centroids = voronoi.geometry.centroid
+        voronoi_geoms = voronoi.geometry
         for _, cell in uncovered.iterrows():
-            nearest_pos = voronoi_centroids.distance(cell.geometry.centroid).idxmin()
+            cell_centroid = cell.geometry.centroid
+            nearest_pos = voronoi_geoms.distance(cell_centroid).idxmin()
             nearest_asset_id = voronoi.loc[nearest_pos, 'asset_id']
             asset_impacts[nearest_asset_id] = asset_impacts.get(nearest_asset_id, 0.0) + cell[impact_column]
     
