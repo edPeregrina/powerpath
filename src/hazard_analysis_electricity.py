@@ -28,14 +28,18 @@ def _zonal_polygon_values(src, band, geometries, stat_method):
     trusting the GeoTIFF's own nodata tag, which does not always match the
     -9999 sentinel used elsewhere in this pipeline (observed file tags of
     0.0, which would incorrectly mask legitimate zero-depth pixels).
+
+    Negative pixels are masked before aggregation so means are computed
+    only over valid depths (e.g. -1/1 depths average to 1, not 0).
     """
     import numpy as np
     import geopandas as gpd
     from exactextract import exact_extract
     from exactextract.raster import NumPyRasterSource
 
+    band_masked = np.where(band < 0, -9999, band)
     raster_source = NumPyRasterSource(
-        band,
+        band_masked,
         xmin=src.bounds.left, ymin=src.bounds.bottom,
         xmax=src.bounds.right, ymax=src.bounds.top,
         nodata=-9999,
