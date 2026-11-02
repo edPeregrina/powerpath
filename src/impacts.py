@@ -584,6 +584,8 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
     # Create spatial index for impact data
     impact_sindex = impact_grid.sindex
     
+    impact_grid["_covered_area"] = 0.0
+
     # Process each Voronoi polygon - use asset_id directly
     asset_impacts = {}
     
@@ -599,7 +601,7 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
         total_weighted_impact = 0.0
         
         # Calculate precise intersections with each potential matching grid cell
-        for _, impact_cell in possible_matches.iterrows():
+        for cell_idx, impact_cell in possible_matches.iterrows():
             if voronoi_geom.intersects(impact_cell.geometry):
                 intersection = voronoi_geom.intersection(impact_cell.geometry)
                 intersect_area = intersection.area
@@ -609,9 +611,20 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
                     impact_cell[impact_column] * intersect_area / impact_cell["cell_area"]
                 )
                 total_weighted_impact += weighted_impact
+                impact_grid.loc[cell_idx, "_covered_area"] += intersect_area
         
         # Store the result directly in the dictionary using asset_id as key
         asset_impacts[asset_id] = total_weighted_impact
+
+    # Cells with no Voronoi coverage (e.g. clipped-edge gaps) go to the
+    # nearest polygon instead of being silently dropped.
+    uncovered = impact_grid[impact_grid["_covered_area"] < impact_grid["cell_area"] * 1e-6]
+    if not uncovered.empty:
+        voronoi_centroids = voronoi.geometry.centroid
+        for _, cell in uncovered.iterrows():
+            nearest_pos = voronoi_centroids.distance(cell.geometry.centroid).idxmin()
+            nearest_asset_id = voronoi.loc[nearest_pos, 'asset_id']
+            asset_impacts[nearest_asset_id] = asset_impacts.get(nearest_asset_id, 0.0) + cell[impact_column]
     
     # Add the impact metrics directly to the Voronoi GeoDataFrame
     voronoi['assigned_impact_metric'] = voronoi['asset_id'].map(asset_impacts).fillna(0)

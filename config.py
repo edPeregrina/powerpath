@@ -61,8 +61,16 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         asset_types = {"msls", *asset_types}
         taxonomy = {k: v for k, v in taxonomy.items() if k in asset_types}
 
-    caches = caches or {}
-    allocation_cache = caches.get("societal_allocation_cache") or {}
+    caches = {} if caches is None else caches
+    allocation_cache = caches.get("societal_allocation_cache")
+    if allocation_cache is None:
+        allocation_cache = {}
+    # Write back so `caches` and this config share the same dict object --
+    # `caches.get("societal_allocation_cache") or {}` silently built a
+    # disconnected dict whenever the loaded cache was empty (`{}` is falsy),
+    # so every allocation built during the run was discarded at flush time
+    # instead of being persisted.
+    caches["societal_allocation_cache"] = allocation_cache
     _seed_flat_connectivity_allocation(pop_grid_gdf, cell_id_column, allocation_cache)
 
     shared_db_path = config["interim_dir"] / "societal_realized_state_cache.sqlite"
@@ -296,6 +304,52 @@ def get_config(root_dir=None, hazard_dir_override=None):
     config['output_dir'] = config['root_dir'] / 'data' / 'output' / f'output_{hazard_dir_name}'
     
     return config
+
+
+def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
+    """Single source of truth for "modeled extent" (see CLAUDE.md
+    "Dataset-extent alignment"): population/Voronoi/land-use clipping must
+    use this, not a larger administrative boundary, or un-floodable
+    "survivors" outside the hazard-mapped area get counted.
+
+    Args:
+        config: dict with a populated ``hazard_dir``.
+        buffer_frac: bbox buffer fraction. 0.0 (default) for the true
+            extent; only use >0 for Voronoi generator-point padding, never
+            for the road network.
+        hazard_filename: specific hazard raster to read; defaults to the
+            first ``*.tif`` in ``config['hazard_dir']``.
+
+    Returns:
+        shapely.geometry.Polygon in EPSG:28992.
+    """
+    import geopandas as gpd
+    from rasterio import open as rio_open
+    from shapely.geometry import box
+
+    hazard_dir = Path(config['hazard_dir'])
+    if hazard_filename is not None:
+        hazard_path = hazard_dir / hazard_filename
+    else:
+        candidates = sorted(hazard_dir.glob('*.tif'))
+        if not candidates:
+            raise FileNotFoundError(f"No hazard .tif files found in {hazard_dir}")
+        hazard_path = candidates[0]
+
+    with rio_open(hazard_path) as src:
+        raster_crs = src.crs
+        bounding_box = box(*src.bounds)
+
+    if buffer_frac:
+        xmin, ymin, xmax, ymax = bounding_box.bounds
+        xmin -= (xmax - xmin) * buffer_frac
+        xmax += (xmax - xmin) * buffer_frac
+        ymin -= (ymax - ymin) * buffer_frac
+        ymax += (ymax - ymin) * buffer_frac
+        bounding_box = box(xmin, ymin, xmax, ymax)
+
+    extent_gdf = gpd.GeoDataFrame(geometry=[bounding_box], crs=raster_crs).to_crs("EPSG:28992")
+    return extent_gdf.geometry.iloc[0]
 
 
 def _validate_number_repair_crews(number_repair_crews):
