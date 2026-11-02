@@ -22,6 +22,36 @@ def _get_hazard_dir_name(hazard_dir):
         return Path(hazard_dir).name
     return "unknown"
 
+# Cache saves below re-pickle their entire dict on every call, which gets
+# expensive as a cache grows within one run. save_cache_if_due() batches
+# this: it only actually calls save_now() once `batch_size` misses have
+# accumulated for (cache_name, hazard_dir) since the last save, bounding
+# worst-case data loss on an unexpected crash to the pending batch instead
+# of the whole run. Keyed on hazard_dir too (not just cache_name) so caches
+# for different hazard directories never share a miss count.
+_misses_since_save = {}
+
+def save_cache_if_due(save_now, *, cache_name, hazard_dir=None, batch_size=10):
+    """Call save_now() once every `batch_size` misses recorded for (cache_name, hazard_dir)."""
+    key = (cache_name, str(hazard_dir))
+    count = _misses_since_save.get(key, 0) + 1
+    if count >= batch_size:
+        save_now()
+        count = 0
+    _misses_since_save[key] = count
+
+def flush_dirty_caches(cache_savers):
+    """Force-save any (cache_name, hazard_dir) in cache_savers (dict of
+    {(cache_name, hazard_dir): zero-arg save callable}) with misses still
+    pending. Call once at the end of a run so nothing in the last partial
+    batch is lost.
+    """
+    for (cache_name, hazard_dir), save_now in cache_savers.items():
+        key = (cache_name, str(hazard_dir))
+        if _misses_since_save.get(key, 0) > 0:
+            save_now()
+            _misses_since_save[key] = 0
+
 def get_asset_centroid_hash(temp_gdf):
     n_assets = len(temp_gdf)
     bbox = temp_gdf.total_bounds  # [minx, miny, maxx, maxy]
