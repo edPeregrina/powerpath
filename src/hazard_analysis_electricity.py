@@ -3,30 +3,60 @@ from datetime import datetime
 from pathlib import Path
 import sys
 sys.path.append(str(Path.cwd().parent))
-from src.caching import create_hazard_extraction_cache_key, save_hazard_extraction_cache
+from src.caching import create_hazard_extraction_cache_key, save_hazard_extraction_cache, save_cache_if_due
 
 
-def get_valid_mean(x_value, **kwargs):
+def _sample_point_values(src, points):
+    """Sample raster values directly at point coordinates.
+
+    exactextract's coverage-fraction algorithm cannot resolve zero-area
+    geometries -- it returns no match even for a point sitting exactly on a
+    valid, nonzero pixel -- so point geometries must bypass zonal stats
+    entirely and read the raster directly.
     """
-    Calculate mean of valid (non-masked, non-negative) values from rasterstats.
-    **kwargs should not be removed - properties var is passed in zonal_stats.
+    coords = [(geom.x, geom.y) for geom in points]
+    if not coords:
+        return []
+    sampled = list(src.sample(coords, indexes=1))
+    return [float(v[0]) if v.size and v[0] >= 0 else 0.0 for v in sampled]
+
+
+def _zonal_polygon_values(src, band, geometries, stat_method):
+    """Coverage-weighted zonal stats for polygon geometries via exactextract.
+
+    The raster is wrapped with an explicit nodata override rather than
+    trusting the GeoTIFF's own nodata tag, which does not always match the
+    -9999 sentinel used elsewhere in this pipeline (observed file tags of
+    0.0, which would incorrectly mask legitimate zero-depth pixels).
+
+    Negative pixels are masked before aggregation so means are computed
+    only over valid depths (e.g. -1/1 depths average to 1, not 0).
     """
     import numpy as np
-    from numpy.ma import MaskedArray
-    
-    if not isinstance(x_value, MaskedArray):
-        return np.nan
-    if x_value.mask.all():
-        return np.nan
-    
-    # Additional filtering for your hazard data (non-negative values)
-    valid_data = x_value.compressed()  # Get non-masked values
-    valid_data = valid_data[valid_data >= 0]  # Filter out negative values
-    
-    if len(valid_data) == 0:
-        return 0.0  # Return 0 instead of NaN for consistency with your logic
-    
-    return float(np.mean(valid_data))
+    import geopandas as gpd
+    from exactextract import exact_extract
+    from exactextract.raster import NumPyRasterSource
+
+    band_masked = np.where(band < 0, -9999, band)
+    raster_source = NumPyRasterSource(
+        band_masked,
+        xmin=src.bounds.left, ymin=src.bounds.bottom,
+        xmax=src.bounds.right, ymax=src.bounds.top,
+        nodata=-9999,
+        srs_wkt=src.crs.to_wkt() if src.crs else None,
+    )
+    vec = gpd.GeoDataFrame(geometry=list(geometries), crs=src.crs)
+    result = exact_extract(raster_source, vec, [stat_method])
+
+    values = []
+    for feature in result:
+        value = feature['properties'][stat_method]
+        if value is None or (isinstance(value, float) and np.isnan(value)) or value < 0:
+            values.append(0.0)
+        else:
+            values.append(float(value))
+    return values
+
 
 
 
@@ -34,9 +64,11 @@ def get_valid_mean(x_value, **kwargs):
 def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, map_counter, extraction_method='max', 
                                           hazard_cache=None, hazard_dir=None, _config=None):
     """
-    Extract hazard values at asset locations from a raster file with different extraction methods and caching support.
-    Uses rasterstats for optimized performance.
-    
+    Extract hazard values at asset locations from a raster file, with caching support.
+    Assets may be a mix of Point and Polygon geometries (e.g. OSM nodes vs.
+    building footprints); Points are sampled directly and Polygons use
+    exactextract's coverage-weighted zonal stats (see module-level helpers).
+
     Args:
         hazard_map_path (str or Path): Path to the hazard raster file
         gdf_assets (GeoDataFrame): GeoDataFrame containing asset geometries
@@ -93,73 +125,38 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, map_count
             else:
                 print(f"Cache validation failed for {cache_key}, recomputing...")
     
-    # If no cache hit, compute hazard values using rasterstats
+    # If no cache hit, compute hazard values
     try:
-        from rasterstats import zonal_stats
         import numpy as np
-        
+        import rasterio
+
         # Copy the GeoDataFrame to avoid modifying the original
         gdf_result = gdf_assets.copy()
         
         print(f"Extracting hazard values using method: {extraction_method}")
 
-        # Prepare CRS - rasterstats handles CRS automatically if both have CRS info
-        hazard_values = []
-        
-        if extraction_method in ['point', 'centroid']:
-            # Point-based sampling using centroids
-            centroids = gdf_result.geometry.centroid
-            
-            # Use zonal_stats with point geometries (effectively point sampling)
-            stats = zonal_stats(
-                centroids, 
-                str(hazard_map_path),
-                all_touched=True,
-                stats=['mean'],  # For points, mean = the sampled value
-                nodata=-9999
-            )
-            
-            hazard_values = [
-                stat['mean'] if stat['mean'] is not None and stat['mean'] >= 0 else 0.0 
-                for stat in stats
-            ]
-            
-        else:
-            # Polygon-based extraction using zonal_stats
-            stat_method = extraction_method if extraction_method in ['max', 'mean', 'median'] else 'max'
-                        
-            if stat_method == 'mean':
-                # Use the enhanced valid mean function
-                stats = zonal_stats(
-                    gdf_result.geometry,
-                    str(hazard_map_path),
-                    all_touched=True,
-                    add_stats={'valid_mean': get_valid_mean},
-                    nodata=-9999
-                )
-                hazard_values = [
-                    stat['valid_mean'] if stat['valid_mean'] is not None and not np.isnan(stat['valid_mean']) else 0.0 
-                    for stat in stats
-                ]
+        with rasterio.open(hazard_map_path) as src:
+            raster_geoms = gdf_result.geometry
+            if gdf_result.crs and src.crs and gdf_result.crs != src.crs:
+                raster_geoms = raster_geoms.to_crs(src.crs)
 
+            if extraction_method in ('point', 'centroid'):
+                hazard_values = _sample_point_values(src, raster_geoms.centroid)
             else:
-                # Use standard statistics (max, median)
-                stats = zonal_stats(
-                    gdf_result.geometry,
-                    str(hazard_map_path),
-                    all_touched=True,
-                    stats=[stat_method],
-                    nodata=-9999
-                )
-                
-                hazard_values = []
-                for stat in stats:
-                    if stat[stat_method] is not None and stat[stat_method] >= 0:
-                        hazard_values.append(float(stat[stat_method]))
-                    else:
-                        # Fallback: try to get any valid value or use 0.0
-                        hazard_values.append(0.0)
-        
+                stat_method = extraction_method if extraction_method in ('max', 'mean', 'median') else 'max'
+                is_point = raster_geoms.geom_type == 'Point'
+
+                hazard_values = [0.0] * len(gdf_result)
+                if is_point.any():
+                    point_values = _sample_point_values(src, raster_geoms[is_point])
+                    for idx, value in zip(np.flatnonzero(is_point.values), point_values):
+                        hazard_values[idx] = value
+                if (~is_point).any():
+                    band = src.read(1)
+                    polygon_values = _zonal_polygon_values(src, band, raster_geoms[~is_point], stat_method)
+                    for idx, value in zip(np.flatnonzero((~is_point).values), polygon_values):
+                        hazard_values[idx] = value
+
         # Add values to both possible column names
         gdf_result[haz_col_str] = hazard_values
         gdf_result[haz_val_str] = hazard_values
@@ -184,14 +181,18 @@ def find_hazard_value_at_points_optimized(hazard_map_path, gdf_assets, map_count
                 'gdf_hash': gdf_hash
             }
             interim_dir = _config['interim_dir'] if _config and 'interim_dir' in _config else None
-            save_hazard_extraction_cache(hazard_cache, interim_dir, hazard_dir)
+            save_cache_if_due(
+                lambda: save_hazard_extraction_cache(hazard_cache, interim_dir, hazard_dir),
+                cache_name="hazard_extraction_cache",
+                hazard_dir=hazard_dir,
+            )
             print(f"Cached hazard extraction results for map {map_counter} from {Path(hazard_map_path).name}")
         return gdf_result
         
     except ImportError as ie:
         print(f"Warning: Required library not available: {ie}")
-        print("Please install rasterstats: pip install rasterstats")
-        # Fallback to original method if rasterstats not available
+        print("Please install exactextract: pip install exactextract")
+        # Fallback to original method if exactextract not available
         return _fallback_rasterio_method(hazard_map_path, gdf_assets, map_counter, extraction_method, hazard_cache, hazard_dir)
     except Exception as e:
         print(f"Error extracting hazard values from {hazard_map_path}: {e}")

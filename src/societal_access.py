@@ -19,11 +19,57 @@ Access of origin ``o ∈ O`` to function ``f``:
     ``∃ d ∈ D_f : island_id[o] == island_id[d]``
 
 where ``D_f ⊆ D`` is the subset of destinations providing function ``f``.
-Functions listed in ``SERVICE_AREA_FUNCTION_PROVIDER_TYPES`` (electricity)
-instead use Voronoi service areas built from provider centroids, because
-shared-island membership is too coarse a proxy for who a substation actually
-serves; see ``_build_service_area_population_maps`` and
-``_apply_service_area_societal_scalars``.
+
+Three service-area methods
+---------------------------
+``SERVICE_AREA_FUNCTION_PROVIDER_TYPES`` (see
+:func:`_normalize_service_area_function_config`) formalizes which of three
+distinct methods governs a given function, instead of all functions
+implicitly sharing the base shared-island method above:
+
+1. **Base method** (the default for any function not listed, e.g. hospital,
+   supermarket, pharmacy): pure road-network shared-island membership, as
+   derived above.
+2. **``method="simple_voronoi"``** (electricity/``msls`` only, by default):
+   bypasses road-network reachability entirely and uses unweighted Voronoi
+   service areas built from provider centroids instead -- justified because
+   exposure to a substation is not travel-dependent (you don't need to
+   drive to a substation to be powered by it); see
+   ``_build_service_area_population_maps`` and
+   ``_apply_service_area_societal_scalars``.
+3. **``method="weighted_voronoi"``** (opt-in, e.g. for ``"education"``/
+   schools weighted by pupil counts): a hybrid of the other two, NOT a road
+   bypass. The weighted (additively-weighted/power-diagram) Voronoi
+   tessellation only determines *which* provider a population cell is
+   assigned to (a fixed, one-time "default school" catchment -- see
+   :func:`_build_weighted_voronoi_cell_assignments`); road/island
+   reachability of that specific cell-provider pair is still evaluated every
+   timestep exactly like the base method, just restricted to that one
+   assigned provider instead of "any provider of this function" (see
+   :func:`_apply_weighted_voronoi_travel_dependent_scalars`). Providers
+   flagged via ``exclude_column`` (e.g. a non-spatial/remote-learning
+   ``school_remote`` entry) are dropped from the tessellation geometry
+   entirely and instead contribute a ``remote_fraction`` -- a fixed
+   proportion of every population cell's own population that is always
+   counted as accessible, regardless of road/hazard state (see that
+   function's docstring for the exact blend formula). Mixing this up with
+   the ``simple_voronoi`` road-bypass would be scientifically wrong for
+   schools: pupils still need an intact road to reach their assigned school.
+
+Known TODOs / deferred follow-up work (not yet built):
+  - No real DUO/CBS pupil-count data source or OSM-name-matching loader
+    exists yet; ``weight_column``/``exclude_column`` values must currently
+    be supplied by the caller from some other source.
+  - ``weight_scale_factor`` has no principled, calibrated default (see
+    :func:`src.impacts.create_weighted_voronoi_for_asset_type`); current
+    values in tests are placeholders tuned to specific test geometries.
+  - ``school``/``basisonderwijs``/``voortgezet_onderwijs`` currently all
+    collapse into a single ``"education"`` function/population pool (no
+    primary-vs-secondary split tied to age-specific population columns like
+    ``aantal_inwoners_0_tot_15_jaar``).
+  - ``catchment_assignment_mode="dynamic_reachable"`` is accepted as a
+    config value but not implemented (raises ``NotImplementedError``); only
+    ``"fixed"`` (compute the catchment once, never reassign it) exists.
 
 Production use
 ---------------
@@ -78,19 +124,64 @@ POPULATION_GROUP_COLUMNS: Dict[str, str] = {
 }
 
 ALLOCATION_ALGORITHM_VERSION: str = "1.0.0"
+
+#: Service-area/road-bypass routing, keyed by function name. Two equivalent
+#: input shapes are accepted (see :func:`_normalize_service_area_function_config`):
+#:
+#: - **Legacy form** (default, still fully supported): ``{function_name:
+#:   frozenset({provider_type, ...})}``. Implicitly ``method="simple_voronoi"``.
+#: - **Explicit form**: ``{function_name: {"provider_types": {...}, "method":
+#:   "simple_voronoi" | "weighted_voronoi", "weight_column": Optional[str],
+#:   "weight_scale_factor": Optional[float], "catchment_assignment_mode":
+#:   "fixed" | "dynamic_reachable"}}``.
+#:
+#: ``"simple_voronoi"`` (the only method in the default below) bypasses
+#: road-network reachability entirely -- justified for electricity because
+#: exposure to a substation isn't travel-dependent. ``"weighted_voronoi"``
+#: (e.g. for schools, weighted by pupil counts) is **not** a road bypass:
+#: it only changes *which* provider a population cell is assigned to among
+#: candidates, road/island reachability of that assignment is still
+#: evaluated separately (see ``catchment_assignment_mode`` and the
+#: "default school" assignment machinery). Mixing these two concepts up
+#: would be scientifically wrong for schools -- pupils still need an intact
+#: road to physically reach their assigned school, unlike exposure to a
+#: substation.
+#:
+#: The default here intentionally only covers electricity so that adding a
+#: ``"weighted_voronoi"`` entry (e.g. for ``"education"``) is strictly
+#: opt-in and never changes default-config outputs for any other function.
 SERVICE_AREA_FUNCTION_PROVIDER_TYPES: Dict[str, FrozenSet[str]] = {
     "electricity": frozenset({"msls"}),
 }
+
+#: Valid ``method`` values for a :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`
+#: entry (explicit form).
+_VALID_SERVICE_AREA_METHODS: FrozenSet[str] = frozenset({"simple_voronoi", "weighted_voronoi"})
+
+#: Valid ``catchment_assignment_mode`` values (only meaningful for
+#: ``method="weighted_voronoi"``): ``"fixed"`` computes the
+#: population→provider ("default school") assignment once per scenario and
+#: never reassigns it, even if that provider later becomes unreachable
+#: (cheap -- the tessellation itself is a one-time cost). ``"dynamic_reachable"``
+#: instead reassigns a cell to the next reachable candidate provider when its
+#: assigned one is down (more expensive, opt-in). NOTE: ``"dynamic_reachable"``
+#: is accepted here as a *valid config value* (and included in cache keys)
+#: but is NOT YET IMPLEMENTED -- requesting it raises ``NotImplementedError``
+#: in :func:`_build_weighted_voronoi_cell_assignments` rather than silently
+#: behaving like ``"fixed"``.
+_VALID_CATCHMENT_ASSIGNMENT_MODES: FrozenSet[str] = frozenset({"fixed", "dynamic_reachable"})
+
 #: Sentinel ``road_state_key`` used when the simulation runs a non-island
 #: repair-crew assignment method (e.g. "monetary impacts" without "islands").
 #: Roads are then implicitly assumed fully connected, so access depends only
 #: on function operational status, not shared-island membership.
 FLAT_CONNECTIVITY_ROAD_STATE_KEY = "flat_connectivity_no_islands"
+
 _FUNCTION_CATEGORY_EQUIVALENTS: Dict[str, FrozenSet[str]] = {
     "health": frozenset({"health", "hospital"}),
     "hospital": frozenset({"health", "hospital"}),
 }
-_REALIZED_STATE_CACHE_KEY_VERSION = "2.2.0"
+_REALIZED_STATE_CACHE_KEY_VERSION = "2.3.0"
 
 
 class SharedRealizedStateCacheError(RuntimeError):
@@ -153,7 +244,7 @@ def _build_realized_state_cache_key(
     all_functions: List[str],
     pop_group_columns: Dict[str, str],
     reference_group: str,
-    service_area_function_provider_types: Dict[str, FrozenSet[str]],
+    service_area_function_provider_types: Dict[str, Any],
     allocation_df: Optional[pd.DataFrame],
     service_area_population_maps_digest: str = "",
 ) -> str:
@@ -825,7 +916,7 @@ def _find_allocation_cache_entry(
 # ``impacts.py``: cache-key-then-check-then-copy-on-hit-then-store-copy.
 # ---------------------------------------------------------------------------
 _SERVICE_AREA_POP_MAP_CACHE: Dict[Any, Dict[str, Dict[str, Dict[Any, float]]]] = {}
-_SERVICE_AREA_POP_MAP_CACHE_VERSION = "1.0.0"
+_SERVICE_AREA_POP_MAP_CACHE_VERSION = "2.0.0"
 
 
 def _service_area_asset_state_digest(working_assets: gpd.GeoDataFrame) -> str:
@@ -885,13 +976,91 @@ def _service_area_population_maps_digest(
     return hashlib.sha256(payload.encode()).hexdigest()[:24]
 
 
+def _normalize_service_area_function_config(
+    spec: Mapping[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Normalize a :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`-shaped spec.
+
+    Accepts either the legacy form (``{function_name: frozenset({provider_type,
+    ...})}`` or any iterable of provider-type strings -- implicitly
+    ``method="simple_voronoi"``) or the explicit per-function form
+    (``{function_name: {"provider_types": {...}, "method": ..., ...}}``), and
+    returns a fully-populated canonical dict so downstream code never needs to
+    apply its own defaults. Raises ``ValueError`` for unknown methods/modes or
+    a missing ``weight_column`` on a ``"weighted_voronoi"`` entry.
+    """
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for function_name, raw in spec.items():
+        if isinstance(raw, Mapping):
+            provider_types = frozenset(str(t) for t in raw.get("provider_types", ()))
+            method = str(raw.get("method", "simple_voronoi"))
+            weight_column = raw.get("weight_column")
+            weight_scale_factor = raw.get("weight_scale_factor")
+            catchment_assignment_mode = str(raw.get("catchment_assignment_mode", "fixed"))
+            exclude_column = raw.get("exclude_column")
+        else:
+            # Legacy form: a bare iterable of provider-type strings.
+            provider_types = frozenset(str(t) for t in raw)
+            method = "simple_voronoi"
+            weight_column = None
+            weight_scale_factor = None
+            catchment_assignment_mode = "fixed"
+            exclude_column = None
+
+        if method not in _VALID_SERVICE_AREA_METHODS:
+            raise ValueError(
+                f"Unknown service-area method {method!r} for function "
+                f"{function_name!r}; expected one of "
+                f"{sorted(_VALID_SERVICE_AREA_METHODS)}."
+            )
+        if method == "weighted_voronoi" and not weight_column:
+            raise ValueError(
+                "service-area method 'weighted_voronoi' for function "
+                f"{function_name!r} requires a 'weight_column'."
+            )
+        if catchment_assignment_mode not in _VALID_CATCHMENT_ASSIGNMENT_MODES:
+            raise ValueError(
+                f"Unknown catchment_assignment_mode {catchment_assignment_mode!r} "
+                f"for function {function_name!r}; expected one of "
+                f"{sorted(_VALID_CATCHMENT_ASSIGNMENT_MODES)}."
+            )
+
+        normalized[str(function_name)] = {
+            "provider_types": provider_types,
+            "method": method,
+            "weight_column": str(weight_column) if weight_column is not None else None,
+            "weight_scale_factor": (
+                float(weight_scale_factor) if weight_scale_factor is not None else None
+            ),
+            "catchment_assignment_mode": catchment_assignment_mode,
+            "exclude_column": str(exclude_column) if exclude_column is not None else None,
+        }
+    return normalized
+
+
 def _canonicalize_service_area_provider_types(
-    spec: Mapping[str, Iterable[str]],
-) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
-    """Return a hashable, order-independent form of a provider-types spec."""
+    spec: Mapping[str, Any],
+) -> Tuple[Tuple[str, Tuple[Any, ...]], ...]:
+    """Return a hashable, order-independent form of a service-area function spec.
+
+    Normalizes first (see :func:`_normalize_service_area_function_config`), so
+    the legacy and explicit input forms produce identical cache keys when they
+    describe the same configuration.
+    """
+    normalized = _normalize_service_area_function_config(spec)
     return tuple(
-        (str(function_name), tuple(sorted(str(provider_type) for provider_type in provider_types)))
-        for function_name, provider_types in sorted(spec.items(), key=lambda kv: str(kv[0]))
+        (
+            function_name,
+            (
+                tuple(sorted(cfg["provider_types"])),
+                cfg["method"],
+                cfg["weight_column"],
+                cfg["weight_scale_factor"],
+                cfg["catchment_assignment_mode"],
+                cfg["exclude_column"],
+            ),
+        )
+        for function_name, cfg in sorted(normalized.items(), key=lambda kv: kv[0])
     )
 
 
@@ -899,7 +1068,7 @@ def _service_area_pop_map_cache_key(
     asset_state_digest: str,
     pop_grid_gdf: gpd.GeoDataFrame,
     pop_group_columns: Dict[str, str],
-    service_area_function_provider_types: Dict[str, FrozenSet[str]],
+    service_area_function_provider_types: Dict[str, Any],
     asset_type_column: str,
 ) -> Tuple[Any, ...]:
     """Build the memo key for :func:`_build_service_area_population_maps`."""
@@ -929,7 +1098,7 @@ def _build_service_area_population_maps(
     pop_grid_gdf: gpd.GeoDataFrame,
     pop_group_columns: Dict[str, str],
     asset_type_column: str = "type",
-    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
+    service_area_function_provider_types: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Dict[Any, float]]]:
     """Pre-compute provider→population service-area assignments for special functions.
 
@@ -939,6 +1108,16 @@ def _build_service_area_population_maps(
     population grid are EMA ``Constant``s across an experiment set.  The
     returned value is always a fresh copy — a cache hit never hands out the
     same mutable dict twice.
+
+    *service_area_function_provider_types* accepts either the legacy
+    ``{function: frozenset(provider_types)}`` form (``method="simple_voronoi"``,
+    unchanged behaviour) or the explicit per-function form (see
+    :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`); both are normalized via
+    :func:`_normalize_service_area_function_config`. Functions configured
+    with ``method="weighted_voronoi"`` are intentionally skipped here (this
+    function's whole purpose is a road-network *bypass*, correct only for
+    ``"simple_voronoi"``) -- see
+    :func:`_build_weighted_voronoi_cell_assignments` instead.
     """
     from src.impacts import create_voronoi_for_asset_type
     from src.utils import build_voronoi_service_area_map
@@ -946,7 +1125,25 @@ def _build_service_area_population_maps(
     if gdf_assets.empty or pop_grid_gdf.empty:
         return {}
 
-    working_assets = gdf_assets[[asset_type_column, "geometry"]].copy()
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+    normalized_function_config = _normalize_service_area_function_config(
+        service_area_function_provider_types
+    )
+
+    # Only the simple_voronoi (electricity-style) exclude_column ever needs
+    # to be carried through alongside geometry+type here; weighted_voronoi
+    # functions are handled by a separate pipeline (see docstring above).
+    extra_columns = sorted(
+        {
+            cfg["exclude_column"]
+            for cfg in normalized_function_config.values()
+            if cfg["method"] == "simple_voronoi"
+            and cfg["exclude_column"] is not None
+            and cfg["exclude_column"] in gdf_assets.columns
+        }
+    )
+    working_assets = gdf_assets[[asset_type_column, "geometry", *extra_columns]].copy()
     if asset_type_column != "type":
         working_assets = working_assets.rename(columns={asset_type_column: "type"})
     working_assets = gpd.GeoDataFrame(
@@ -955,9 +1152,6 @@ def _build_service_area_population_maps(
         crs=gdf_assets.crs,
     )
     asset_state_digest = _service_area_asset_state_digest(working_assets)
-
-    if service_area_function_provider_types is None:
-        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
 
     cache_key = _service_area_pop_map_cache_key(
         asset_state_digest,
@@ -984,12 +1178,29 @@ def _build_service_area_population_maps(
         pop_assets = pop_assets.to_crs(working_assets.crs)
 
     function_maps: Dict[str, Dict[str, Dict[Any, float]]] = {}
-    for function_name, provider_types in service_area_function_provider_types.items():
+    for function_name, func_cfg in normalized_function_config.items():
+        method = func_cfg["method"]
+        if method == "weighted_voronoi":
+            # "weighted_voronoi" is deliberately *not* handled here: this
+            # function's entire purpose (and the thing
+            # _apply_service_area_societal_scalars applies afterwards) is a
+            # pure operational-status bypass of road-network reachability,
+            # which is correct for "simple_voronoi" (electricity -- exposure
+            # isn't travel-dependent) but scientifically wrong for schools
+            # (travel-dependent). Weighted-Voronoi functions instead go
+            # through _build_weighted_voronoi_cell_assignments +
+            # _apply_weighted_voronoi_travel_dependent_scalars, which checks
+            # BOTH operational status AND same-island membership.
+            continue
+        provider_types = func_cfg["provider_types"]
+        exclude_column = func_cfg["exclude_column"]
         group_maps: Dict[str, Dict[Any, float]] = {label: {} for label in pop_group_columns}
         has_provider = False
 
         for provider_type in sorted(provider_types):
             providers = working_assets[working_assets["type"].astype(str) == str(provider_type)]
+            if exclude_column and exclude_column in providers.columns:
+                providers = providers[~providers[exclude_column].astype(bool)]
             if providers.empty:
                 continue
             has_provider = True
@@ -1079,6 +1290,355 @@ def _build_service_area_population_maps(
 
     _SERVICE_AREA_POP_MAP_CACHE[cache_key] = _copy_service_area_population_maps(function_maps)
     return function_maps
+
+
+# ---------------------------------------------------------------------------
+# Weighted-Voronoi ("default school") fixed catchment assignment
+#
+# Deliberately a *separate* cache/pipeline from `_SERVICE_AREA_POP_MAP_CACHE`
+# above: that cache's consumer (`_apply_service_area_societal_scalars`) is a
+# pure operational-status bypass of road-network reachability, correct only
+# for `simple_voronoi` (electricity). Weighted-Voronoi functions (schools)
+# need the population→provider catchment ("which school") to stay a one-time,
+# cheap-to-reuse computation -- same spirit -- but the per-timestep access
+# check must still respect road/island severance between a cell and its
+# specific assigned provider.
+# ---------------------------------------------------------------------------
+_WEIGHTED_VORONOI_ASSIGNMENT_CACHE: Dict[
+    Any, Tuple[Dict[str, Dict[Any, Any]], Dict[str, float]]
+] = {}
+_WEIGHTED_VORONOI_ASSIGNMENT_CACHE_VERSION = "1.1.0"
+
+
+def _build_weighted_voronoi_cell_assignments(
+    gdf_assets: gpd.GeoDataFrame,
+    pop_grid_gdf: gpd.GeoDataFrame,
+    cell_id_column: str,
+    asset_type_column: str = "type",
+    service_area_function_provider_types: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Dict[Any, Any]], Dict[str, float]]:
+    """One-time ("default school") population-cell → provider-id catchment
+    assignment for every function configured with ``method="weighted_voronoi"``.
+
+    This is the fixed-catchment half of ``catchment_assignment_mode="fixed"``:
+    the expensive power-diagram tessellation runs once here (and is itself
+    memoised by :func:`src.impacts.create_weighted_voronoi_for_asset_type`'s
+    own cache) and the resulting assignment stays sticky for the whole
+    scenario -- it is *not* recomputed per timestep. Per-timestep access
+    still requires both the assigned provider to be operational and the
+    population cell to share that provider's post-disruption island; see
+    :func:`_apply_weighted_voronoi_travel_dependent_scalars` for that half.
+
+    Memoised at module scope (``_WEIGHTED_VORONOI_ASSIGNMENT_CACHE``),
+    analogous to ``_SERVICE_AREA_POP_MAP_CACHE``. Returns a fresh copy on
+    every call so callers can never mutate the cached value.
+
+    ``exclude_column``-flagged providers (e.g. ``school_remote``, a
+    non-spatial/remote-learning provider) are dropped from the tessellation
+    *geometry* entirely before it is built -- this has **no effect on the
+    Voronoi/power-diagram computation itself** (the remaining, non-excluded
+    providers' cells are exactly as they would be had the excluded provider
+    never existed). The only consequence of an excluded provider's weight is
+    a scalar population-accounting adjustment computed here: ``remote_fraction
+    = sum(weight_column over excluded providers) / sum(weight_column over all
+    providers of that function)`` (0.0, the expected default, when there are
+    no excluded providers or none have a positive weight). This fraction is
+    *not* used here -- it is threaded through to
+    :func:`_apply_weighted_voronoi_travel_dependent_scalars`, which computes
+    each cell's accessible population as ``(1 - remote_fraction) *
+    spatial_with_access + remote_fraction * total`` -- i.e. a fixed
+    ``remote_fraction`` share of every cell's population is counted as
+    accessible unconditionally (regardless of road/hazard state), while the
+    remaining ``1 - remote_fraction`` share is gated exactly as before
+    (operational provider + same island).
+
+    Returns
+    -------
+    (cell_assignment_by_function, remote_fraction_by_function)
+        ``cell_assignment_by_function`` is ``{function_name: {cell_id:
+        provider_id}}``; ``remote_fraction_by_function`` is ``{function_name:
+        float}``. Functions without a ``weighted_voronoi`` entry, or with no
+        matching (non-excluded) providers, are simply absent from
+        ``cell_assignment_by_function`` -- so for the default config (no
+        function uses ``weighted_voronoi``) both dicts are ``{}`` and the
+        rest of the pipeline is a no-op, preserving existing default
+        behaviour exactly.
+    """
+    from src.impacts import create_weighted_voronoi_for_asset_type
+    from src.utils import build_voronoi_service_area_map
+
+    if gdf_assets.empty or pop_grid_gdf.empty:
+        return {}, {}
+    if service_area_function_provider_types is None:
+        service_area_function_provider_types = SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+    normalized_function_config = _normalize_service_area_function_config(
+        service_area_function_provider_types
+    )
+    weighted_funcs = {
+        name: cfg
+        for name, cfg in normalized_function_config.items()
+        if cfg["method"] == "weighted_voronoi"
+    }
+    if not weighted_funcs:
+        return {}, {}
+
+    unimplemented = sorted(
+        name
+        for name, cfg in weighted_funcs.items()
+        if cfg["catchment_assignment_mode"] == "dynamic_reachable"
+    )
+    if unimplemented:
+        raise NotImplementedError(
+            "catchment_assignment_mode='dynamic_reachable' is not implemented "
+            f"(requested for function(s): {unimplemented}); only 'fixed' is "
+            "supported."
+        )
+
+    if cell_id_column not in pop_grid_gdf.columns:
+        raise ValueError(f"cell_id_column {cell_id_column!r} not found in pop_grid_gdf.")
+    if pop_grid_gdf[cell_id_column].duplicated().any():
+        raise ValueError(
+            f"Population grid has duplicate values in {cell_id_column!r}; "
+            "the weighted-Voronoi catchment assignment requires a unique cell id."
+        )
+
+    extra_columns = sorted(
+        {
+            column
+            for cfg in weighted_funcs.values()
+            for column in (cfg["weight_column"], cfg["exclude_column"])
+            if column is not None and column in gdf_assets.columns
+        }
+    )
+    working_assets = gdf_assets[[asset_type_column, "geometry", *extra_columns]].copy()
+    if asset_type_column != "type":
+        working_assets = working_assets.rename(columns={asset_type_column: "type"})
+    working_assets = gpd.GeoDataFrame(working_assets, geometry="geometry", crs=gdf_assets.crs)
+    asset_state_digest = _service_area_asset_state_digest(working_assets)
+
+    cache_key = (
+        _WEIGHTED_VORONOI_ASSIGNMENT_CACHE_VERSION,
+        asset_state_digest,
+        _geometry_hash(pop_grid_gdf),
+        _column_hash(pop_grid_gdf, cell_id_column),
+        cell_id_column,
+        _canonicalize_service_area_provider_types(service_area_function_provider_types),
+    )
+    cached = _WEIGHTED_VORONOI_ASSIGNMENT_CACHE.get(cache_key)
+    if cached is not None:
+        cached_assignment, cached_remote_fraction = cached
+        return (
+            {function_name: dict(assignment) for function_name, assignment in cached_assignment.items()},
+            dict(cached_remote_fraction),
+        )
+
+    pop_assets = gpd.GeoDataFrame(
+        {cell_id_column: pop_grid_gdf[cell_id_column].to_numpy()},
+        geometry=pop_grid_gdf.geometry,
+        crs=pop_grid_gdf.crs,
+        index=pop_grid_gdf.index,
+    )
+    if (
+        pop_assets.crs is not None
+        and working_assets.crs is not None
+        and pop_assets.crs != working_assets.crs
+    ):
+        pop_assets = pop_assets.to_crs(working_assets.crs)
+
+    result: Dict[str, Dict[Any, Any]] = {}
+    remote_fraction_result: Dict[str, float] = {}
+    for function_name, func_cfg in weighted_funcs.items():
+        provider_types = func_cfg["provider_types"]
+        weight_column = func_cfg["weight_column"]
+        weight_scale_factor = func_cfg["weight_scale_factor"]
+        exclude_column = func_cfg["exclude_column"]
+
+        cell_to_provider: Dict[Any, Any] = {}
+        function_all_weight_total = 0.0
+        function_remote_weight_total = 0.0
+        for provider_type in sorted(provider_types):
+            providers_all = working_assets[working_assets["type"].astype(str) == str(provider_type)]
+            if providers_all.empty:
+                continue
+
+            if weight_column and weight_column in providers_all.columns:
+                weight_values = pd.to_numeric(providers_all[weight_column], errors="coerce").fillna(0.0)
+                weight_values = weight_values.where(weight_values >= 0, 0.0)
+            else:
+                weight_values = pd.Series(0.0, index=providers_all.index)
+            if exclude_column and exclude_column in providers_all.columns:
+                remote_mask = providers_all[exclude_column].astype(bool)
+            else:
+                remote_mask = pd.Series(False, index=providers_all.index)
+            function_all_weight_total += float(weight_values.sum())
+            function_remote_weight_total += float(weight_values[remote_mask].sum())
+
+            providers = providers_all[~remote_mask]
+            if providers.empty:
+                continue
+
+            if len(providers) == 1:
+                provider_map = {providers.index[0]: list(pop_assets.index)}
+            else:
+                voronoi_gdf = create_weighted_voronoi_for_asset_type(
+                    working_assets,
+                    provider_type,
+                    weight_column=weight_column,
+                    weight_scale_factor=(
+                        weight_scale_factor if weight_scale_factor is not None else 1.0
+                    ),
+                    exclude_column=exclude_column,
+                    asset_cache_key=asset_state_digest,
+                )
+                provider_map = build_voronoi_service_area_map(
+                    voronoi_gdf,
+                    pop_assets[["geometry"]].copy(),
+                )
+
+            cell_id_series = pop_assets[cell_id_column]
+            for provider_id, pop_indices in provider_map.items():
+                if not pop_indices:
+                    continue
+                for cell_id in cell_id_series.loc[list(pop_indices)].to_numpy():
+                    cell_to_provider[cell_id] = provider_id
+
+        if cell_to_provider:
+            result[function_name] = cell_to_provider
+        remote_fraction_result[function_name] = (
+            function_remote_weight_total / function_all_weight_total
+            if function_all_weight_total > 0
+            else 0.0
+        )
+
+    _WEIGHTED_VORONOI_ASSIGNMENT_CACHE[cache_key] = (
+        {function_name: dict(assignment) for function_name, assignment in result.items()},
+        dict(remote_fraction_result),
+    )
+    return (
+        {function_name: dict(assignment) for function_name, assignment in result.items()},
+        dict(remote_fraction_result),
+    )
+
+
+def _apply_weighted_voronoi_travel_dependent_scalars(
+    fields: Dict[str, float],
+    function_cell_provider: Dict[str, Dict[Any, Any]],
+    allocation_df: Optional[pd.DataFrame],
+    cell_id_column: str,
+    value_arrays: Dict[str, np.ndarray],
+    cell_id_index: pd.Index,
+    operational_asset_ids_by_function: Dict[str, Set[Any]],
+    stable_asset_ids: np.ndarray,
+    island_ids: np.ndarray,
+    reference_group: str,
+    remote_fraction_by_function: Optional[Dict[str, float]] = None,
+) -> Dict[str, float]:
+    """Override function metrics for weighted-Voronoi ("default school") functions.
+
+    Unlike :func:`_apply_service_area_societal_scalars` (pure operational-
+    status bypass, correct for electricity), this enforces that a
+    population cell only has access to its specific *fixed* catchment
+    provider if that provider is **both** operational **and** on the same
+    post-disruption island as the cell this timestep -- capturing genuine
+    road-network severance between a cell and its assigned school.
+
+    Deliberately *not* folded into the local/shared realized-state scalar
+    cache (``_scalar_fields_cache`` / ``shared_realized_state_cache``) in
+    ``postprocess_societal_access_results``: those caches key on
+    ``frozen_island_function_map`` (island → function-*categories* present)
+    plus the *set* of operational asset ids, neither of which is sufficient
+    to reconstruct a specific provider's island id -- which this function
+    needs. Recomputing fresh every timestep instead avoids that correctness
+    risk; the operation itself is cheap (just array/Series lookups against
+    the already-fixed catchment assignment), consistent with the "one-time
+    expensive tessellation, cheap per-timestep check" design.
+
+    *remote_fraction_by_function* (``{function_name: float}``, default 0.0
+    for every function when omitted/absent) is the baseline proportion of
+    that function's population already served by non-spatial ("default
+    school" = remote/``school_remote``) providers, computed once by
+    :func:`_build_weighted_voronoi_cell_assignments` as ``sum(weight over
+    excluded providers) / sum(weight over all providers)``. Applied here as
+    a linear blend per (function, population label): ``with_access = (1 -
+    remote_fraction) * spatial_with_access + remote_fraction * total`` --
+    i.e. a fixed ``remote_fraction`` share of each cell's own population is
+    counted as accessible unconditionally (not subject to road connectivity
+    or hazard exposure at all), while the remaining ``1 - remote_fraction``
+    share goes through the normal spatial catchment + same-island gating
+    below. This has **no effect on the Voronoi tessellation itself** (remote
+    providers are already excluded from that geometry by
+    :func:`_build_weighted_voronoi_cell_assignments`); ``remote_fraction``
+    only rescales the final accessible-population number computed here.
+    """
+    if not function_cell_provider or allocation_df is None or allocation_df.empty:
+        return fields
+    if remote_fraction_by_function is None:
+        remote_fraction_by_function = {}
+
+    detail_len = min(len(stable_asset_ids), len(island_ids))
+    asset_island_by_id: Dict[Any, int] = {
+        stable_asset_ids[i]: int(island_ids[i]) for i in range(detail_len)
+    }
+
+    cell_ids = allocation_df[cell_id_column]
+    cell_islands = allocation_df["island_id"].to_numpy()
+    fractions = allocation_df["allocation_fraction"].to_numpy(dtype=float)
+    positions = cell_id_index.get_indexer(cell_ids.to_numpy())
+    valid_mask = positions >= 0
+    safe_positions = np.where(valid_mask, positions, 0)
+
+    derived_totals: Dict[str, float] = {}
+    for function_name, cell_provider in function_cell_provider.items():
+        operational_ids = operational_asset_ids_by_function.get(function_name, set())
+        remote_fraction = float(remote_fraction_by_function.get(function_name, 0.0))
+
+        assigned_provider = cell_ids.map(cell_provider)
+        operational_mask = assigned_provider.isin(operational_ids)
+        assigned_island = assigned_provider.map(asset_island_by_id)
+        access_mask = (
+            operational_mask.to_numpy()
+            & assigned_island.notna().to_numpy()
+            & (assigned_island.to_numpy() == cell_islands)
+            & valid_mask
+        )
+
+        for label, col_values in value_arrays.items():
+            pop_vals = np.where(valid_mask, col_values[safe_positions], 0.0)
+            weighted = pop_vals * fractions
+            total = float(weighted.sum())
+            spatial_with_access = float(weighted[access_mask].sum())
+            # Blend: `remote_fraction` of every cell's population is
+            # permanently accessible (non-spatial remote schooling); the
+            # rest is gated by the spatial catchment + same-island check
+            # above. remote_fraction == 0.0 (the default) reduces this
+            # exactly to `spatial_with_access`.
+            with_access = (1.0 - remote_fraction) * spatial_with_access + remote_fraction * total
+            without_access = total - with_access
+            pct = round(100.0 * with_access / total, 2) if total > 0 else float("nan")
+
+            fields[f"societal_access_pct__{function_name}__{label}"] = pct
+            fields[f"societal_access_population__{function_name}__{label}"] = with_access
+            fields[f"societal_no_access_population__{function_name}__{label}"] = without_access
+            derived_totals[label] = total
+
+        ref_pct = fields.get(
+            f"societal_access_pct__{function_name}__{reference_group}",
+            float("nan"),
+        )
+        for label in value_arrays:
+            if label == reference_group:
+                continue
+            grp_pct = fields.get(f"societal_access_pct__{function_name}__{label}", float("nan"))
+            if np.isnan(ref_pct) or np.isnan(grp_pct):
+                abs_gap = float("nan")
+                rel_gap = float("nan")
+            else:
+                abs_gap = round(ref_pct - grp_pct, 2)
+                rel_gap = round(grp_pct / ref_pct, 4) if ref_pct > 0 else float("nan")
+            fields[f"societal_equity_absolute_gap__{function_name}__{label}"] = abs_gap
+            fields[f"societal_equity_relative_gap__{function_name}__{label}"] = rel_gap
+
+    return fields
 
 
 def _apply_service_area_societal_scalars(
@@ -1189,7 +1749,7 @@ def postprocess_societal_access_results(
     reference_group: str = "total",
     nearest_max_distance: float = 200.0,
     islands_gdf_cache: Optional[Dict[str, gpd.GeoDataFrame]] = None,
-    service_area_function_provider_types: Optional[Dict[str, FrozenSet[str]]] = None,
+    service_area_function_provider_types: Optional[Dict[str, Any]] = None,
     fail_on_missing_allocation: bool = False,
     verbose: bool = False,
     profiler: Optional[Any] = NULL_PROFILER,
@@ -1259,10 +1819,18 @@ def postprocess_societal_access_results(
         every road state encountered.  When ``None``, the legacy metadata-scan
         path is used as a backward-compatible fallback.
     service_area_function_provider_types:
-        Optional ``{function_name: frozenset({provider_type, ...})}`` override
-        for service-area routing.  Provider type tokens must match
-        ``asset_type_column`` values exactly.  When ``None``, defaults to
-        :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
+        Optional service-area routing override, accepting either the legacy
+        ``{function_name: frozenset({provider_type, ...})}`` form (implicitly
+        ``method="simple_voronoi"``) or the explicit per-function form
+        ``{function_name: {"provider_types": {...}, "method":
+        "simple_voronoi" | "weighted_voronoi", "weight_column": Optional[str],
+        "weight_scale_factor": Optional[float], "catchment_assignment_mode":
+        "fixed" | "dynamic_reachable", "exclude_column": Optional[str]}}``.
+        Provider type tokens must match ``asset_type_column`` values exactly.
+        ``"weighted_voronoi"`` requires ``weight_column`` and is **not** a
+        road-network bypass like ``"simple_voronoi"`` -- see
+        :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`. When ``None``, defaults
+        to :data:`SERVICE_AREA_FUNCTION_PROVIDER_TYPES`.
     pop_grid_area_warn_buffer_m, pop_grid_area_warn_ratio:
         Work item B: cheap, non-fatal guard against an unclipped population
         grid.  If the bounding-box area of *pop_grid_gdf* exceeds
@@ -1400,6 +1968,21 @@ def postprocess_societal_access_results(
         if shared_realized_state_cache is not None
         else ""
     )
+
+    # Build the fixed ("default school") weighted-Voronoi catchment
+    # assignment once per scenario. Empty dict (and a no-op downstream) when
+    # no function is configured with method="weighted_voronoi" -- preserves
+    # default behaviour exactly.
+    with profiler.section("societal_access._build_weighted_voronoi_cell_assignments"):
+        weighted_voronoi_cell_assignments, weighted_voronoi_remote_fraction = (
+            _build_weighted_voronoi_cell_assignments(
+                gdf_assets=service_area_assets,
+                pop_grid_gdf=pop_grid_gdf,
+                cell_id_column=cell_id_column,
+                asset_type_column=asset_type_column,
+                service_area_function_provider_types=service_area_function_provider_types,
+            )
+        )
 
     # Determine which functions to always emit
     if all_functions is None:
@@ -1733,6 +2316,24 @@ def postprocess_societal_access_results(
                                         ) from _shared_cache_err
 
             with profiler.section("societal_access.merge_fields"):
+                if weighted_voronoi_cell_assignments:
+                    with profiler.section(
+                        "societal_access.apply_weighted_voronoi_travel_dependent_scalars"
+                    ):
+                        _cell_id_index, _value_arrays = _get_population_value_arrays()
+                        societal_fields = _apply_weighted_voronoi_travel_dependent_scalars(
+                            societal_fields,
+                            function_cell_provider=weighted_voronoi_cell_assignments,
+                            allocation_df=allocation_df,
+                            cell_id_column=cell_id_column,
+                            value_arrays=_value_arrays,
+                            cell_id_index=_cell_id_index,
+                            operational_asset_ids_by_function=operational_asset_ids_by_function,
+                            stable_asset_ids=stable_asset_ids,
+                            island_ids=island_ids,
+                            reference_group=reference_group,
+                            remote_fraction_by_function=weighted_voronoi_remote_fraction,
+                        )
                 ts_summary.update(societal_fields)
                 ts_summary["allocation_cache_key"] = allocation_cache_key
                 ts_summary["allocation_road_state_key"] = road_state_key

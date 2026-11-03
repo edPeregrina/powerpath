@@ -11,6 +11,8 @@ The cache is saved as pickle files for efficient loading and saving.
 """
 import pickle
 import json
+import os
+import time
 from pathlib import Path
 import hashlib
 import warnings
@@ -21,6 +23,78 @@ def _get_hazard_dir_name(hazard_dir):
     if hazard_dir:
         return Path(hazard_dir).name
     return "unknown"
+
+
+def _atomic_merge_save(cache_dict, cache_file, *, lock_timeout=30.0):
+    """Merge cache_dict into cache_file's on-disk contents and save atomically.
+
+    Concurrent MultiprocessingEvaluator workers each hold an independent
+    in-memory copy of a cache dict, so a plain overwrite would let the last
+    writer clobber entries other workers already saved. This instead: (1)
+    takes an exclusive lock (atomic lock-file creation, busy-wait), (2) loads
+    whatever is currently on disk and merges it under cache_dict (so entries
+    from sibling workers are kept, not lost), (3) writes the merged result to
+    a temp file and renames it into place (atomic on both POSIX and Windows).
+    """
+    lock_path = Path(str(cache_file) + ".lock")
+    waited = 0.0
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if waited >= lock_timeout:
+                # Another worker may still be writing; never enter the
+                # critical section (or delete its lock) without owning it.
+                raise TimeoutError(f"Timed out waiting for lock on {cache_file}")
+            time.sleep(0.05)
+            waited += 0.05
+    try:
+        merged = dict(cache_dict)
+        if cache_file.exists():
+            try:
+                with open(cache_file, "rb") as f:
+                    on_disk = pickle.load(f)
+                merged = {**on_disk, **merged}
+            except Exception:
+                pass  # corrupt/partial on-disk file: fall back to this process's cache
+        tmp_path = cache_file.with_suffix(cache_file.suffix + f".tmp{os.getpid()}")
+        with open(tmp_path, "wb") as f:
+            pickle.dump(merged, f)
+        os.replace(tmp_path, cache_file)
+    finally:
+        lock_path.unlink()
+
+# Cache saves below re-pickle their entire dict on every call, which gets
+# expensive as a cache grows within one run. save_cache_if_due() batches
+# this: it only actually calls save_now() once `batch_size` misses have
+# accumulated for (cache_name, hazard_dir) since the last save, bounding
+# worst-case data loss on an unexpected crash to the pending batch instead
+# of the whole run. Keyed on hazard_dir too (not just cache_name) so caches
+# for different hazard directories never share a miss count.
+_misses_since_save = {}
+
+def save_cache_if_due(save_now, *, cache_name, hazard_dir=None, batch_size=10):
+    """Call save_now() once every `batch_size` misses recorded for (cache_name, hazard_dir)."""
+    key = (cache_name, str(hazard_dir))
+    count = _misses_since_save.get(key, 0) + 1
+    if count >= batch_size:
+        save_now()
+        count = 0
+    _misses_since_save[key] = count
+
+def flush_dirty_caches(cache_savers):
+    """Force-save any (cache_name, hazard_dir) in cache_savers (dict of
+    {(cache_name, hazard_dir): zero-arg save callable}) with misses still
+    pending. Call once at the end of a run so nothing in the last partial
+    batch is lost.
+    """
+    for (cache_name, hazard_dir), save_now in cache_savers.items():
+        key = (cache_name, str(hazard_dir))
+        if _misses_since_save.get(key, 0) > 0:
+            save_now()
+            _misses_since_save[key] = 0
 
 def get_asset_centroid_hash(temp_gdf):
     n_assets = len(temp_gdf)
@@ -216,11 +290,14 @@ def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
     
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
-    
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
-    
-    print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
+
+    try:
+        _atomic_merge_save(cache_dict, cache_file)
+        print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        # A lock timeout or I/O error only loses this pending batch, not the
+        # whole run; a crashed worker would lose everything in memory instead.
+        print(f"ERROR: Failed to save hazard extraction cache: {e}")
 
 def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
     """
@@ -338,8 +415,7 @@ def save_island_cache(cache_dict, cache_dir, hazard_dir=None, verbose=False):
     cache_file = cache_dir / f"island_cache_{hazard_dir_name}.pkl"
         
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache_dict, f)
+        _atomic_merge_save(cache_dict, cache_file)
         if verbose:
             print(f"Saved island cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
@@ -385,13 +461,13 @@ def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None, verbo
     cache_file = cache_dir / f"societal_allocation_cache_{hazard_dir_name}.pkl"
 
     try:
-        with open(cache_file, 'wb') as f:
-            pickle.dump(cache_dict, f)
+        _atomic_merge_save(cache_dict, cache_file)
         if verbose:
             print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
+        # Same rationale as save_island_cache/save_hazard_extraction_cache:
+        # don't let a lock timeout crash the worker and lose the whole run.
         print(f"ERROR: Failed to save societal allocation cache: {e}")
-        raise
 
 
 def load_societal_allocation_cache(cache_dir, hazard_dir=None):
@@ -459,11 +535,12 @@ def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
     
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
-    
-    with open(cache_file, 'wb') as f:
-        pickle.dump(cache_dict, f)
-    
-    print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
+
+    try:
+        _atomic_merge_save(cache_dict, cache_file)
+        print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        print(f"ERROR: Failed to save overlap cache: {e}")
 
 def load_overlap_cache(cache_dir, hazard_dir=None):
     """

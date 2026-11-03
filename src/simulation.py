@@ -1581,6 +1581,16 @@ def _collect_timestep_metrics(
         'hazard_value': state.current_hazard_values.copy(),
         'island_id': state.island_ids.copy() if state.island_ids is not None else np.zeros(num_assets, dtype=int),
         'road_state_key': state.road_state_key,
+        # Separated operational-state layers (see _update_operational_state),
+        # captured per-asset so optional spatial-trace exports can derive
+        # *why* an asset is non-operational (physically damaged vs.
+        # temporarily hazard/dependency-blocked) instead of only knowing
+        # the final effective 'operational' bit.
+        'intrinsic_operational': state.intrinsic_operational.astype(int).copy(),
+        'hazard_available': state.hazard_available.astype(int).copy()
+            if state.hazard_available is not None else np.ones(num_assets, dtype=int),
+        'dependency_available': state.dependency_available.astype(int).copy()
+            if state.dependency_available is not None else np.ones(num_assets, dtype=int),
     }
     damaged_assets_mask = state.damage_ratio > damage_threshold
     repair_needed_mask = repair_time > repair_threshold

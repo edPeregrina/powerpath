@@ -17,6 +17,16 @@ from typing import Optional, Tuple, List, Dict
 # Module-level cache for adaptation arrays
 _ADAPTATION_CACHE: Dict[tuple, np.ndarray] = {}
 
+# Code -> label mapping for the derived 'blocking_reason' 3D metric produced
+# by simulate_asset_damage_recovery_access_breakdown_ema's keep_3d_vars.
+BLOCKING_REASON_LABELS = {
+    0: "operational",
+    1: "physically_damaged",
+    2: "hazard_blocked",
+    3: "dependency_blocked",
+    4: "other_blocked",
+}
+
 def _build_adaptation_arrays_cached(
     gdf_assets: gpd.GeoDataFrame,
     n_timesteps: int,
@@ -359,8 +369,11 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         
     Available asset metrics:
         - 3D or 2D: 'damage_ratio', 'repair_time', 'operational', 'accessible',
-                    'unreachable', 'flooded', 'crew_assigned', 'hazard_value'
-        - 3D only: 'island_id' (arbitrary IDs, meaningless when aggregated)
+                    'unreachable', 'flooded', 'crew_assigned', 'hazard_value',
+                    'intrinsic_operational', 'hazard_available', 'dependency_available'
+        - 3D only: 'island_id' (arbitrary IDs, meaningless when aggregated),
+                   'blocking_reason' (derived categorical; see
+                   ``BLOCKING_REASON_LABELS`` for the code -> label mapping)
         
     Note: Population and monetary impacts are always 1D (n_timesteps) - already aggregated.
     """
@@ -466,9 +479,10 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         """Initialize result arrays based on requested metrics."""
         aggregatable_metrics = [
             'damage_ratio', 'repair_time', 'operational', 'accessible',
-            'unreachable', 'flooded', 'crew_assigned', 'hazard_value'
+            'unreachable', 'flooded', 'crew_assigned', 'hazard_value',
+            'intrinsic_operational', 'hazard_available', 'dependency_available',
         ]
-        three_d_only_metrics = ['island_id']
+        three_d_only_metrics = ['island_id', 'blocking_reason']
         
         result = {}
         
@@ -513,10 +527,21 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         
         return result
     
-    def _fill_timestep_arrays(result, timestep_results, n_timesteps, n_assets,
-                              keep_3d_vars, keep_2d_vars, asset_population_map, 
+    def _fill_timestep_arrays(result, timestep_results, detailed_results, n_timesteps, n_assets,
+                              keep_3d_vars, keep_2d_vars, asset_population_map,
                               monetary_categories, societal_metric_names):
-        """Fill result arrays from timestep data for requested metrics."""
+        """Fill result arrays from timestep data for requested metrics.
+
+        ``keep_2d_vars`` (aggregated scalars) are filled from ``timestep_results``
+        (the scalar-per-timestep summary DataFrame), as before. ``keep_3d_vars``
+        (true per-asset, per-timestep arrays -- e.g. for spatial-trace/GIS
+        export) are filled directly from ``detailed_results`` (the raw
+        per-asset array dicts collected by
+        :func:`src.simulation._collect_timestep_metrics`), since the summary
+        DataFrame only has per-timestep aggregates (e.g. ``operational_count``)
+        which would otherwise be silently broadcast as a uniform ratio across
+        every asset instead of real per-asset detail.
+        """
         summary_to_metric = {
             'avg_damage_ratio': 'damage_ratio',
             'avg_repair_time': 'repair_time',
@@ -548,20 +573,30 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
             # Societal access impacts (1D)
             for name in societal_metric_names:
                 result[name][t_idx] = ts.get(name, np.nan)
-            
-            # Asset metrics - ONLY process requested metrics
-            all_requested_metrics = keep_3d_vars + keep_2d_vars
-            
-            for metric in all_requested_metrics:
+
+            # Asset metrics (3D): real per-asset arrays, sourced from
+            # detailed_results (not the scalar timestep_results row above).
+            detailed_ts = detailed_results[t_idx] if detailed_results and t_idx < len(detailed_results) else {}
+            for metric in keep_3d_vars:
+                if metric == 'blocking_reason':
+                    result[metric][t_idx, :] = _compute_blocking_reason(detailed_ts, n_assets)
+                elif metric in detailed_ts:
+                    result[metric][t_idx, :] = np.asarray(detailed_ts[metric])[:n_assets]
+
+            # Asset metrics (2D aggregated): unchanged scalar-based path, plus
+            # detailed_ts fallback for metrics only present per-asset
+            # (intrinsic_operational/hazard_available/dependency_available
+            # have no summary column, so _get_metric_value would always
+            # return None for them otherwise).
+            for metric in keep_2d_vars:
                 value = _get_metric_value(ts, metric, summary_to_metric, count_to_binary)
+                if value is None and metric in detailed_ts:
+                    value = detailed_ts[metric]
                 
                 if value is None:
                     continue  # Skip if data not available
                 
-                if metric in keep_3d_vars:
-                    _store_3d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
-                elif metric in keep_2d_vars:
-                    _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
+                _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary)
         
         return result
 
@@ -600,17 +635,30 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         
         return None
     
-    def _store_3d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
-        """Store per-asset values in 3D array."""
-        if isinstance(value, (list, np.ndarray)):
-            result[metric][t_idx, :] = value[:n_assets]
-        elif metric in count_to_binary.values():
-            # Convert count to ratio for binary metrics
-            ratio = value / n_assets if n_assets > 0 else 0
-            result[metric][t_idx, :] = ratio
-        else:
-            result[metric][t_idx, :] = value
-    
+    def _compute_blocking_reason(detailed_ts, n_assets):
+        """Derive a per-asset categorical reason code for why an asset is
+        currently non-operational, from the separated operational-state
+        layers (see ``src.simulation._update_operational_state``).
+
+        Codes: 0=operational, 1=physically_damaged (intrinsic_operational
+        is False), 2=hazard_blocked (intrinsically fine but currently
+        hazard-exposed per a dependency hazard rule), 3=dependency_blocked
+        (an upstream dependency, e.g. electricity, is unavailable),
+        4=other_blocked (e.g. still waiting out a dependency-restart delay).
+        """
+        operational = np.asarray(detailed_ts.get('operational', np.ones(n_assets)))[:n_assets].astype(bool)
+        intrinsic = np.asarray(detailed_ts.get('intrinsic_operational', np.ones(n_assets)))[:n_assets].astype(bool)
+        hazard_avail = np.asarray(detailed_ts.get('hazard_available', np.ones(n_assets)))[:n_assets].astype(bool)
+        dependency_avail = np.asarray(detailed_ts.get('dependency_available', np.ones(n_assets)))[:n_assets].astype(bool)
+
+        reason = np.zeros(n_assets, dtype=int)
+        blocked = ~operational
+        reason[blocked & ~intrinsic] = 1
+        reason[blocked & intrinsic & ~hazard_avail] = 2
+        reason[blocked & intrinsic & hazard_avail & ~dependency_avail] = 3
+        reason[blocked & intrinsic & hazard_avail & dependency_avail] = 4
+        return reason
+
     def _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
         """Aggregate and store metric as scalar in 2D array."""
         if isinstance(value, (list, np.ndarray)):
@@ -674,6 +722,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     result = _fill_timestep_arrays(
         result,
         timestep_results,
+        detailed_results,
         n_timesteps,
         n_assets,
         config['keep_3d_vars'],

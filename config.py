@@ -16,6 +16,19 @@ import shutil
 
 from src.dependency_knowledge_graph import build_default_knowledge_graph
 
+# weight_scale_factor per school asset type (EPSG:28992 m^2), derived from
+# each bucket's real median nearest-neighbor spacing squared -- see
+# book/preprocessing/extract_amenities_from_extent.ipynb. Order-of-magnitude
+# reasoning only, not independently calibrated:
+#   school:     median NN spacing ~450m  (n=225)
+#   school_vso: median NN spacing ~1040m (n=19)
+#   school_so:  median NN spacing ~2780m (n=8, thin sample)
+SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS = {
+    "school": 2e5,
+    "school_vso": 1e6,
+    "school_so": 8e6,
+}
+
 
 def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=None,
                                 cell_id_column="cell_id", namespace="societal_access"):
@@ -48,11 +61,32 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         asset_types = {"msls", *asset_types}
         taxonomy = {k: v for k, v in taxonomy.items() if k in asset_types}
 
-    caches = caches or {}
-    allocation_cache = caches.get("societal_allocation_cache") or {}
+    caches = {} if caches is None else caches
+    allocation_cache = caches.get("societal_allocation_cache")
+    if allocation_cache is None:
+        allocation_cache = {}
+    # Write back so `caches` and this config share the same dict object --
+    # `caches.get("societal_allocation_cache") or {}` silently built a
+    # disconnected dict whenever the loaded cache was empty (`{}` is falsy),
+    # so every allocation built during the run was discarded at flush time
+    # instead of being persisted.
+    caches["societal_allocation_cache"] = allocation_cache
     _seed_flat_connectivity_allocation(pop_grid_gdf, cell_id_column, allocation_cache)
 
     shared_db_path = config["interim_dir"] / "societal_realized_state_cache.sqlite"
+
+    service_area_function_provider_types = {
+        "electricity": {"provider_types": {"msls"}, "method": "simple_voronoi"},
+    }
+    for asset_type, scale_factor in SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS.items():
+        if asset_type not in taxonomy:
+            continue
+        service_area_function_provider_types[taxonomy[asset_type]] = {
+            "provider_types": {asset_type},
+            "method": "weighted_voronoi",
+            "weight_column": "pupils",
+            "weight_scale_factor": scale_factor,
+        }
 
     return {
         "pop_grid_gdf": pop_grid_gdf,
@@ -63,6 +97,7 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         "asset_type_column": "type",
         "all_functions": sorted(set(taxonomy.values())),
         "allocation_cache": allocation_cache,
+        "service_area_function_provider_types": service_area_function_provider_types,
         "shared_realized_state_cache_config": {
             "enabled": True,
             "backend": "sqlite",
@@ -133,6 +168,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
         'data_dir': root_dir / 'raw_data/ZH_Delfland',
         'electricity_dir': root_dir / 'raw_data/ZH_Delfland/electricity',
         'osm_asset_dir': root_dir / 'data' / 'static',
+        # Use committed *_sample.gpkg population/land-use files (dev mode).
+        'use_sample_population_data': False,
 
         # Simulation configuration
         'simulation_config': {
@@ -216,7 +253,9 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 'water_supply_point': 'climate_resilience',
                 'drinking_water': 'climate_resilience',
                 # Social continuity
-                'school': 'education',
+                'school': 'education_bo',
+                'school_so': 'education_so',
+                'school_vso': 'education_vso',
                 'basisonderwijs': 'education',
                 'voortgezet_onderwijs': 'education',
                 'repair_depot': 'repair_logistics',
@@ -267,6 +306,52 @@ def get_config(root_dir=None, hazard_dir_override=None):
     config['output_dir'] = config['root_dir'] / 'data' / 'output' / f'output_{hazard_dir_name}'
     
     return config
+
+
+def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
+    """Single source of truth for "modeled extent" (see CLAUDE.md
+    "Dataset-extent alignment"): population/Voronoi/land-use clipping must
+    use this, not a larger administrative boundary, or un-floodable
+    "survivors" outside the hazard-mapped area get counted.
+
+    Args:
+        config: dict with a populated ``hazard_dir``.
+        buffer_frac: bbox buffer fraction. 0.0 (default) for the true
+            extent; only use >0 for Voronoi generator-point padding, never
+            for the road network.
+        hazard_filename: specific hazard raster to read; defaults to the
+            first ``*.tif`` in ``config['hazard_dir']``.
+
+    Returns:
+        shapely.geometry.Polygon in EPSG:28992.
+    """
+    import geopandas as gpd
+    from rasterio import open as rio_open
+    from shapely.geometry import box
+
+    hazard_dir = Path(config['hazard_dir'])
+    if hazard_filename is not None:
+        hazard_path = hazard_dir / hazard_filename
+    else:
+        candidates = sorted(hazard_dir.glob('*.tif'))
+        if not candidates:
+            raise FileNotFoundError(f"No hazard .tif files found in {hazard_dir}")
+        hazard_path = candidates[0]
+
+    with rio_open(hazard_path) as src:
+        raster_crs = src.crs
+        bounding_box = box(*src.bounds)
+
+    if buffer_frac:
+        xmin, ymin, xmax, ymax = bounding_box.bounds
+        xmin -= (xmax - xmin) * buffer_frac
+        xmax += (xmax - xmin) * buffer_frac
+        ymin -= (ymax - ymin) * buffer_frac
+        ymax += (ymax - ymin) * buffer_frac
+        bounding_box = box(xmin, ymin, xmax, ymax)
+
+    extent_gdf = gpd.GeoDataFrame(geometry=[bounding_box], crs=raster_crs).to_crs("EPSG:28992")
+    return extent_gdf.geometry.iloc[0]
 
 
 def _validate_number_repair_crews(number_repair_crews):
@@ -475,6 +560,7 @@ def get_development_config():
     config['analysis_config']['max_simulation_days'] = 3  # Limit for faster testing
     config['analysis_config']['performance_monitoring'] = True
     config['simulation_config']['verbose'] = True
+    config['use_sample_population_data'] = True
 
     # Smallest data samples directories
     config['data_dir'] = config['root_dir'] / 'data' / 'test_samples'

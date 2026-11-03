@@ -14,6 +14,7 @@ import src.simulation as simulation_module
 from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
 from src.caching import (
     create_island_cache_key,
+    flush_dirty_caches,
     get_asset_centroid_hash,
     load_simulation_caches,
     save_simulation_caches,
@@ -530,9 +531,20 @@ def test_match_island_ids_assets_repeated_run_reuses_island_and_allocation_cache
         assert rfids_islands == {10: 1}
 
     assert compute_calls["count"] == 1
-    assert save_calls["count"] == 1
+    # save_island_cache is batched (save_cache_if_due): a single miss does
+    # not trigger an immediate save anymore.
+    assert save_calls["count"] == 0
     assert len(island_cache) == 1
     assert len(allocation_cache) == 1
+
+    # flush_dirty_caches forces any still-pending batch to persist (e.g. at
+    # the end of a run), so the one pending miss above is now saved.
+    flush_dirty_caches({
+        ("island_cache", config["hazard_dir"]): lambda: island_analysis.save_island_cache(
+            island_cache, config["interim_dir"], config["hazard_dir"]
+        ),
+    })
+    assert save_calls["count"] == 1
 
 
 def test_postprocess_societal_access_results_uses_cached_allocations():
