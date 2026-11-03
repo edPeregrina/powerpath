@@ -91,13 +91,18 @@ def load_osm_assets(osm_asset_dir, asset_types):
             ``None``/empty to keep all categories.
 
     Returns:
-        gpd.GeoDataFrame: OSM assets with ``geometry`` and ``type`` columns.
+        gpd.GeoDataFrame: OSM assets with ``geometry`` and ``type`` columns,
+        plus ``pupils`` when present (required for school weighted-Voronoi
+        catchments; see config.py's ``weight_column``).
     """
     data_path = osm_asset_dir / "osm_assets.gpkg"
     osm_gdf = gpd.read_file(data_path)
     if asset_types:
         osm_gdf = osm_gdf[osm_gdf['type'].isin(asset_types)]
-    return osm_gdf[['geometry', 'type']].reset_index(drop=True)
+    keep_columns = ['geometry', 'type']
+    if 'pupils' in osm_gdf.columns:
+        keep_columns.append('pupils')
+    return osm_gdf[keep_columns].reset_index(drop=True)
 
 
 def load_hazard_maps(hazard_dir, max_days=None):

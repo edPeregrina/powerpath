@@ -471,6 +471,11 @@ def create_weighted_voronoi_for_asset_type(
             .to_numpy(dtype=float)
         )
     else:
+        warnings.warn(
+            f"weight_column {weight_column!r} not found on {asset_type!r} assets; "
+            "falling back to an unweighted (ordinary) Voronoi partition.",
+            stacklevel=2,
+        )
         raw_weights = np.zeros(len(asset_ids), dtype=float)
     mean_weight = raw_weights.mean()
     mean_weight = mean_weight if mean_weight != 0 else 1.0
