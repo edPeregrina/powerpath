@@ -45,7 +45,9 @@ def _atomic_merge_save(cache_dict, cache_file, *, lock_timeout=30.0):
             break
         except FileExistsError:
             if waited >= lock_timeout:
-                break  # stale lock from a crashed process; proceed anyway
+                # Another worker may still be writing; never enter the
+                # critical section (or delete its lock) without owning it.
+                raise TimeoutError(f"Timed out waiting for lock on {cache_file}")
             time.sleep(0.05)
             waited += 0.05
     try:
@@ -62,10 +64,7 @@ def _atomic_merge_save(cache_dict, cache_file, *, lock_timeout=30.0):
             pickle.dump(merged, f)
         os.replace(tmp_path, cache_file)
     finally:
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+        lock_path.unlink()
 
 # Cache saves below re-pickle their entire dict on every call, which gets
 # expensive as a cache grows within one run. save_cache_if_due() batches
@@ -291,10 +290,14 @@ def save_hazard_extraction_cache(cache_dict, cache_dir, hazard_dir=None):
     
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"hazard_extraction_cache_{hazard_dir_name}.pkl"
-    
-    _atomic_merge_save(cache_dict, cache_file)
-    
-    print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
+
+    try:
+        _atomic_merge_save(cache_dict, cache_file)
+        print(f"Saved hazard extraction cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        # A lock timeout or I/O error only loses this pending batch, not the
+        # whole run; a crashed worker would lose everything in memory instead.
+        print(f"ERROR: Failed to save hazard extraction cache: {e}")
 
 def load_hazard_extraction_cache(cache_dir, hazard_dir=None):
     """
@@ -462,8 +465,9 @@ def save_societal_allocation_cache(cache_dict, cache_dir, hazard_dir=None, verbo
         if verbose:
             print(f"Saved societal allocation cache: {len(cache_dict)} entries to {cache_file}")
     except Exception as e:
+        # Same rationale as save_island_cache/save_hazard_extraction_cache:
+        # don't let a lock timeout crash the worker and lose the whole run.
         print(f"ERROR: Failed to save societal allocation cache: {e}")
-        raise
 
 
 def load_societal_allocation_cache(cache_dir, hazard_dir=None):
@@ -531,10 +535,12 @@ def save_overlap_cache(cache_dict, cache_dir, hazard_dir=None):
     
     hazard_dir_name = _get_hazard_dir_name(hazard_dir)
     cache_file = cache_dir / f"overlap_cache_{hazard_dir_name}.pkl"
-    
-    _atomic_merge_save(cache_dict, cache_file)
-    
-    print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
+
+    try:
+        _atomic_merge_save(cache_dict, cache_file)
+        print(f"Saved overlap cache: {len(cache_dict)} entries to {cache_file}")
+    except Exception as e:
+        print(f"ERROR: Failed to save overlap cache: {e}")
 
 def load_overlap_cache(cache_dir, hazard_dir=None):
     """
