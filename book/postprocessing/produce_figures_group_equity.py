@@ -74,8 +74,9 @@ sys.path.append(str(REPO_ROOT))
 from ema_workbench.util.utilities import load_results  # noqa: E402
 
 DEFAULT_RESULTS_PATH = Path(
-    r"C:\Users\peregrin\OneDrive - Stichting Deltares\Documents\Save runs\Powerpath"
-    r"\1791817945\ema_results_1791817945_full_extent_adaptation.tar.gz"
+#     r"C:\Users\peregrin\OneDrive - Stichting Deltares\Documents\Save runs\Powerpath"
+#     r"\1791817945\ema_results_1791817945_full_extent_adaptation.tar.gz"
+    r"C:\repos\powerpath\powerpath\data\output\output_hazard_maps_ZH_Delfland\ema_exports\ema_results_1793695060_full_extent_adaptation.tar.gz"
 )
 CACHE_DIR = REPO_ROOT / "data" / "interim" / "paper_figures_group_equity_cache"
 FIG_DIR = REPO_ROOT / "data" / "output" / "paper_figures_group_equity"

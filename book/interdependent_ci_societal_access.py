@@ -214,12 +214,12 @@ def parse_args():
     parser.add_argument(
         "--l1-dir", type=Path, default=None,
         help="Directory with L1 (area-based) adaptation GeoJSON files. "
-             "Default: <root_dir>/data/test_samples/adaptation/L1_peilgeb_policies_separate",
+             "Default: <root_dir>/data/test_samples/adaptation/L1_adaptations",
     )
     parser.add_argument(
         "--l2-dir", type=Path, default=None,
         help="Directory with L2 (asset-based) adaptation GeoJSON files. "
-             "Default: <root_dir>/data/test_samples/adaptation/L2_asset_barriers",
+             "Default: <root_dir>/data/test_samples/adaptation/L2_adaptations",
     )
     parser.add_argument(
         "--max-l1-files", type=int, default=None,
@@ -267,6 +267,14 @@ def parse_args():
                          help="Override the default per-asset fields captured for the spatial "
                               "trace. Default: island_id,operational,intrinsic_operational,"
                               "accessible,unreachable,flooded,blocking_reason.")
+    parser.add_argument("--spatial-trace-multiprocessing", type=int, default=None, metavar="N_PROCESSES",
+                         help="OFF by default -- the spatial-trace capture pass uses "
+                              "SequentialEvaluator unless this is set. Only pass this once the "
+                              "on-disk caches already cover every road/hazard state the trace run "
+                              "will touch (e.g. a prior warm run over the same hazard maps/extent); "
+                              "same correctness caveat as --multiprocessing (new cache entries built "
+                              "by a worker are not written back). A large --spatial-trace-policies x "
+                              "--spatial-trace-scenarios capture is the main case this is for.")
     parser.add_argument("--dev-config", action="store_true",
                          help="Use get_development_config() (data/test_samples) instead of the "
                               "full-extent get_config(). Intended for quick smoke tests/parity checks.")
@@ -658,7 +666,18 @@ def run_spatial_trace(
     trace_model.outcomes.clear()
     trace_model.outcomes = _filtered + _added
 
-    with SequentialEvaluator(trace_model) as evaluator:
+    if args.spatial_trace_multiprocessing:
+        LOGGER.warning(
+            "Spatial trace capture running with MultiprocessingEvaluator (%d processes) -- only "
+            "safe if on-disk caches already cover every road/hazard state this run touches. "
+            "New cache entries built by a worker are NOT written back to disk/main process.",
+            args.spatial_trace_multiprocessing,
+        )
+        evaluator_cm = MultiprocessingEvaluator(trace_model, n_processes=args.spatial_trace_multiprocessing)
+    else:
+        evaluator_cm = SequentialEvaluator(trace_model)
+
+    with evaluator_cm as evaluator:
         experiments, outcomes = evaluator.perform_experiments(
             scenarios=args.spatial_trace_scenarios, policies=trace_policies,
             uncertainty_sampling=Samplers.LHS,
@@ -694,6 +713,18 @@ def run_spatial_trace(
         trace_gdf.to_parquet(trace_path)
         LOGGER.info("Saved spatial trace (%d rows) to %s", len(trace_gdf), trace_path)
 
+        # Persist the sampled uncertainty values for this draw alongside the
+        # trace -- otherwise this scenario's parameters (repair-crew counts,
+        # fragility steepness, etc.) are only known in-memory here and get
+        # silently discarded, leaving downstream consumers (e.g. the island
+        # asset explorer dashboard) with only an arbitrary scenario index and
+        # no way to say *what* draw they're looking at.
+        uncertainty_cols = [c for c in experiments_df.columns if c not in ("scenario", "policy", "model")]
+        uncertainties = _json_safe(experiments_df.loc[exp_idx, uncertainty_cols].to_dict())
+        uncertainties_path = trace_path.with_name(trace_path.stem + "_uncertainties.json")
+        with open(uncertainties_path, "w", encoding="utf-8") as f:
+            json.dump(uncertainties, f, indent=2)
+
     road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
     road_match_gdf = build_asset_road_match_table(
         gdf_assets_combined, config_combined["hazard_dir"],
@@ -718,8 +749,8 @@ def build_adaptation_policies(root_dir, args, l1_dir=None, l2_dir=None,
             and all L1/L2 policies, e.g. "population impacts islands" or
             "monetary impacts islands".
     """
-    l1_dir = l1_dir or args.l1_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L1_peilgeb_policies_separate")
-    l2_dir = l2_dir or args.l2_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L2_asset_barriers")
+    l1_dir = l1_dir or args.l1_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L1_adaptations")
+    l2_dir = l2_dir or args.l2_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L2_adaptations")
 
     l1_files = sorted(l1_dir.glob("*.geojson")) if l1_dir.exists() else []
     l2_files = sorted(l2_dir.glob("*.geojson")) if l2_dir.exists() else []
@@ -957,6 +988,8 @@ def main():
         "seed": args.seed,
         "profiling_enabled": args.profile,
         "multiprocessing_n_processes": args.multiprocessing,
+        "spatial_trace_policies": args.spatial_trace_policies,
+        "spatial_trace_multiprocessing_n_processes": args.spatial_trace_multiprocessing,
     }
     print("\n" + "=" * 70)
     print("=== OUTPUT PARAMETERS ===")
