@@ -182,6 +182,7 @@ def _redistribute_by_transition_probabilities(
 
     return redistributed
 from src.caching import (
+    _atomic_merge_save,
     create_island_cache_key,
     create_overlap_cache_key,
     get_asset_centroid_hash,
@@ -550,22 +551,25 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         # Identify boundary islands (non-main islands that exist in baseline)
         boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
         
-        # Pickle for future use
+        # Pickle for future use. Uses the same atomic-merge-and-lock save as
+        # island_cache/overlap_cache/etc (src/caching.py::_atomic_merge_save)
+        # -- a plain overwrite here let concurrent MultiprocessingEvaluator
+        # workers clobber each other's previously-saved road-state entries
+        # (each worker only ever holds its own in-memory dict), silently
+        # losing entries from the on-disk cache even though the run's own
+        # outcomes were unaffected. _atomic_merge_save re-reads and merges
+        # whatever is currently on disk before writing, under a lock.
         boundary_assets_dict[road_state_key] = boundary_asset_indices
-        with open(boundary_assets_cache_path, 'wb') as f:
-            pickle.dump(boundary_assets_dict, f)
+        _atomic_merge_save({road_state_key: boundary_asset_indices}, boundary_assets_cache_path)
 
         boundary_islands_dict[road_state_key] = boundary_islands_rfids
-        with open(boundary_islands_cache_path, 'wb') as f:
-            pickle.dump(boundary_islands_dict, f)
+        _atomic_merge_save({road_state_key: boundary_islands_rfids}, boundary_islands_cache_path)
 
         access_assets_dict[road_state_key] = temp_gdf['access_rfid']
-        with open(asset_access_cache_path, 'wb') as f:
-            pickle.dump(access_assets_dict, f)
+        _atomic_merge_save({road_state_key: temp_gdf['access_rfid']}, asset_access_cache_path)
 
         rfids_lengths_dict[road_state_key] = rfids_lengths
-        with open(road_segment_lengths_cache_path, 'wb') as f:
-            pickle.dump(rfids_lengths_dict, f)
+        _atomic_merge_save({road_state_key: rfids_lengths}, road_segment_lengths_cache_path)
 
         if verbose:
             print(f"Cached {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
