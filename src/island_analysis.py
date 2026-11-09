@@ -182,9 +182,11 @@ def _redistribute_by_transition_probabilities(
 
     return redistributed
 from src.caching import (
+    _atomic_merge_save,
     create_island_cache_key,
     create_overlap_cache_key,
     get_asset_centroid_hash,
+    save_cache_if_due,
     save_island_cache,
     save_overlap_cache,
     save_societal_allocation_cache,
@@ -211,6 +213,26 @@ def _load_pickle_cache(path):
         return {}
 
 
+# In-process cache of reprojected road-network graphs, keyed by
+# (path, from_crs, to_crs). Reprojection is deterministic, so a cached graph
+# is always returned via .copy(): filter_hazard_graph() mutates its input in
+# place, and callers must not share mutable state across calls.
+_projected_graph_cache = {}
+
+def _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPSG:28992"):
+    """Load and reproject the road network graph, cached per
+    (path, from_crs, to_crs). Returns an independent copy of the cached graph.
+    """
+    key = (str(graph_pickle_path), from_crs, to_crs)
+    cached = _projected_graph_cache.get(key)
+    if cached is None:
+        with open(graph_pickle_path, "rb") as f:
+            cached = pickle.load(f)
+        cached = project_graph_coords(cached, from_crs=from_crs, to_crs=to_crs)
+        _projected_graph_cache[key] = cached
+    return cached.copy()
+
+
 def compute_island_geodataframe_from_graph(
     graph_pickle_path: str, 
     hazard_threshold: float, 
@@ -232,11 +254,8 @@ def compute_island_geodataframe_from_graph(
     "strict"``, roads outside ``event_footprint`` cannot provide bypass
     connectivity around the hazard; with ``"permissive"`` (default) they can.
     """
-    with open(graph_pickle_path, "rb") as f:
-        G = pickle.load(f)
+    G = _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPSG:28992")
 
-    G = project_graph_coords(G, from_crs="EPSG:4326", to_crs="EPSG:28992")
-    
     G = filter_hazard_graph(
         G, hazard_threshold, hazard_column, 
         l1_area_geojson=l1_area_geojson,
@@ -272,7 +291,10 @@ def compute_island_geodataframe_from_graph(
     # print(f"DEBUG 3: fid_to_island has {len(fid_to_island)} entries")
     # print(f"DEBUG 3: Island IDs in fid_to_island: {sorted(set(fid_to_island.values()))[:20]}")  # First 20
 
-    # Create transformer for projecting geometries
+    # Fallback transformer only for edges missing the precomputed 'geometry_m'
+    # (e.g. a graph that bypassed project_graph_coords); the normal path reuses
+    # the projection already done once in project_graph_coords instead of
+    # re-transforming every edge's coordinates on every cache miss.
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
     
     # Build edge records with geometry and length 
@@ -280,14 +302,15 @@ def compute_island_geodataframe_from_graph(
     # missing_island_count = 0  # DEBUG counter
 
     for u, v, data in G.edges(data=True):
-        # Project the actual edge geometry
-        original_geom = data['geometry']
-        if hasattr(original_geom, 'coords'):
-            projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
-            projected_geom = LineString(projected_coords)
-        else:
-            projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
-                                       (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
+        projected_geom = data.get('geometry_m')
+        if projected_geom is None:
+            original_geom = data.get('geometry')
+            if original_geom is not None and hasattr(original_geom, 'coords'):
+                projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
+                projected_geom = LineString(projected_coords)
+            else:
+                projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
+                                           (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
         
         length_m = data.get("length", None)
         if length_m is None:
@@ -329,23 +352,27 @@ def compute_island_geodataframe_from_graph(
     if verbose:
         print(f"After deduplication: {len(gdf)} road segments")
 
-    buffered_geometries = []
-    original_geometries = []
-    
-    for _, row in gdf.iterrows():
-        original_geom = row.geometry
-        
-        # Buffer the linestring to create a polygon for spatial operations
-        try:
-            buffered_geom = original_geom.buffer(buffer_distance, cap_style='square', join_style='mitre')
-            if buffered_geom.is_empty or not buffered_geom.is_valid:
-                buffered_geom = original_geom.make_valid().buffer(buffer_distance, cap_style='square', join_style='mitre')
-        except Exception as e:
-            print(f"Warning: Error buffering geometry: {e}, using original")
-            buffered_geom = original_geom
-        
-        buffered_geometries.append(buffered_geom)
-        original_geometries.append(original_geom)
+    original_geometries = gdf.geometry.values
+    # Vectorized buffer for the common case; per-row fallback only for the
+    # rare empty/invalid result.
+    buffered_geometries = gdf.geometry.buffer(
+        buffer_distance, cap_style='square', join_style='mitre'
+    ).values
+    bad_mask = np.array([
+        geom is None or geom.is_empty or not geom.is_valid for geom in buffered_geometries
+    ])
+    if bad_mask.any():
+        buffered_geometries = buffered_geometries.copy()
+        for i in np.flatnonzero(bad_mask):
+            original_geom = original_geometries[i]
+            try:
+                buffered_geom = original_geom.make_valid().buffer(
+                    buffer_distance, cap_style='square', join_style='mitre'
+                )
+            except Exception as e:
+                print(f"Warning: Error buffering geometry: {e}, using original")
+                buffered_geom = original_geom
+            buffered_geometries[i] = buffered_geom
     
     # Update geometries
     gdf['original_geometry'] = original_geometries
@@ -524,22 +551,25 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         # Identify boundary islands (non-main islands that exist in baseline)
         boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
         
-        # Pickle for future use
+        # Pickle for future use. Uses the same atomic-merge-and-lock save as
+        # island_cache/overlap_cache/etc (src/caching.py::_atomic_merge_save)
+        # -- a plain overwrite here let concurrent MultiprocessingEvaluator
+        # workers clobber each other's previously-saved road-state entries
+        # (each worker only ever holds its own in-memory dict), silently
+        # losing entries from the on-disk cache even though the run's own
+        # outcomes were unaffected. _atomic_merge_save re-reads and merges
+        # whatever is currently on disk before writing, under a lock.
         boundary_assets_dict[road_state_key] = boundary_asset_indices
-        with open(boundary_assets_cache_path, 'wb') as f:
-            pickle.dump(boundary_assets_dict, f)
+        _atomic_merge_save({road_state_key: boundary_asset_indices}, boundary_assets_cache_path)
 
         boundary_islands_dict[road_state_key] = boundary_islands_rfids
-        with open(boundary_islands_cache_path, 'wb') as f:
-            pickle.dump(boundary_islands_dict, f)
+        _atomic_merge_save({road_state_key: boundary_islands_rfids}, boundary_islands_cache_path)
 
         access_assets_dict[road_state_key] = temp_gdf['access_rfid']
-        with open(asset_access_cache_path, 'wb') as f:
-            pickle.dump(access_assets_dict, f)
+        _atomic_merge_save({road_state_key: temp_gdf['access_rfid']}, asset_access_cache_path)
 
         rfids_lengths_dict[road_state_key] = rfids_lengths
-        with open(road_segment_lengths_cache_path, 'wb') as f:
-            pickle.dump(rfids_lengths_dict, f)
+        _atomic_merge_save({road_state_key: rfids_lengths}, road_segment_lengths_cache_path)
 
         if verbose:
             print(f"Cached {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
@@ -674,7 +704,11 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             }
             
             # Save the updated cache using the standardized function
-            save_island_cache(island_cache, cache_dir, hazard_dir, verbose=verbose)
+            save_cache_if_due(
+                lambda: save_island_cache(island_cache, cache_dir, hazard_dir, verbose=verbose),
+                cache_name="island_cache",
+                hazard_dir=hazard_dir,
+            )
             
             if verbose:
                 print(f"Saved island assignment to cache with key {cache_key}")
@@ -699,8 +733,12 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
                 # save-on-write behavior above, so newly built allocations
                 # survive across process restarts instead of only living in
                 # the in-memory dict for the remainder of this run.
-                save_societal_allocation_cache(
-                    societal_allocation_cache, cache_dir, hazard_dir, verbose=verbose
+                save_cache_if_due(
+                    lambda: save_societal_allocation_cache(
+                        societal_allocation_cache, cache_dir, hazard_dir, verbose=verbose
+                    ),
+                    cache_name="societal_allocation_cache",
+                    hazard_dir=hazard_dir,
                 )
             allocation_cache_state = "miss" if allocation_cache_updated else "hit"
             if allocation_cache_updated:
@@ -720,6 +758,75 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         return None, None
 
     return asset_island_ids, rfids_islands
+
+
+def build_asset_road_match_table(
+    gdf_assets, hazard_dir, hazard_threshold=0.2, hazard_column="EV1_ma",
+    config=None, l1_area_geojson=None, search_radius=100.0,
+):
+    """Build a static "asset -> nearest road segment" reverse lookup table.
+
+    For each asset, finds the nearest road section (``rfid``) within
+    ``search_radius`` metres, mirroring the nearest-road matching logic used
+    internally by :func:`match_island_ids_assets` (the ``access_rfid``
+    column) -- but exposed here as a pure, read-only, side-effect-free
+    helper intended for GIS/spatial-trace export, not for the hot
+    per-timestep simulation path. Does not read or write any of the
+    simulation caches (``island_cache``/``societal_allocation_cache``/etc.).
+
+    Since road segment geometry/connectivity is static for a given
+    hazard_column/threshold/L1 state, this only needs to be computed once
+    per road state of interest (e.g. the baseline, no-adaptation state),
+    not once per timestep or experiment.
+
+    Returns:
+        GeoDataFrame indexed like ``gdf_assets``, with columns
+        ``asset_id`` (the original index), ``access_rfid`` (-1 if no road
+        found within ``search_radius``), ``type`` (the asset type, e.g.
+        'msls'/'hospital'/'ems'/etc., if present in ``gdf_assets``), and
+        the asset's own ``geometry``.
+    """
+    if config is None:
+        config = get_config()
+
+    hazard_graph_path = config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
+    islands_gdf = compute_island_geodataframe_from_graph(
+        hazard_graph_path,
+        hazard_threshold=hazard_threshold,
+        hazard_column=hazard_column,
+        buffer_distance=20,
+        verbose=False,
+        l1_area_geojson=l1_area_geojson,
+    )
+
+    projected_crs = 'epsg:28992'
+    islands_gdf = islands_gdf.to_crs(projected_crs)
+    match_cols = ['geometry', 'type'] if 'type' in gdf_assets.columns else ['geometry']
+    match_gdf = gdf_assets[match_cols].copy().to_crs(projected_crs)
+    match_gdf['asset_id'] = match_gdf.index
+
+    spatial_idx = create_spatial_index(islands_gdf)
+    centroids = match_gdf.geometry.centroid
+    buffers = centroids.apply(lambda c: c.buffer(search_radius))
+
+    def _find_nearest_rfid(centroid, buffer):
+        candidate_idxs = list(spatial_idx.intersection(buffer.bounds))
+        if not candidate_idxs:
+            return -1
+        candidates = islands_gdf.iloc[candidate_idxs]
+        if candidates.empty:
+            return -1
+        distances = candidates.geometry.distance(centroid)
+        if distances.empty:
+            return -1
+        return candidates.loc[distances.idxmin(), 'rfid']
+
+    match_gdf['access_rfid'] = [
+        _find_nearest_rfid(c, b) for c, b in zip(centroids, buffers)
+    ]
+    output_cols = ['asset_id', 'access_rfid', 'geometry'] + (['type'] if 'type' in match_gdf.columns else [])
+    return match_gdf[output_cols]
+
 
 def update_repair_crew_islands(
     available_repair_crews,      
@@ -872,7 +979,11 @@ def update_actor_islands(
                 overlap_cache[overlap_cache_key] = computed_probabilities
                 if _config is not None:
                     cache_dir = _config["interim_dir"]
-                    save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                    save_cache_if_due(
+                        lambda: save_overlap_cache(overlap_cache, cache_dir, hazard_dir),
+                        cache_name="overlap_cache",
+                        hazard_dir=hazard_dir,
+                    )
                     if verbose:
                         print(f"Cached initial distribution for {overlap_cache_key}")
                 if cache_updated is not None:
@@ -942,7 +1053,11 @@ def update_actor_islands(
             overlap_cache[overlap_cache_key] = transition_probabilities
             if _config is not None:
                 cache_dir = _config["interim_dir"]
-                save_overlap_cache(overlap_cache, cache_dir, hazard_dir)
+                save_cache_if_due(
+                    lambda: save_overlap_cache(overlap_cache, cache_dir, hazard_dir),
+                    cache_name="overlap_cache",
+                    hazard_dir=hazard_dir,
+                )
                 if verbose:
                     print(f"Cached transition probabilities for {overlap_cache_key}")
             if cache_updated is not None:

@@ -43,11 +43,14 @@ from ra2ce.network.network_config_data.network_config_data import (
     NetworkSection,
 )
 from ra2ce.ra2ce_handler import Ra2ceHandler
+from ra2ce.network.hazard.hazard_intersect.hazard_intersect_builder_for_tif import (
+    HazardIntersectBuilderForTif,
+)
 
 repo_root = Path(__file__).resolve().parent.parent.parent
 sys.path.append(str(repo_root))
 
-from config import get_development_config  # noqa: E402
+from config import get_config, get_development_config  # noqa: E402
 
 
 def get_all_files(directory) -> list[Path]:
@@ -88,13 +91,66 @@ def build_buffered_extent(hazard_map_path: Path, network_path: Path, buffer_frac
     return extent_path, hazard_crs
 
 
+def _patch_ra2ce_fraction_flooded():
+    """Replace ra2ce's per-edge rasterize+polygonize fraction-flooded overlay
+    with a precomputed, STRtree-indexed flood-polygon lookup (built once per
+    hazard file instead of once per edge). Exact same result (verified
+    bit-identical on the test fixture), ~150-300x faster than stock: the
+    per-edge cost drops from re-cropping+vectorizing the raster to an
+    `predicate="intersects"` index query plus summed per-candidate
+    intersection lengths. No `unary_union` is needed: polygons from
+    rasterio.features.shapes() are disjoint by construction, so summing each
+    candidate's intersection length independently equals the union's length.
+    See C:\\Users\\peregrin\\OneDrive - Stichting Deltares\\Documents\\ra2ce_improvements.md.
+    """
+    from rasterio.features import shapes
+    from shapely.geometry import shape
+    from shapely import STRtree
+
+    def _fast_fraction_flooded_array(self, line, src):
+        cache = getattr(self, "_flood_index_cache", None)
+        if cache is None:
+            cache = self._flood_index_cache = {}
+        entry = cache.get(src.name)
+        if entry is None:
+            arr = src.read(1)
+            flood_bool = arr > 0
+            polys = [
+                shape(geom)
+                for geom, _ in shapes(
+                    flood_bool.astype("uint8"), mask=flood_bool, transform=src.transform
+                )
+            ]
+            tree = STRtree(polys) if polys else None
+            entry = cache[src.name] = (polys, tree)
+        polys, tree = entry
+        if tree is None:
+            return 0.0
+        try:
+            idxs = tree.query(line, predicate="intersects")
+            if len(idxs) == 0:
+                return 0.0
+            total = sum(polys[i].intersection(line).length for i in idxs)
+            return total / line.length
+        except Exception as e:
+            print(f"_fast_fraction_flooded_array() {e} for line {line}")
+            return 0
+
+    HazardIntersectBuilderForTif._fraction_flooded_array = _fast_fraction_flooded_array
+
+
 def run_ra2ce(extent_path: Path, hazard_files: list[Path], hazard_crs, root_dir: Path, static_path: Path):
     """Build the RA2CE road network and overlay it with the hazard timesteps."""
+    _patch_ra2ce_fraction_flooded()
+
     network_section = NetworkSection(
         network_type=NetworkTypeEnum.DRIVE,
         source=SourceEnum.OSM_DOWNLOAD,
         polygon=extent_path,
         save_gpkg=True,
+        # Reuse an existing static/output_graph build instead of ra2ce wiping
+        # it via shutil.rmtree (network_config_wrapper.py L69) on every run.
+        reuse_network_output=True,
         road_types=[
             RoadTypeEnum.MOTORWAY, RoadTypeEnum.MOTORWAY_LINK, RoadTypeEnum.PRIMARY,
             RoadTypeEnum.PRIMARY_LINK, RoadTypeEnum.TRUNK, RoadTypeEnum.SECONDARY,
@@ -115,7 +171,6 @@ def run_ra2ce(extent_path: Path, hazard_files: list[Path], hazard_crs, root_dir:
     network_config_data = NetworkConfigData(
         root_path=root_dir,
         static_path=static_path,
-        output_path=static_path.joinpath("output_graph"),
         network=network_section,
         hazard=hazard_section,
     )
@@ -186,20 +241,21 @@ def fill_blank_hazard_rasters(hazard_files_dir: Path, blank_template_path: Path,
 
 
 def main():
-    # For the small repository test fixture. Swap for a production config /
-    # pass hazard_dir_override to point at the full dataset instead.
-    config = get_development_config()
+    # Test fixture (uncomment to switch back):
+    # config = get_development_config()
+    # number_of_timesteps = 10
+    # buffer_frac = 0.0
 
-    root_dir = config["data_dir"]
+    # Production:
+    config = get_config()
+    number_of_timesteps = 33
+    buffer_frac = 0.0  # model extent must be the raw hazard bbox, no buffer
+
+    root_dir = config["hazard_dir"].parent
     static_path = root_dir / "static"
     network_path = static_path / "network"
     output_path = static_path / "output_graph"
     hazard_files_dir = config["hazard_dir"]
-
-    # Test dataset only has meaningful hazard values in indices 1-5; indices
-    # 0 and 6-9 are blank. The full production dataset instead runs to 33
-    # timesteps - adjust this when reusing the script for that dataset.
-    number_of_timesteps = 10
 
     all_hazard_files = sorted(hazard_files_dir.glob("*.tif"), key=_timestep_index)
     blank_template_path = next(p for p in all_hazard_files if _timestep_index(p) == 0)
@@ -218,7 +274,7 @@ def main():
     for p in real_hazard_files:
         print(f"  {p.name}")
 
-    extent_path, hazard_crs = build_buffered_extent(real_hazard_files[0], network_path)
+    extent_path, hazard_crs = build_buffered_extent(real_hazard_files[0], network_path, buffer_frac=buffer_frac)
     run_ra2ce(extent_path, real_hazard_files, hazard_crs, root_dir, static_path)
 
     output_graph = zero_pad_hazard_graph(output_path, number_of_timesteps)

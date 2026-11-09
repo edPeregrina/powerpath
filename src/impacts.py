@@ -13,6 +13,11 @@ from shapely.geometry import box
 _VORONOI_CACHE = {}
 _VORONOI_CACHE_VERSION = "1.0.0"
 
+#: Cache for `create_weighted_voronoi_for_asset_type` -- stores
+#: ``(voronoi_gdf, diagnostics)`` tuples, keyed by `build_weighted_voronoi_cache_key`.
+_WEIGHTED_VORONOI_CACHE = {}
+_WEIGHTED_VORONOI_CACHE_VERSION = "1.0.0"
+
 def load_voll_data(voll_path=None):
     """
     Load Value of Lost Load (VOLL) data from CSV and create mapping dictionaries.
@@ -188,16 +193,17 @@ def create_voronoi_for_asset_type(
     polygons = []
     valid_asset_ids = []
 
-    centroids_union = (
-        assets_filtered.geometry.union_all()
-        if hasattr(assets_filtered.geometry, "union_all")
-        else assets_filtered.geometry.unary_union
-    )
-    convex_hull = centroids_union.convex_hull.buffer(200)
+    # The convex hull is only a fallback clip region for boundary=None; when a
+    # real boundary is supplied, cells should cover the whole boundary (points
+    # outside the hull of the generators are still closer to *some* site and
+    # must be assigned to it, not left uncovered).
     if boundary is None:
-        boundary = convex_hull
-    else:
-        boundary = boundary.intersection(convex_hull)
+        centroids_union = (
+            assets_filtered.geometry.union_all()
+            if hasattr(assets_filtered.geometry, "union_all")
+            else assets_filtered.geometry.unary_union
+        )
+        boundary = centroids_union.convex_hull.buffer(200)
 
     if verbose:
         print(f"Sample points: {points[:3]}")
@@ -251,6 +257,336 @@ def create_voronoi_boundary(gdf_assets, buffer=200):
     convex_hull = centroids_union.convex_hull.buffer(buffer)
     return convex_hull
 
+
+def build_weighted_voronoi_cache_key(
+    gdf_assets,
+    asset_type,
+    weight_column,
+    boundary=None,
+    *,
+    weight_scale_factor=1.0,
+    exclude_column=None,
+    asset_cache_key=None,
+    buffer_distance=200.0,
+    min_interior_margin=1e-6,
+):
+    """Build a deterministic cache key for weighted-Voronoi (power diagram) generation."""
+    from src.caching import get_asset_centroid_hash
+
+    normalized_assets = gpd.GeoDataFrame(
+        gdf_assets.copy(),
+        geometry=gdf_assets.geometry.name,
+        crs=gdf_assets.crs,
+    ).to_crs("EPSG:28992")
+    provider_assets = normalized_assets[
+        normalized_assets["type"].astype(str) == str(asset_type)
+    ].copy()
+    if exclude_column and exclude_column in provider_assets.columns:
+        provider_assets = provider_assets[~provider_assets[exclude_column].astype(bool)]
+    provider_assets["geometry"] = provider_assets.geometry.centroid
+    normalized_boundary = _normalize_voronoi_boundary(boundary)
+    if asset_cache_key is None:
+        asset_cache_key = get_asset_centroid_hash(normalized_assets[["geometry"]].copy())
+    if weight_column in provider_assets.columns:
+        raw_weights = (
+            pd.to_numeric(provider_assets[weight_column], errors="coerce")
+            .fillna(0.0)
+            .tolist()
+        )
+    else:
+        raw_weights = []
+    key_dict = {
+        "version": _WEIGHTED_VORONOI_CACHE_VERSION,
+        "asset_cache_key": asset_cache_key,
+        "asset_type": str(asset_type),
+        "provider_count": int(len(provider_assets)),
+        "provider_geometry_hash": _hash_geometry_sequence(
+            provider_assets.geometry,
+            crs=provider_assets.crs,
+        ),
+        "provider_id_hash": _hash_value_sequence(provider_assets.index.tolist()),
+        "weight_column": str(weight_column),
+        "weight_values_hash": _hash_value_sequence(raw_weights),
+        "weight_scale_factor": float(weight_scale_factor),
+        "exclude_column": str(exclude_column) if exclude_column else None,
+        "boundary_hash": (
+            _hash_geometry_sequence([normalized_boundary], crs="EPSG:28992")
+            if normalized_boundary is not None
+            else "convex_hull"
+        ),
+        "target_crs": "EPSG:28992",
+        "buffer_distance": float(buffer_distance),
+        "min_interior_margin": float(min_interior_margin),
+    }
+    return hashlib.sha256(json.dumps(key_dict, sort_keys=True).encode()).hexdigest()[:24]
+
+
+def create_weighted_voronoi_for_asset_type(
+    gdf_assets,
+    asset_type,
+    weight_column,
+    boundary=None,
+    *,
+    weight_scale_factor=1.0,
+    exclude_column=None,
+    verbose=False,
+    asset_cache_key=None,
+    use_cache=True,
+    return_diagnostics=False,
+    min_interior_margin=1e-6,
+):
+    """Create power-diagram (additively-weighted Voronoi) polygons for a specific
+    asset type, weighted by *weight_column* (e.g. pupil counts), clipped to boundary.
+
+    Implementation note
+    --------------------
+    Computed via half-space intersection *per site*
+    (``scipy.spatial.HalfspaceIntersection``), **not** the paraboloid-lifting +
+    3D-convex-hull-dual construction some references use for power diagrams:
+    the lower convex hull of lifted points only yields the *weighted Delaunay
+    triangulation*, the power diagram is that triangulation's dual and would
+    require extra, numerically fragile bookkeeping to extract cell polygons
+    from it. Instead, each site's cell is built directly as the intersection
+    of half-planes ``{x : dist(x, p_i)^2 - w_i <= dist(x, p_j)^2 - w_j}`` for
+    every competing site ``j``, which reuses the same boundary-clip machinery
+    as :func:`create_voronoi_for_asset_type`.
+
+    A site's power cell may legitimately be **empty** if it is fully
+    dominated by higher-weight neighbours -- this is expected power-diagram
+    behaviour (not a bug). Emptiness is detected via a Chebyshev-center
+    feasibility check (``scipy.optimize.linprog``) *before* calling
+    ``HalfspaceIntersection``, so a dominated site is simply absent from the
+    output (and recorded in *diagnostics*) rather than raising.
+
+    Weight handling
+    ---------------
+    Raw values in *weight_column* are normalized by their mean (so the "unit"
+    weight is 1.0, independent of the raw values' scale) and then multiplied
+    by *weight_scale_factor* to bring them into the same order of magnitude
+    as squared distances (CRS units^2 -- typically meters^2 for EPSG:28992).
+    Without this scaling, small raw weights (e.g. pupil counts in the tens to
+    tens of thousands) are negligible against dist^2 (often 10^5-10^8) and
+    the diagram collapses to an effectively unweighted one.
+    *weight_scale_factor* currently has **no principled, calibrated default**
+    -- callers must pick a value appropriate to their data; tests use a
+    placeholder value pending real DUO/CBS capacity-data calibration.
+
+    Args:
+        gdf_assets (GeoDataFrame): GeoDataFrame with assets, including a
+            ``'type'`` column and *weight_column*.
+        asset_type (str): Type of asset to filter for.
+        weight_column (str): Column in *gdf_assets* holding the raw weight
+            per asset (e.g. pupil counts).
+        boundary (Optional[Union[GeoSeries, Polygon]]): Optional boundary to
+            clip polygons to.
+        weight_scale_factor (float): Multiplier applied to mean-normalized
+            weights before use as the power diagram's additive term.
+        exclude_column (Optional[str]): If given, a boolean column in
+            *gdf_assets* -- rows where it is truthy are excluded from the
+            tessellation entirely (e.g. non-spatial/"remote" providers whose
+            capacity shouldn't distort geometric catchments).
+        return_diagnostics (bool): When True, also return a diagnostics dict
+            with per-provider Chebyshev-center margins and the list of
+            providers whose cell was empty (fully dominated).
+        min_interior_margin (float): Minimum Chebyshev-center margin (CRS
+            units) required to treat a site's cell as non-empty.
+
+    Returns:
+        GeoDataFrame, or (GeoDataFrame, dict) when *return_diagnostics*:
+            Power-diagram polygons with an ``asset_id`` column (providers
+            with an empty cell are simply absent from the output).
+    """
+    from scipy.optimize import linprog
+    from scipy.spatial import ConvexHull as _ConvexHull
+    from scipy.spatial import HalfspaceIntersection
+
+    cache_key = build_weighted_voronoi_cache_key(
+        gdf_assets,
+        asset_type,
+        weight_column,
+        boundary=boundary,
+        weight_scale_factor=weight_scale_factor,
+        exclude_column=exclude_column,
+        asset_cache_key=asset_cache_key,
+        min_interior_margin=min_interior_margin,
+    )
+    if use_cache and cache_key in _WEIGHTED_VORONOI_CACHE:
+        cached_gdf, cached_diagnostics = _WEIGHTED_VORONOI_CACHE[cache_key]
+        if return_diagnostics:
+            return cached_gdf.copy(), dict(cached_diagnostics)
+        return cached_gdf.copy()
+
+    assets_filtered = gdf_assets[gdf_assets['type'] == asset_type].copy()
+    if exclude_column and exclude_column in assets_filtered.columns:
+        assets_filtered = assets_filtered[~assets_filtered[exclude_column].astype(bool)]
+    assets_filtered = assets_filtered.to_crs("EPSG:28992")
+    assets_filtered['geometry'] = assets_filtered.geometry.centroid
+
+    asset_ids = assets_filtered.index.tolist()
+    diagnostics = {
+        "provider_count": len(asset_ids),
+        "empty_providers": [],
+        "interior_margins": {},
+    }
+
+    if len(asset_ids) == 0:
+        empty_gdf = gpd.GeoDataFrame(columns=['asset_id', 'geometry'], crs="EPSG:28992")
+        if use_cache:
+            _WEIGHTED_VORONOI_CACHE[cache_key] = (empty_gdf.copy(), dict(diagnostics))
+        if return_diagnostics:
+            return empty_gdf, diagnostics
+        return empty_gdf
+
+    points = np.column_stack((
+        assets_filtered.geometry.x.to_numpy(dtype=float),
+        assets_filtered.geometry.y.to_numpy(dtype=float),
+    ))
+
+    # Exactly-coincident provider locations (e.g. co-located facilities) make
+    # the pairwise half-space between them degenerate: a = 2*(p_j - p_i) is
+    # [0, 0], and with equal weights b is also 0, giving scipy's
+    # HalfspaceIntersection a zero-normal [0, 0, 0] row it cannot resolve --
+    # both providers then fail and are marked "empty". Nudge duplicate points
+    # apart by a deterministic, sub-millimetre offset (ordered by position so
+    # the tie-break is reproducible) before building the half-spaces; this is
+    # negligible against real geometry (CRS units are metres) but guarantees
+    # every pairwise normal vector is non-zero.
+    _COINCIDENT_NUDGE = 1e-6
+    coord_to_positions: dict = {}
+    for pos, pt in enumerate(points):
+        key = (round(float(pt[0]), 6), round(float(pt[1]), 6))
+        coord_to_positions.setdefault(key, []).append(pos)
+    for dup_positions in coord_to_positions.values():
+        if len(dup_positions) < 2:
+            continue
+        for rank, pos in enumerate(sorted(dup_positions)):
+            angle = 2.0 * np.pi * rank / len(dup_positions)
+            points[pos, 0] += _COINCIDENT_NUDGE * np.cos(angle)
+            points[pos, 1] += _COINCIDENT_NUDGE * np.sin(angle)
+
+    if weight_column in assets_filtered.columns:
+        raw_weights = (
+            pd.to_numeric(assets_filtered[weight_column], errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+        )
+    else:
+        warnings.warn(
+            f"weight_column {weight_column!r} not found on {asset_type!r} assets; "
+            "falling back to an unweighted (ordinary) Voronoi partition.",
+            stacklevel=2,
+        )
+        raw_weights = np.zeros(len(asset_ids), dtype=float)
+    mean_weight = raw_weights.mean()
+    mean_weight = mean_weight if mean_weight != 0 else 1.0
+    weights = (raw_weights / mean_weight) * float(weight_scale_factor)
+
+    normalized_boundary = _normalize_voronoi_boundary(boundary)
+    # The convex hull is only a fallback clip region for boundary=None; when a
+    # real boundary is supplied, cells should cover the whole boundary (points
+    # outside the hull of the generators are still closer to *some* site and
+    # must be assigned to it, not left uncovered).
+    if normalized_boundary is None:
+        centroids_union = (
+            assets_filtered.geometry.union_all()
+            if hasattr(assets_filtered.geometry, "union_all")
+            else assets_filtered.geometry.unary_union
+        )
+        clip_boundary = centroids_union.convex_hull.buffer(200)
+    else:
+        clip_boundary = normalized_boundary
+
+    # Bound the half-space intersection with a generous bounding box so it's
+    # always well-posed even for providers on the convex-hull edge; the real
+    # (possibly non-convex) clip_boundary is applied afterwards via shapely,
+    # mirroring create_voronoi_for_asset_type's two-step clip pattern.
+    minx, miny, maxx, maxy = clip_boundary.bounds
+    margin = max(maxx - minx, maxy - miny, 1.0) * 0.5 + 200.0
+    minx, miny, maxx, maxy = minx - margin, miny - margin, maxx + margin, maxy + margin
+    bbox_halfspaces = [
+        [-1.0, 0.0, minx],
+        [1.0, 0.0, -maxx],
+        [0.0, -1.0, miny],
+        [0.0, 1.0, -maxy],
+    ]
+
+    polygons = []
+    valid_asset_ids = []
+    n = len(asset_ids)
+    for i in range(n):
+        p_i = points[i]
+        w_i = weights[i]
+        pair_rows = []
+        for j in range(n):
+            if j == i:
+                continue
+            p_j = points[j]
+            w_j = weights[j]
+            # Site i's cell requires power(x, p_i) <= power(x, p_j), i.e.
+            # |x-p_i|^2 - w_i <= |x-p_j|^2 - w_j, which linearizes to
+            # 2(p_j - p_i)*x + [(|p_i|^2 - w_i) - (|p_j|^2 - w_j)] <= 0.
+            a = 2.0 * (p_j - p_i)
+            b = (float(np.dot(p_i, p_i)) - w_i) - (float(np.dot(p_j, p_j)) - w_j)
+            pair_rows.append([a[0], a[1], b])
+        halfspaces = np.array(pair_rows + bbox_halfspaces)
+
+        # Chebyshev center: maximize r s.t. a.x + r*||a|| <= -b for every
+        # half-plane -- also doubles as the empty-cell feasibility check
+        # (r <= min_interior_margin means the site is fully dominated).
+        norms = np.linalg.norm(halfspaces[:, :2], axis=1)
+        a_ub = np.column_stack((halfspaces[:, :2], norms))
+        b_ub = -halfspaces[:, 2]
+        c = np.array([0.0, 0.0, -1.0])
+        try:
+            res = linprog(c, A_ub=a_ub, b_ub=b_ub, bounds=[(None, None)] * 3, method="highs")
+        except Exception as exc:
+            if verbose:
+                print(f"Chebyshev-center LP failed for asset {asset_ids[i]}: {exc}")
+            res = None
+
+        margin_r = -res.fun if (res is not None and res.success) else -np.inf
+        diagnostics["interior_margins"][asset_ids[i]] = (
+            float(margin_r) if np.isfinite(margin_r) else None
+        )
+
+        if res is None or not res.success or margin_r <= min_interior_margin:
+            diagnostics["empty_providers"].append(asset_ids[i])
+            continue
+
+        interior_point = res.x[:2]
+        try:
+            hs = HalfspaceIntersection(halfspaces, interior_point)
+            verts = hs.intersections
+            if len(verts) < 3:
+                diagnostics["empty_providers"].append(asset_ids[i])
+                continue
+            hull = _ConvexHull(verts)
+            polygon = Polygon(verts[hull.vertices])
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            clipped_polygon = polygon.intersection(clip_boundary)
+            if not clipped_polygon.is_empty and clipped_polygon.is_valid:
+                polygons.append(clipped_polygon)
+                valid_asset_ids.append(asset_ids[i])
+            else:
+                diagnostics["empty_providers"].append(asset_ids[i])
+        except Exception as exc:
+            if verbose:
+                print(f"Error building power-diagram cell for asset {asset_ids[i]}: {exc}")
+            diagnostics["empty_providers"].append(asset_ids[i])
+
+    voronoi_gdf = gpd.GeoDataFrame(
+        {'asset_id': valid_asset_ids, 'geometry': polygons}, crs="EPSG:28992"
+    )
+
+    if use_cache:
+        _WEIGHTED_VORONOI_CACHE[cache_key] = (voronoi_gdf.copy(), dict(diagnostics))
+
+    if return_diagnostics:
+        return voronoi_gdf, diagnostics
+    return voronoi_gdf
+
+
 def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aantal_inwoners'):
     """Assign impact metric to Voronoi polygons using area-weighted intersection
     
@@ -278,6 +614,8 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
     # Create spatial index for impact data
     impact_sindex = impact_grid.sindex
     
+    impact_grid["_covered_area"] = 0.0
+
     # Process each Voronoi polygon - use asset_id directly
     asset_impacts = {}
     
@@ -293,7 +631,7 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
         total_weighted_impact = 0.0
         
         # Calculate precise intersections with each potential matching grid cell
-        for _, impact_cell in possible_matches.iterrows():
+        for cell_idx, impact_cell in possible_matches.iterrows():
             if voronoi_geom.intersects(impact_cell.geometry):
                 intersection = voronoi_geom.intersection(impact_cell.geometry)
                 intersect_area = intersection.area
@@ -303,9 +641,25 @@ def assign_impact_metric_to_voronoi(voronoi_gdf, impact_data, impact_column='aan
                     impact_cell[impact_column] * intersect_area / impact_cell["cell_area"]
                 )
                 total_weighted_impact += weighted_impact
+                impact_grid.loc[cell_idx, "_covered_area"] += intersect_area
         
         # Store the result directly in the dictionary using asset_id as key
         asset_impacts[asset_id] = total_weighted_impact
+
+    # Cells with no Voronoi coverage (e.g. clipped-edge gaps) go to the
+    # nearest polygon instead of being silently dropped. Distance is measured
+    # to the polygon geometry itself (not its centroid) -- for elongated or
+    # irregular service areas, centroid-to-centroid distance can pick the
+    # wrong (farther) polygon, matching the pattern already used in
+    # build_voronoi_service_area_map (src/utils.py).
+    uncovered = impact_grid[impact_grid["_covered_area"] < impact_grid["cell_area"] * 1e-6]
+    if not uncovered.empty:
+        voronoi_geoms = voronoi.geometry
+        for _, cell in uncovered.iterrows():
+            cell_centroid = cell.geometry.centroid
+            nearest_pos = voronoi_geoms.distance(cell_centroid).idxmin()
+            nearest_asset_id = voronoi.loc[nearest_pos, 'asset_id']
+            asset_impacts[nearest_asset_id] = asset_impacts.get(nearest_asset_id, 0.0) + cell[impact_column]
     
     # Add the impact metrics directly to the Voronoi GeoDataFrame
     voronoi['assigned_impact_metric'] = voronoi['asset_id'].map(asset_impacts).fillna(0)
