@@ -38,8 +38,9 @@ islands-constrained policy without any L1/L2 measure (the fairest
 counterfactual for isolating adaptation effects from repair strategy).
 
 Every figure's underlying statistics are computed over the FULL policy set
-(all 168 adaptation policies x 100 scenarios); only the *plots* subsample for
-legibility (documented per-figure below). Each figure's underlying stats
+(all 168 adaptation policies x however many scenarios the loaded archive
+contains); only the *plots* subsample for legibility (documented per-figure
+below). Each figure's underlying stats
 table is written as a CSV alongside its PNG in ``data/output/
 paper_figures_group_equity/``:
 
@@ -74,9 +75,8 @@ sys.path.append(str(REPO_ROOT))
 from ema_workbench.util.utilities import load_results  # noqa: E402
 
 DEFAULT_RESULTS_PATH = Path(
-#     r"C:\Users\peregrin\OneDrive - Stichting Deltares\Documents\Save runs\Powerpath"
-#     r"\1791817945\ema_results_1791817945_full_extent_adaptation.tar.gz"
-    r"C:\repos\powerpath\powerpath\data\output\output_hazard_maps_ZH_Delfland\ema_exports\ema_results_1793695060_full_extent_adaptation.tar.gz"
+    r"C:\repos\powerpath\powerpath\data\output\output_hazard_maps_ZH_Delfland\ema_exports"
+    r"\ema_results_1793979616_full_extent_adaptation.tar.gz"
 )
 CACHE_DIR = REPO_ROOT / "data" / "interim" / "paper_figures_group_equity_cache"
 FIG_DIR = REPO_ROOT / "data" / "output" / "paper_figures_group_equity"
