@@ -66,7 +66,6 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
         recovery_parameters.get("repair_time_coefficients", [702.72, 3.14, 1.9891]),
         recovery_parameters.get("repair_threshold", 2.0),
     )
-    repair_time = np.where(intrinsic_operational, 0.0, repair_time)
 
     rfids_islands = dict(zip(roads["rfid"], roads["island_id"]))
     available_repair_crews, _ = _compute_initial_distribution(
