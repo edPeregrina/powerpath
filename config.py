@@ -197,6 +197,14 @@ def get_config(root_dir=None, hazard_dir_override=None):
             #     from reconnecting components separated by the hazard.
             'event_footprint_path': None,
             'outside_footprint_policy': 'permissive',
+            # Road hazard exemptions (see src.utils.filter_hazard_graph): when True
+            # (default, existing behaviour) these roads are never failed by the
+            # flood threshold; set False to let flooding cut them. Edges tagged
+            # 'protected' are always exempt. Changing these changes island
+            # results, so clear data/interim island/access caches when you do.
+            'exempt_motorways': True,
+            'exempt_bridges': True,
+            'exempt_tunnels': True,
         },
         
         # Recovery model parameters

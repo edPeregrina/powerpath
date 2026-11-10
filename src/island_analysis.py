@@ -233,6 +233,16 @@ def _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPS
     return cached.copy()
 
 
+def _road_exemption_kwargs(config):
+    """Road hazard-exemption flags from ``simulation_config`` (all default True)."""
+    sim = config.get('simulation_config', {})
+    return {
+        'exempt_motorways': sim.get('exempt_motorways', True),
+        'exempt_bridges': sim.get('exempt_bridges', True),
+        'exempt_tunnels': sim.get('exempt_tunnels', True),
+    }
+
+
 def compute_island_geodataframe_from_graph(
     graph_pickle_path: str, 
     hazard_threshold: float, 
@@ -242,6 +252,9 @@ def compute_island_geodataframe_from_graph(
     l1_area_geojson=None,
     event_footprint=None,
     outside_footprint_policy="permissive",
+    exempt_motorways=True,
+    exempt_bridges=True,
+    exempt_tunnels=True,
 ) -> gpd.GeoDataFrame:
     """
     Create GeoDataFrame from graph with buffered road geometries.
@@ -261,6 +274,9 @@ def compute_island_geodataframe_from_graph(
         l1_area_geojson=l1_area_geojson,
         event_footprint=event_footprint,
         outside_footprint_policy=outside_footprint_policy,
+        exempt_motorways=exempt_motorways,
+        exempt_bridges=exempt_bridges,
+        exempt_tunnels=exempt_tunnels,
         verbose=verbose
     )
 
@@ -460,6 +476,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
+            **_road_exemption_kwargs(_config),
         )
         rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
 
@@ -680,6 +697,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
+            **_road_exemption_kwargs(_config),
         )
 
         # Drop the boundary rfids and find the main island
@@ -797,6 +815,7 @@ def build_asset_road_match_table(
         buffer_distance=20,
         verbose=False,
         l1_area_geojson=l1_area_geojson,
+        **_road_exemption_kwargs(config),
     )
 
     projected_crs = 'epsg:28992'

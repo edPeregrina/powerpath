@@ -204,6 +204,37 @@ def test_filter_hazard_graph_rejects_l2_kwarg():
         filter_hazard_graph(graph.copy(), 0.2, "EV0_ma", l2_asset_geojson=l2)
 
 
+@pytest.mark.parametrize(
+    "flag, attrs",
+    [
+        ("exempt_motorways", {"highway": "motorway"}),
+        ("exempt_bridges", {"bridge": "yes"}),
+        ("exempt_tunnels", {"tunnel": "yes"}),
+    ],
+)
+def test_filter_hazard_graph_exemption_flags(flag, attrs):
+    nx = pytest.importorskip("networkx")
+    from src.utils import filter_hazard_graph
+
+    def build():
+        g = nx.Graph()
+        for i in range(4):
+            g.add_node(i, x=float(i), y=0.0)
+        g.add_edge(0, 1, geometry=LineString([(0, 0), (1, 0)]), EV0_ma=0.0)
+        g.add_edge(1, 2, geometry=LineString([(1, 0), (2, 0)]), EV0_ma=0.9, **attrs)
+        g.add_edge(2, 3, geometry=LineString([(2, 0), (3, 0)]), EV0_ma=0.9, protected="yes")
+        return g
+
+    default = filter_hazard_graph(build(), 0.2, "EV0_ma")
+    assert default.has_edge(1, 2)
+    off = filter_hazard_graph(build(), 0.2, "EV0_ma", **{flag: False})
+    assert not off.has_edge(1, 2)
+    assert off.has_edge(2, 3)  # explicit 'protected' tag stays exempt
+    others = {"exempt_motorways", "exempt_bridges", "exempt_tunnels"} - {flag}
+    still = filter_hazard_graph(build(), 0.2, "EV0_ma", **{o: False for o in others})
+    assert still.has_edge(1, 2)
+
+
 def test_adaptation_geodataframe_is_not_mutated():
     from src.adaptation import build_l1_l2_reduction_array
 

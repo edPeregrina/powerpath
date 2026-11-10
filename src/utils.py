@@ -1,7 +1,9 @@
 
 import geopandas as gpd
 import networkx as nx
+import numpy as np
 import pandas as pd
+import shapely
 import shapely.geometry as sg
 from pyproj import Transformer
 from rtree import index
@@ -61,10 +63,69 @@ def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
 
     return G
 
+def is_motorway(highway):
+    if isinstance(highway, str):
+        return "motorway" in highway.lower()
+    elif isinstance(highway, list):
+        return any("motorway" in str(h).lower() for h in highway)
+    return False
+
+
+def _tag_is_set(val):
+    """True if an OSM-style tag (str/list/scalar) carries a real value."""
+    if val is None:
+        return False
+    if isinstance(val, list):
+        return any(
+            item is not None and
+            str(item).strip().lower() not in ['', 'nan', 'none', 'no']
+            for item in val
+        )
+    if isinstance(val, str):
+        return val.strip().lower() not in ['', 'nan', 'none', 'no']
+    return pd.notna(val)
+
+
+def edge_exempt_mask(edge_data, exempt_motorways=True, exempt_bridges=True,
+                     exempt_tunnels=True):
+    """Boolean array: edges that are never removed by hazard thresholding.
+
+    Motorways, bridges and tunnels are exempt by default (existing behaviour);
+    pass ``False`` to let the hazard fail them like any other road. Edges with
+    an explicit ``protected`` tag are always exempt.
+    """
+    return np.array([
+        (exempt_motorways and is_motorway(d.get("highway")))
+        or (exempt_bridges and _tag_is_set(d.get("bridge")))
+        or (exempt_tunnels and _tag_is_set(d.get("tunnel")))
+        or _tag_is_set(d.get("protected"))
+        for d in edge_data
+    ], dtype=bool)
+
+
+def l1_edge_depth_reduction(edge_geoms, adapt_geoms, depth_red):
+    """Per-edge L1 reduction: max ``depth_red`` over intersecting polygons (0 if none)."""
+    reduction = np.zeros(len(edge_geoms))
+    if len(edge_geoms) == 0 or len(adapt_geoms) == 0:
+        return reduction
+    tree = shapely.STRtree(adapt_geoms)
+    edge_idx, adapt_idx = tree.query(
+        np.array(edge_geoms, dtype=object), predicate="intersects"
+    )
+    np.maximum.at(reduction, edge_idx, depth_red[adapt_idx])
+    return reduction
+
+
+def hazard_removal_mask(hazard, threshold, depth_reduction, exempt):
+    """Shared rule: remove where hazard > threshold + L1 reduction, unless exempt."""
+    return (hazard > threshold + depth_reduction) & ~exempt
+
+
 def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
                         l1_area_geojson=None,
                         event_footprint=None, outside_footprint_policy="permissive",
-                        verbose=False) -> nx.Graph:
+                        verbose=False, exempt_motorways=True, exempt_bridges=True,
+                        exempt_tunnels=True) -> nx.Graph:
     """
     Filter graph edges based on hazard values, excluding protected infrastructure.
     Applies active L1 depth reductions by adjusting each edge threshold.
@@ -98,6 +159,10 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
         outside_footprint_policy: ``"strict"`` or ``"permissive"`` (default).
             Any other value raises ``ValueError``.
         verbose: Print progress messages
+        exempt_motorways, exempt_bridges, exempt_tunnels: When True (default)
+            such edges are never removed by the hazard threshold. Set False
+            to let the hazard fail them. Edges tagged ``protected`` are
+            always exempt.
     
     Returns:
         Filtered graph with hazard edges removed
@@ -120,92 +185,44 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
             "or use outside_footprint_policy='permissive'."
         )
 
-    def is_motorway(highway):
-        if isinstance(highway, str):
-            return "motorway" in highway.lower()
-        elif isinstance(highway, list):
-            return any("motorway" in str(h).lower() for h in highway)
-        return False
+    edges = list(
+        G.edges(keys=True, data=True) if G.is_multigraph()
+        else ((u, v, None, data) for u, v, data in G.edges(data=True))
+    )
 
-    def is_protected(d):
-        """Check if an edge represents protected infrastructure (bridge/tunnel)"""
-        def check_attribute(val):
-            if val is None:
-                return False
-            
-            if isinstance(val, list):
-                return any(
-                    item is not None and 
-                    str(item).strip().lower() not in ['', 'nan', 'none', 'no'] 
-                    for item in val
-                )
-            elif isinstance(val, str):
-                val_clean = val.strip().lower()
-                return val_clean not in ['', 'nan', 'none', 'no']
-            else:
-                return pd.notna(val)
-
-        return check_attribute(d.get("bridge")) or check_attribute(d.get("tunnel")) or check_attribute(d.get("protected"))
-
-    edge_depth_reductions = {}
-
-    def iter_edges_with_keys():
-        if G.is_multigraph():
-            return G.edges(keys=True, data=True)
-        return ((u, v, None, data) for u, v, data in G.edges(data=True))
-
-    def add_adaptation_depth_reductions(adaptation, label, default_reduction):
-        if adaptation is None:
-            return
-
-        adaptation_gdf = (
-            gpd.read_file(adaptation)
-            if isinstance(adaptation, (str, Path))
-            else adaptation.copy()
-        )
-        if "depth_red" not in adaptation_gdf.columns:
-            adaptation_gdf['depth_red'] = default_reduction
-            if verbose:
-                print(
-                    f"Warning: {label} GeoJSON missing 'depth_red' column, "
-                    f"using default {default_reduction}m"
-                )
-
-        # Ensure correct CRS (graph is in EPSG:4326)
-        if adaptation_gdf.crs != "EPSG:4326":
-            adaptation_gdf = adaptation_gdf.to_crs("EPSG:4326")
-
-        adaptation_tree = shapely.STRtree(adaptation_gdf.geometry.values)
-        adapted_edge_count = 0
-        for u, v, edge_key, data in iter_edges_with_keys():
-            edge_geom = data.get('geometry')
-
-            if edge_geom is None:
-                from shapely.geometry import LineString
-                edge_geom = LineString([
-                    (G.nodes[u]['x'], G.nodes[u]['y']),
-                    (G.nodes[v]['x'], G.nodes[v]['y'])
+    def edge_geometries():
+        geoms = []
+        for u, v, _, data in edges:
+            geom = data.get("geometry")
+            if geom is None:
+                geom = sg.LineString([
+                    (G.nodes[u]["x"], G.nodes[u]["y"]),
+                    (G.nodes[v]["x"], G.nodes[v]["y"]),
                 ])
+            geoms.append(geom)
+        return geoms
 
-            intersecting_indices = adaptation_tree.query(
-                edge_geom, predicate='intersects'
-            )
-            if len(intersecting_indices) > 0:
-                max_reduction = adaptation_gdf.iloc[
-                    intersecting_indices
-                ]['depth_red'].max()
-                cache_key = (u, v, edge_key)
-                edge_depth_reductions[cache_key] = (
-                    edge_depth_reductions.get(cache_key, 0.0) + max_reduction
-                )
-                adapted_edge_count += 1
-
-        if verbose:
-            print(f"Applied {label} to {adapted_edge_count} edges")
-
-    add_adaptation_depth_reductions(l1_area_geojson, "L1", 0.3)
     # L2 (asset-level) adaptations are intentionally not applied to road edges:
     # they protect specific assets, not roads, regardless of spatial overlap.
+    depth_reduction = np.zeros(len(edges))
+    if l1_area_geojson is not None:
+        adaptation_gdf = (
+            gpd.read_file(l1_area_geojson)
+            if isinstance(l1_area_geojson, (str, Path))
+            else l1_area_geojson.copy()
+        )
+        if "depth_red" not in adaptation_gdf.columns:
+            adaptation_gdf['depth_red'] = 0.3
+            if verbose:
+                print("Warning: L1 GeoJSON missing 'depth_red' column, using default 0.3m")
+        if adaptation_gdf.crs != "EPSG:4326":
+            adaptation_gdf = adaptation_gdf.to_crs("EPSG:4326")
+        depth_reduction = l1_edge_depth_reduction(
+            edge_geometries(), adaptation_gdf.geometry.values,
+            adaptation_gdf["depth_red"].to_numpy(dtype=float),
+        )
+        if verbose:
+            print(f"Applied L1 to {int((depth_reduction != 0).sum())} edges")
 
     # Resolve the footprint into a single shapely geometry (graph CRS, EPSG:4326)
     footprint_geom = None
@@ -231,43 +248,30 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
             )
 
     # Filter edges based on adjusted thresholds
-    edges_to_remove = []
-    footprint_edges_removed = 0
-
-    for u, v, edge_key, d in iter_edges_with_keys():
-        edge = (u, v, edge_key) if G.is_multigraph() else (u, v)
-
+    footprint_removed = np.zeros(len(edges), dtype=bool)
+    if outside_footprint_policy == "strict" and footprint_geom is not None:
         # Strict connectivity-boundary policy: an edge that does not intersect
         # the event footprint at all cannot be used as an exterior bypass to
         # reconnect components separated by the hazard inside the footprint,
         # so it is removed regardless of its hazard value.
-        if outside_footprint_policy == "strict" and footprint_geom is not None:
-            edge_geom = d.get("geometry")
-            if edge_geom is None:
-                from shapely.geometry import LineString
-                edge_geom = LineString([
-                    (G.nodes[u]["x"], G.nodes[u]["y"]),
-                    (G.nodes[v]["x"], G.nodes[v]["y"]),
-                ])
-            if not edge_geom.intersects(footprint_geom):
-                edges_to_remove.append(edge)
-                footprint_edges_removed += 1
-                continue
+        footprint_removed = ~shapely.intersects(
+            np.array(edge_geometries(), dtype=object), footprint_geom
+        )
 
-        hazard_value = d.get(hazard_column, 0)
-        
-        # Get edge-specific depth reduction
-        depth_reduction = edge_depth_reductions.get((u, v, edge_key), 0.0)
-        
-        # Adjusted threshold: hazard must exceed (base_threshold + reduction)
-        adjusted_threshold = threshold + depth_reduction
-        
-        # Remove edge if hazard exceeds adjusted threshold (and not protected)
-        if (hazard_value > adjusted_threshold and 
-            not is_motorway(d.get("highway")) and 
-            not is_protected(d)):
-            edges_to_remove.append(edge)
-    
+    hazard = np.array([d.get(hazard_column, 0) for _, _, _, d in edges], dtype=float)
+    exempt = edge_exempt_mask(
+        [d for _, _, _, d in edges],
+        exempt_motorways=exempt_motorways,
+        exempt_bridges=exempt_bridges,
+        exempt_tunnels=exempt_tunnels,
+    )
+    remove = footprint_removed | hazard_removal_mask(hazard, threshold, depth_reduction, exempt)
+
+    edges_to_remove = [
+        (u, v, k) if G.is_multigraph() else (u, v)
+        for (u, v, k, _), r in zip(edges, remove) if r
+    ]
+    footprint_edges_removed = int(footprint_removed.sum())
     G.remove_edges_from(edges_to_remove)
     G.remove_nodes_from(list(nx.isolates(G)))
     
