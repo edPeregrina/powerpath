@@ -33,6 +33,7 @@ from src.realized_state_cache import (
 )
 from src.damage_recovery import (
     default_fragility_function,
+    with_steepness_overrides,
     update_damage_and_repair,
 )
 from src.dependency_evaluator import (
@@ -428,19 +429,11 @@ def _update_hazard_map_states(
             # they aren't also forced through a repair cycle. See
             # `_fragility_exclusions_from_knowledge_graph`.
             fragility_exclusions = _fragility_exclusions_from_knowledge_graph(_config, asset_type_subset)
-            # Non-destructively layer per-asset-type steepness overrides (e.g. from
-            # EMA uncertainties, see combine_per_type_fragility_steepness_kwargs)
-            # on top of the configured fragility_models, without mutating the
-            # shared config dict (it is reused across every EMA experiment).
-            base_fragility_models = _config['recovery_parameters'].get('fragility_models') or {}
-            fragility_models = base_fragility_models
-            if fragility_steepness_overrides:
-                fragility_models = dict(base_fragility_models)
-                for override_type, steepness in fragility_steepness_overrides.items():
-                    fragility_models[override_type] = {
-                        **fragility_models.get(override_type, {}),
-                        'steepness': steepness,
-                    }
+            # Per-asset-type steepness overrides (e.g. from EMA uncertainties, see
+            # combine_per_type_fragility_steepness_kwargs) layered on the configured models.
+            fragility_models = with_steepness_overrides(
+                _config['recovery_parameters'].get('fragility_models'), fragility_steepness_overrides
+            )
             fragility_result = default_fragility_function(
                 hazard_subset,
                 asset_type_subset,

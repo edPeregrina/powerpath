@@ -217,6 +217,18 @@ def hospital_fragility_function(
     )
 
 
+def with_steepness_overrides(fragility_models, steepness_overrides=None):
+    """``fragility_models`` with per-asset-type ``steepness`` layered on, without mutating the input
+    (the config dict is shared across every EMA experiment)."""
+    base = fragility_models or {}
+    if not steepness_overrides:
+        return base
+    models = dict(base)
+    for asset_type, steepness in steepness_overrides.items():
+        models[asset_type] = {**models.get(asset_type, {}), "steepness": steepness}
+    return models
+
+
 def resolve_fragility_model(asset_name, fragility_models=None):
     """Explicit model for ``asset_name`` if given, else the default depth-logistic model."""
     model = (fragility_models or {}).get(str(asset_name))

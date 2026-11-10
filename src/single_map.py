@@ -1,7 +1,11 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
 import numpy as np
 
-from src.damage_recovery import default_fragility_function, update_damage_and_repair
+from src.damage_recovery import (
+    default_fragility_function,
+    update_damage_and_repair,
+    with_steepness_overrides,
+)
 from src.island_analysis import _compute_initial_distribution
 from src.road_islands import (
     attach_assets_undisrupted,
@@ -55,10 +59,14 @@ def sample_flood_durations(uniforms, params=None):
 
 def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, random_values,
                         recovery_parameters, flood_threshold, flood_duration=0.0,
-                        fragility_k=None, fragility_exclusions=None, method="random"):
+                        fragility_k=None, fragility_steepness_overrides=None,
+                        fragility_exclusions=None, method="random"):
     """Peak-state outcome for one map via the shared multi-map building blocks (no time stepping).
 
     ``random_values``: one uniform draw per asset, reused across policies (common random numbers).
+    Fragility is configured as in multi-map: ``recovery_parameters["fragility_models"]``,
+    per-type ``fragility_steepness_overrides`` and ``fragility_exclusions`` (see
+    ``simulation._fragility_exclusions_from_knowledge_graph``).
     ``recovery_time`` = flood duration + ``repair_time`` for assets that are not intrinsically operational.
     """
     hazard_values = np.asarray(hazard_values, dtype=float)
@@ -68,10 +76,13 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
 
     intrinsic_operational = np.ones(len(hazard_values), dtype=bool)
     if flooded.any():
+        if isinstance(fragility_exclusions, np.ndarray):
+            fragility_exclusions = fragility_exclusions[flooded]
         intrinsic_operational[flooded] = default_fragility_function(
             hazard_values[flooded], asset_type[flooded], k=fragility_k, major_timestep=24,
-            fragility_models=recovery_parameters.get("fragility_models"),
-            fragility_exclusions=None if fragility_exclusions is None else fragility_exclusions[flooded],
+            fragility_models=with_steepness_overrides(
+                recovery_parameters.get("fragility_models"), fragility_steepness_overrides),
+            fragility_exclusions=fragility_exclusions,
             random_values=np.asarray(random_values)[flooded],
         ).astype(bool)
 

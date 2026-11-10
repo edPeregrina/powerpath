@@ -126,6 +126,28 @@ def test_sample_flood_durations():
     assert h2[0] == pytest.approx(12.0) and h2[-1] == pytest.approx(72.0)
 
 
+def test_single_map_fragility_config_as_multi_map(assets):
+    from src.simulation import _fragility_exclusions_from_knowledge_graph
+
+    config = get_config(root_dir=Path("."), hazard_dir_override=HAZARD_DIR)
+    undisrupted = single_map.undisrupted_state(assets, GRAPH)
+    ids, roads = single_map.map_asset_islands(undisrupted, GRAPH, "EV2_ma", 0.2)
+    types = np.where(np.arange(len(assets)) % 2 == 0, "msls", "hospital")
+    hazard = np.full(len(assets), 1.0)
+    excl = _fragility_exclusions_from_knowledge_graph(config, types)
+
+    def run(u, **kw):
+        return single_map.simulate_single_map(
+            hazard, types, ids, roads, 5, np.full(len(assets), u), config["recovery_parameters"],
+            flood_threshold=0.2, fragility_exclusions=excl, **kw,
+        )["intrinsic_operational"]
+
+    out = run(0.5, fragility_steepness_overrides={"msls": 50.0})
+    assert out[types == "hospital"].all()
+    assert not out[types == "msls"].any()
+    assert config["recovery_parameters"]["fragility_models"]["msls"].get("steepness") is None
+
+
 def test_single_map_societal_metrics_match_postprocessor():
     from shapely.geometry import Point
 
