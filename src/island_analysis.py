@@ -196,6 +196,7 @@ from src.road_islands import (  # noqa: F401  re-exported; callers/tests resolve
     _projected_graph_cache, _load_and_project_graph, label_road_islands,
     compute_island_geodataframe_from_graph, nearest_road_rfids, baseline_boundary,
     assign_asset_islands, filter_hazard_graph, project_graph_coords,
+    attach_assets_undisrupted, road_state_asset_islands,
 )
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -304,63 +305,11 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         islands_gdf = islands_gdf.to_crs(projected_crs)
         temp_gdf = temp_gdf.to_crs(projected_crs) 
 
-        # Build spatial index for road sections
-        spatial_idx = create_spatial_index(islands_gdf)
-
-        # Find main island id (largest by road length)
-        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
-
-        # For each asset, find nearest road section within a reasonable search radius
         search_radius = 100  # meters
-        temp_gdf['access_rfid'] = nearest_road_rfids(temp_gdf, islands_gdf, search_radius, spatial_idx)
-        # # DEBUG 8: Check rfid assignments
-        # print(f"DEBUG 8: access_rfid distribution:")
-        # rfid_counts = temp_gdf['access_rfid'].value_counts()
-        # print(f"         Assets with rfid = -1: {(temp_gdf['access_rfid'] == -1).sum()}")
-        # print(f"         Assets with valid rfid: {(temp_gdf['access_rfid'] != -1).sum()}")
-
-        def safe_island_lookup(rfid, islands_gdf):
-            if rfid == -1:
-                return -1
-            matches = islands_gdf[islands_gdf['rfid'] == rfid]['island_id'].values
-            
-            # # DEBUG 9: Track failed lookups
-            # if len(matches) == 0:
-            #     print(f"DEBUG 9: rfid {rfid} not found in islands_gdf")
-            #     return -1
-            
-            island_id = matches[0]
-            
-            # # DEBUG 10: Track if matched island_id is -1
-            # if island_id == -1:
-            #     print(f"DEBUG 10: rfid {rfid} has island_id = -1 in islands_gdf")
-            
-            return island_id
-
-        temp_gdf['island_id'] = [safe_island_lookup(rfid, islands_gdf) for rfid in temp_gdf['access_rfid']]
-
-        # # DEBUG 11: Final asset island distribution
-        # print(f"DEBUG 11: Final asset island_id distribution:")
-        # print(temp_gdf['island_id'].value_counts().sort_index())
-        # print(f"          Assets on island -1: {(temp_gdf['island_id'] == -1).sum()}")
-        
-        # # DEBUG 12: Check specific asset 66 if it exists
-        # if 66 in temp_gdf.index:
-        #     asset_66_rfid = temp_gdf.loc[66, 'access_rfid']
-        #     asset_66_island = temp_gdf.loc[66, 'island_id']
-        #     print(f"DEBUG 12: Asset 66 -> rfid {asset_66_rfid} -> island {asset_66_island}")
-            
-        #     if asset_66_rfid != -1:
-        #         matching_roads = islands_gdf[islands_gdf['rfid'] == asset_66_rfid]
-        #         if len(matching_roads) > 0:
-        #             print(f"          Road segment for asset 66 has island_id: {matching_roads['island_id'].iloc[0]}")
-        #         else:
-        #             print(f"          WARNING: rfid {asset_66_rfid} not found in islands_gdf!")
-
-        # Now, boundary assets are those with island_id != main_island_id or still -1
-        boundary_asset_indices, boundary_islands_rfids = baseline_boundary(
-            islands_gdf, temp_gdf['island_id'], main_island_id
+        access_rfids, boundary_asset_indices, boundary_islands_rfids = attach_assets_undisrupted(
+            temp_gdf, islands_gdf, search_radius
         )
+        temp_gdf['access_rfid'] = access_rfids
         print(f"Identified {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
         
         # Pickle for future use. Uses the same atomic-merge-and-lock save as
@@ -495,14 +444,11 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             **_road_exemption_kwargs(_config),
         )
 
-        # Drop the boundary rfids and find the main island
-        islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
-        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
-
+        computed_ids, computed_rfids_islands, islands_gdf = road_state_asset_islands(
+            islands_gdf, temp_gdf['access_rfid'], boundary_asset_indices, boundary_islands_rfids
+        )
         if asset_island_ids is None or rfids_islands is None:
-            asset_island_ids, rfids_islands = assign_asset_islands(
-                islands_gdf, temp_gdf['access_rfid'], boundary_asset_indices, main_island_id
-            )
+            asset_island_ids, rfids_islands = computed_ids, computed_rfids_islands
 
         # Cache the results only when this road state was not already cached.
         if island_cache is not None and cache_dir is not None and not cache_hit:

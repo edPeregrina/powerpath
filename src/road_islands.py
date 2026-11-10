@@ -385,3 +385,33 @@ def assign_asset_islands(islands_gdf, access_rfids, boundary_asset_indices, main
     asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
                         for i in range(len(asset_island_ids))]
     return np.array(asset_island_ids, dtype=int), dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+
+
+def attach_assets_undisrupted(assets_gdf, islands_gdf, search_radius=100):
+    """Attach assets to the undisrupted road state (projected CRS, both frames).
+    Returns ``(access_rfids, boundary_asset_indices, boundary_islands_rfids)``."""
+    main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
+    access_rfids = nearest_road_rfids(
+        assets_gdf, islands_gdf, search_radius, create_spatial_index(islands_gdf)
+    )
+    rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+    asset_island_ids = pd.Series(
+        [-1 if r == -1 else rfid_to_island[r] for r in access_rfids], index=assets_gdf.index
+    )
+    boundary_asset_indices, boundary_islands_rfids = baseline_boundary(
+        islands_gdf, asset_island_ids, main_island_id
+    )
+    return access_rfids, boundary_asset_indices, boundary_islands_rfids
+
+
+def road_state_asset_islands(islands_gdf, access_rfids, boundary_asset_indices, boundary_islands_rfids):
+    """Asset island ids on a hazard-filtered road state: drops baseline boundary roads,
+    finds the main island, assigns assets.
+    Returns ``(asset_island_ids, rfids_islands, islands_gdf)`` (filtered gdf)."""
+    islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
+    main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
+    asset_island_ids, rfids_islands = assign_asset_islands(
+        islands_gdf, access_rfids, boundary_asset_indices, main_island_id
+    )
+    return asset_island_ids, rfids_islands, islands_gdf
+
