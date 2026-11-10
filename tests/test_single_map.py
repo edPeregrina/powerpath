@@ -44,12 +44,12 @@ def test_map_asset_islands_matches_time_explicit(tmp_path, assets, column, thres
     assert ids.tolist() == np.asarray(expected).tolist()
 
 
-def test_failure_status_matches_default_fragility(assets, monkeypatch):
+def test_fragility_common_random_numbers(assets):
     depth = np.linspace(0, 1.5, len(assets))
     types = assets["type"].to_numpy()
-    prob = single_map.failure_probability(depth, types, k=6.0)
-
-    monkeypatch.setattr(np.random, "random", lambda size: np.full(size, 0.5))
-    reference = default_fragility_function(depth, types, k=6.0)
-    assert np.array_equal(single_map.operational_status(prob, np.full(len(depth), 0.5)), reference)
-    assert (prob[depth == 0] == 0).all()
+    u = np.random.default_rng(0).random(len(assets))
+    a = default_fragility_function(depth, types, k=6.0, random_values=u)
+    assert np.array_equal(a, default_fragility_function(depth, types, k=6.0, random_values=u))
+    assert (a[depth == 0] == 1).all()
+    assert default_fragility_function(depth, types, k=6.0, random_values=np.zeros(len(u))).tolist() == \
+        np.where(depth > 0, 0, 1).tolist()

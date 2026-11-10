@@ -180,15 +180,18 @@ def _sample_fragility_operational_status(
     model,
     k=None,
     major_timestep=24,
+    random_values=None,
 ):
-    """Sample operational status from an explicit fragility model."""
+    """Sample operational status from an explicit fragility model.
+    ``random_values`` (uniform [0,1), same shape) replaces the internal draw."""
     failure_probability = _build_failure_probability(
         hazard_values,
         model,
         k=k,
         major_timestep=major_timestep,
     )
-    random_values = np.random.random(size=hazard_values.shape)
+    if random_values is None:
+        random_values = np.random.random(size=hazard_values.shape)
     return (random_values >= failure_probability).astype(int)
 
 
@@ -238,9 +241,12 @@ def default_fragility_function(
     major_timestep=24,
     fragility_models: Mapping[str, Mapping[str, object]] | None = None,
     fragility_exclusions=None,
+    random_values=None,
 ):
     """
     Calculate binary operational status from hazard values using fragility curve.
+    ``random_values`` (one uniform draw per asset) replaces the internal sampling, enabling
+    common random numbers across runs.
     Failure probability is determined (by default daily, major_timestep=24 hours) and sampled for each asset.
     Returns 1 for operational, 0 for failed, based on probabilistic sampling.
     
@@ -287,6 +293,7 @@ def default_fragility_function(
             model=model,
             k=k,
             major_timestep=major_timestep,
+            random_values=None if random_values is None else np.asarray(random_values)[asset_mask],
         )
 
     return operational_status
