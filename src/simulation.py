@@ -32,10 +32,8 @@ from src.realized_state_cache import (
     build_shared_realized_state_cache_from_config,
 )
 from src.damage_recovery import (
-    default_damage_ratio_function,
     default_fragility_function,
-    default_repair_time_function,
-    vectorized_damage_ratio_solver,
+    update_damage_and_repair,
 )
 from src.dependency_evaluator import (
     activate_hazard_recovery_waits,
@@ -456,36 +454,20 @@ def _update_hazard_map_states(
 
     # Update damage ratio and repair time for assets flooded above threshold this timestep
     with profiler.section("simulation._update_hazard_map_states.damage_repair_update"):
-        if np.any(flooded_mask):
-            dr_new = default_damage_ratio_function(state.current_hazard_values[flooded_mask], damage_ratio_coefficients)
-            newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
-            flooded_indices = np.where(flooded_mask)[0]
-            new_damage_check = dr_new > state.damage_ratio[flooded_mask]
-            newly_damaged_mask[flooded_indices] = new_damage_check
-            state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
-            repair_time = state.recovery_wait_vectors["repair_time"]
-            repair_time[flooded_mask] = default_repair_time_function(
-                state.damage_ratio[flooded_mask], repair_time_coefficients
-            )
-            if verbose:
-                try:
-                    damage_count = newly_damaged_mask.sum()
-                    print(f"  New damage at timestep {timestep}: {damage_count} assets")
-                    if damage_count > 0:
-                        print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
-                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
-                except Exception as e:
-                    print(f"  Error occurred while logging damage information: {e}, {timestep}")
-
-        # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
         repair_time = state.recovery_wait_vectors["repair_time"]
-        recalc_repair_mask = (repair_time > repair_threshold)
-        if np.any(recalc_repair_mask):
-            repair_times_under_repair = repair_time[recalc_repair_mask]
-            damage_ratios_from_repair = vectorized_damage_ratio_solver(
-                repair_times_under_repair, repair_time_coefficients
-            )
-            state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
+        newly_damaged_mask = update_damage_and_repair(
+            state.current_hazard_values, state.damage_ratio, repair_time, flood_threshold,
+            damage_ratio_coefficients, repair_time_coefficients, repair_threshold,
+        )
+        if verbose and np.any(flooded_mask):
+            try:
+                damage_count = newly_damaged_mask.sum()
+                print(f"  New damage at timestep {timestep}: {damage_count} assets")
+                if damage_count > 0:
+                    print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
+                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
+            except Exception as e:
+                print(f"  Error occurred while logging damage information: {e}, {timestep}")
 
     return available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated
 

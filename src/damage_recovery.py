@@ -55,6 +55,29 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
+def update_damage_and_repair(depth, damage_ratio, repair_time, flood_threshold,
+                             damage_ratio_coefficients, repair_time_coefficients,
+                             repair_threshold=2.0):
+    """Raise damage ratio / set repair time for assets flooded above threshold, then
+    re-solve damage ratio for assets still above ``repair_threshold``.
+    Mutates ``damage_ratio`` and ``repair_time`` in place; returns the newly-damaged mask."""
+    flooded_mask = depth > flood_threshold
+    newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
+    if np.any(flooded_mask):
+        dr_new = default_damage_ratio_function(depth[flooded_mask], damage_ratio_coefficients)
+        newly_damaged_mask[np.where(flooded_mask)[0]] = dr_new > damage_ratio[flooded_mask]
+        damage_ratio[flooded_mask] = np.maximum(damage_ratio[flooded_mask], dr_new)
+        repair_time[flooded_mask] = default_repair_time_function(
+            damage_ratio[flooded_mask], repair_time_coefficients
+        )
+    recalc_repair_mask = repair_time > repair_threshold
+    if np.any(recalc_repair_mask):
+        damage_ratio[recalc_repair_mask] = vectorized_damage_ratio_solver(
+            repair_time[recalc_repair_mask], repair_time_coefficients
+        )
+    return newly_damaged_mask
+
+
 def _per_timestep_failure_probability(failure_probability, major_timestep):
     """Convert daily failure probability to the active timestep probability."""
     failure_probability = np.clip(np.asarray(failure_probability, dtype=np.float64), 0.0, 1.0)
