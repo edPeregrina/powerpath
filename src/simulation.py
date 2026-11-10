@@ -1948,7 +1948,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     if societal_access_config is not None and timestep_output:
         from src.societal_access import (
             SharedRealizedStateCacheError,
-            postprocess_societal_access_results,
+            postprocess_societal_access_from_config,
         )
         try:
             _sa_cfg = societal_access_config
@@ -1959,23 +1959,13 @@ def simulate_asset_damage_recovery_access_breakdown(
                 )
                 _sa_cfg["allocation_cache"] = allocation_cache
             _run_shared_realized_state_cache = _shared_realized_state_cache
-            results, alloc_cache_updated = postprocess_societal_access_results(
+            results, alloc_cache_updated = postprocess_societal_access_from_config(
+                _sa_cfg,
                 summary_results=results,
                 detailed_results=timestep_results,
                 gdf_assets=gdf_assets,
-                pop_grid_gdf=_sa_cfg.get("pop_grid_gdf"),
-                cell_id_column=_sa_cfg.get("cell_id_column", "cell_id"),
-                pop_group_columns=_sa_cfg.get("pop_group_columns"),
-                taxonomy=_sa_cfg.get("taxonomy"),
-                asset_type_column=_sa_cfg.get("asset_type_column", "type"),
-                asset_id_column=_sa_cfg.get("asset_id_column"),
                 allocation_cache=allocation_cache,
-                all_functions=_sa_cfg.get("all_functions"),
-                reference_group=_sa_cfg.get("reference_group", "total"),
-                nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
-                service_area_function_provider_types=_sa_cfg.get("service_area_function_provider_types"),
-                fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
-                verbose=_sa_cfg.get("verbose", verbose),
+                verbose=verbose,
                 profiler=profiler,
                 shared_realized_state_cache=_run_shared_realized_state_cache,
                 shared_cache_fail_hard=_shared_cache_fail_hard,

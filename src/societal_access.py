@@ -2519,6 +2519,48 @@ def _merge_zero_societal_metrics(
             ts_summary[f"societal_equity_relative_gap__{func}__{group}"] = float("nan")
 
 
+def postprocess_societal_access_from_config(
+    societal_access_config: Dict[str, Any],
+    summary_results: List[Dict[str, Any]],
+    detailed_results: List[Dict[str, Any]],
+    gdf_assets: gpd.GeoDataFrame,
+    allocation_cache: Dict[str, pd.DataFrame],
+    verbose: bool = False,
+    **overrides: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    """Run :func:`postprocess_societal_access_results` from a societal config.
+
+    Single place mapping ``get_societal_access_config`` keys (and their
+    defaults) to postprocessor kwargs, shared by the time-explicit and
+    single-map pipelines.  *overrides* are passed through unchanged.
+    """
+    cfg = societal_access_config
+    kwargs = dict(
+        pop_grid_gdf=cfg.get("pop_grid_gdf"),
+        cell_id_column=cfg.get("cell_id_column", "cell_id"),
+        pop_group_columns=cfg.get("pop_group_columns"),
+        taxonomy=cfg.get("taxonomy"),
+        asset_type_column=cfg.get("asset_type_column", "type"),
+        asset_id_column=cfg.get("asset_id_column"),
+        allocation_cache=allocation_cache,
+        all_functions=cfg.get("all_functions"),
+        reference_group=cfg.get("reference_group", "total"),
+        nearest_max_distance=cfg.get("nearest_max_distance", 200.0),
+        service_area_function_provider_types=cfg.get(
+            "service_area_function_provider_types"
+        ),
+        fail_on_missing_allocation=cfg.get("fail_on_missing_allocation", True),
+        verbose=cfg.get("verbose", verbose),
+    )
+    kwargs.update(overrides)
+    return postprocess_societal_access_results(
+        summary_results=summary_results,
+        detailed_results=detailed_results,
+        gdf_assets=gdf_assets,
+        **kwargs,
+    )
+
+
 def list_societal_metric_names(
     all_functions: List[str],
     pop_group_columns: Dict[str, str],
