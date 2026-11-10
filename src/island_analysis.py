@@ -243,6 +243,27 @@ def _road_exemption_kwargs(config):
     }
 
 
+def label_road_islands(G):
+    """Map each node of a (hazard-filtered) road graph to its island id.
+
+    Islands are the (strongly, if directed) connected components, numbered in
+    networkx enumeration order. Shared by the time-explicit island geodataframe
+    and any caller that only needs island membership.
+    """
+    if G.is_directed():
+        components = list(nx.strongly_connected_components(G))
+    else:
+        components = list(nx.connected_components(G))
+
+    fid_to_island = {}
+    for i, comp in enumerate(components):
+        subgraph = G.subgraph(comp)
+        for u, v, data in subgraph.edges(data=True):
+            fid_to_island[u] = i
+            fid_to_island[v] = i
+    return fid_to_island
+
+
 def compute_island_geodataframe_from_graph(
     graph_pickle_path: str, 
     hazard_threshold: float, 
@@ -284,24 +305,7 @@ def compute_island_geodataframe_from_graph(
     # print(f"DEBUG 1: Graph has {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
     
     # Identify strongly connected components
-    if G.is_directed():
-        components = list(nx.strongly_connected_components(G))
-    else:
-        components = list(nx.connected_components(G))
-    
-    # # DEBUG 2: Check component distribution
-    # print(f"DEBUG 2: Found {len(components)} connected components")
-    # component_sizes = sorted([len(comp) for comp in components], reverse=True)
-    # print(f"DEBUG 2: Component sizes: {component_sizes[:10]}")  # Top 10
-    
-    fid_to_island = {}
-
-    # Assign island_id to each fid
-    for i, comp in enumerate(components):
-        subgraph = G.subgraph(comp)
-        for u, v, data in subgraph.edges(data=True):
-            fid_to_island[u] = i
-            fid_to_island[v] = i
+    fid_to_island = label_road_islands(G)
 
     # # DEBUG 3: Check fid_to_island mapping
     # print(f"DEBUG 3: fid_to_island has {len(fid_to_island)} entries")
