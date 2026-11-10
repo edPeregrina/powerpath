@@ -115,3 +115,24 @@ def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
         np.testing.assert_allclose(
             np.asarray(out[key], float)[first_here], np.asarray(last[ref], float)[first_here], err_msg=key
         )
+
+
+def test_single_map_societal_metrics_match_postprocessor():
+    from shapely.geometry import Point
+    from test_societal_access import _make_islands_gdf, _make_population_gdf
+
+    pop = _make_population_gdf().iloc[:2].copy()
+    gdf_assets = gpd.GeoDataFrame(
+        {"type": ["hospital", "school", "fire_station"]},
+        geometry=[Point(1, 1), Point(12, 1), Point(11, 1)], crs="EPSG:28992",
+    )
+    sa_cfg = {"pop_grid_gdf": pop, "cell_id_column": "cell_id", "nearest_max_distance": 2.0,
+              "all_functions": ["education", "emergency_response", "hospital"]}
+    outcome = {"intrinsic_operational": np.array([True, False, True])}
+    row = single_map.single_map_societal_metrics(
+        sa_cfg, gdf_assets, outcome, np.array([1, 2, 2]), _make_islands_gdf(), road_state_key="0",
+    )
+    assert row["societal_total_population__total"] == pytest.approx(150.0)
+    assert row["societal_access_pct__hospital__total"] == pytest.approx(66.67, abs=0.01)
+    assert row["societal_access_pct__education__total"] == pytest.approx(0.0)
+    assert row["societal_access_pct__emergency_response__total"] == pytest.approx(33.33, abs=0.01)

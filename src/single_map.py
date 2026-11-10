@@ -8,6 +8,7 @@ from src.road_islands import (
     compute_island_geodataframe_from_graph,
     road_state_asset_islands,
 )
+from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import update_repair_crew_assignment_optimized
 
 BUFFER_M = 20
@@ -83,3 +84,24 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
         "repair_crews_assigned": repair_crews_assigned,
         "recovery_time": np.where(intrinsic_operational, 0.0, repair_time + flood_duration),
     }
+
+
+def single_map_societal_metrics(societal_access_config, gdf_assets, outcome, island_ids, roads,
+                                road_state_key, map_name="map", allocation_cache=None, **overrides):
+    """Societal/population metrics for one map via the shared multi-map postprocessor.
+
+    The map is one timestep (0). Dependencies are not modelled yet, so ``operational``
+    equals ``intrinsic_operational``. Returns the flat metrics dict.
+    """
+    detail = {
+        "timestep": 0, "map": map_name, "road_state_key": road_state_key,
+        "operational": np.asarray(outcome["intrinsic_operational"]),
+        "island_id": np.asarray(island_ids),
+    }
+    results, _ = postprocess_societal_access_from_config(
+        societal_access_config, summary_results=[{"timestep": 0, "map": map_name}],
+        detailed_results=[detail], gdf_assets=gdf_assets,
+        allocation_cache={} if allocation_cache is None else allocation_cache,
+        islands_gdf_cache={road_state_key: roads}, **overrides,
+    )
+    return results[0]
