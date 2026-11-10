@@ -1,4 +1,4 @@
-"""
+﻿"""
 PowerPath Infrastructure Resilience Analysis Configuration
 ==========================================================
 
@@ -187,7 +187,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'flood_threshold': 0.2,
             'verbose': False,
             'accessibility_model': None,  # Default to None, can be set to grid_hex.accessibility_model
-            # Event connectivity-boundary policy (see src.utils.filter_hazard_graph):
+            # Event connectivity-boundary policy (see src.road_islands.filter_hazard_graph):
             #   event_footprint_path=None restricts nothing (no footprint).
             #   outside_footprint_policy='permissive' (default) preserves existing
             #     behaviour: roads outside the footprint may still provide bypass
@@ -197,7 +197,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
             #     from reconnecting components separated by the hazard.
             'event_footprint_path': None,
             'outside_footprint_policy': 'permissive',
-            # Road hazard exemptions (see src.utils.filter_hazard_graph): when True
+            # Road hazard exemptions (see src.road_islands.filter_hazard_graph): when True
             # (default, existing behaviour) these roads are never failed by the
             # flood threshold; set False to let flooding cut them. Edges tagged
             # 'protected' are always exempt. Changing these changes island
@@ -209,7 +209,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         
         # Recovery model parameters
         'recovery_parameters': {
-            'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
+            'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DRÂ² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
             # Per-asset fragility overrides. Only applies to asset types the
             # knowledge graph marks fragility-eligible (hazard_blocks_operation=
@@ -614,9 +614,9 @@ if __name__ == "__main__":
     setup_directories(config)
     
     if is_valid:
-        print("\n✅ Configuration is valid and ready for use!")
+        print("\nâœ… Configuration is valid and ready for use!")
     else:
-        print(f"\n❌ Configuration has issues that need to be resolved.")
+        print(f"\nâŒ Configuration has issues that need to be resolved.")
         print("Missing directories:")
         for missing_dir in missing_dirs:
             print(f"  - {missing_dir}")

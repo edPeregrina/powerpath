@@ -1,4 +1,4 @@
-
+﻿
 import geopandas as gpd
 import networkx as nx
 import numpy as np
@@ -32,260 +32,16 @@ def create_spatial_index(gdf):
     return idx
 
 
-def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
-    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
-    for n, d in G.nodes(data=True):
-        d["x_m"], d["y_m"] = transformer.transform(d["x"], d["y"])
-    for u, v, d in G.edges(data=True):
-        if 'geometry' in d and d['geometry'] is not None:
-            # Transform the geometry coordinates
-            if hasattr(d['geometry'], 'coords'):
-                coords = list(d['geometry'].coords)
-                transformed_coords = [transformer.transform(x, y) for x, y in coords]
-                transformed_geometry = sg.LineString(transformed_coords)
-                d["length"] = transformed_geometry.length
-                # Cache the projected geometry itself (not just its length) so
-                # downstream consumers (e.g. compute_island_geodataframe_from_graph,
-                # called once per hazard-state cache miss) don't repeat this
-                # transform -- 'geometry' is kept in from_crs for callers that
-                # need it (e.g. event_footprint intersection, assumed EPSG:4326).
-                d["geometry_m"] = transformed_geometry
-            else:
-                # Fallback to straight-line distance if geometry doesn't have coords
-                x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
-                x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
-                d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-        else:
-            # No geometry available, use straight-line distance between nodes
-            x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
-            x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
-            d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
+from src.road_islands import (  # noqa: E402,F401  re-exported for compatibility
+    project_graph_coords, is_motorway, _tag_is_set, edge_exempt_mask,
+    l1_edge_depth_reduction, hazard_removal_mask, filter_hazard_graph,
+)
 
-    return G
-
-def is_motorway(highway):
-    if isinstance(highway, str):
-        return "motorway" in highway.lower()
-    elif isinstance(highway, list):
-        return any("motorway" in str(h).lower() for h in highway)
-    return False
-
-
-def _tag_is_set(val):
-    """True if an OSM-style tag (str/list/scalar) carries a real value."""
-    if val is None:
-        return False
-    if isinstance(val, list):
-        return any(
-            item is not None and
-            str(item).strip().lower() not in ['', 'nan', 'none', 'no']
-            for item in val
-        )
-    if isinstance(val, str):
-        return val.strip().lower() not in ['', 'nan', 'none', 'no']
-    return pd.notna(val)
-
-
-def edge_exempt_mask(edge_data, exempt_motorways=True, exempt_bridges=True,
-                     exempt_tunnels=True):
-    """Boolean array: edges that are never removed by hazard thresholding.
-
-    Motorways, bridges and tunnels are exempt by default (existing behaviour);
-    pass ``False`` to let the hazard fail them like any other road. Edges with
-    an explicit ``protected`` tag are always exempt.
-    """
-    return np.array([
-        (exempt_motorways and is_motorway(d.get("highway")))
-        or (exempt_bridges and _tag_is_set(d.get("bridge")))
-        or (exempt_tunnels and _tag_is_set(d.get("tunnel")))
-        or _tag_is_set(d.get("protected"))
-        for d in edge_data
-    ], dtype=bool)
-
-
-def l1_edge_depth_reduction(edge_geoms, adapt_geoms, depth_red):
-    """Per-edge L1 reduction: max ``depth_red`` over intersecting polygons (0 if none)."""
-    reduction = np.zeros(len(edge_geoms))
-    if len(edge_geoms) == 0 or len(adapt_geoms) == 0:
-        return reduction
-    tree = shapely.STRtree(adapt_geoms)
-    edge_idx, adapt_idx = tree.query(
-        np.array(edge_geoms, dtype=object), predicate="intersects"
-    )
-    np.maximum.at(reduction, edge_idx, depth_red[adapt_idx])
-    return reduction
-
-
-def hazard_removal_mask(hazard, threshold, depth_reduction, exempt):
-    """Shared rule: remove where hazard > threshold + L1 reduction, unless exempt."""
-    return (hazard > threshold + depth_reduction) & ~exempt
-
-
-def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
-                        l1_area_geojson=None,
-                        event_footprint=None, outside_footprint_policy="permissive",
-                        verbose=False, exempt_motorways=True, exempt_bridges=True,
-                        exempt_tunnels=True) -> nx.Graph:
-    """
-    Filter graph edges based on hazard values, excluding protected infrastructure.
-    Applies active L1 depth reductions by adjusting each edge threshold.
-
-    L2 (asset-level) adaptations are deliberately NOT accepted here: L2 barriers
-    protect specific CI assets, not roads, and must never be intersected against
-    road edges even if their geometries happen to overlap.
-
-    Connectivity-boundary policy (``outside_footprint_policy``):
-        - ``"permissive"`` (default): roads outside ``event_footprint`` are left
-          untouched by the footprint check (only the usual hazard-threshold
-          filtering applies). This preserves existing behaviour and is the
-          default when no footprint is supplied.
-        - ``"strict"``: roads that do not intersect ``event_footprint`` at all
-          are removed *before* hazard-threshold filtering, so they cannot act
-          as an exterior bypass that reconnects components separated by the
-          hazard inside the footprint. Requires a usable ``event_footprint``;
-          calling with ``"strict"`` and no footprint raises ``ValueError``
-          rather than silently falling back to permissive behaviour.
-
-    Args:
-        G: NetworkX graph with hazard values on edges
-        threshold: Base hazard value threshold for edge removal
-        hazard_column: Name of edge attribute containing hazard values
-        l1_area_geojson: Optional path/GeoDataFrame for L1 depth reductions
-        event_footprint: Optional footprint geometry defining the domain within
-            which connectivity is evaluated. Accepts a path/``GeoDataFrame``
-            (assumed/reprojected to EPSG:4326, matching the graph CRS) or a
-            shapely geometry already in the graph CRS. ``None`` means no
-            footprint restriction.
-        outside_footprint_policy: ``"strict"`` or ``"permissive"`` (default).
-            Any other value raises ``ValueError``.
-        verbose: Print progress messages
-        exempt_motorways, exempt_bridges, exempt_tunnels: When True (default)
-            such edges are never removed by the hazard threshold. Set False
-            to let the hazard fail them. Edges tagged ``protected`` are
-            always exempt.
-    
-    Returns:
-        Filtered graph with hazard edges removed
-    """
-    from pathlib import Path
-
-    import geopandas as gpd
-    import pandas as pd
-    import shapely
-
-    if outside_footprint_policy not in ("strict", "permissive"):
-        raise ValueError(
-            f"Invalid outside_footprint_policy: {outside_footprint_policy!r}. "
-            "Must be 'strict' or 'permissive'."
-        )
-    if outside_footprint_policy == "strict" and event_footprint is None:
-        raise ValueError(
-            "outside_footprint_policy='strict' requires an 'event_footprint' "
-            "(none was provided). Provide a footprint geometry/GeoDataFrame/path, "
-            "or use outside_footprint_policy='permissive'."
-        )
-
-    edges = list(
-        G.edges(keys=True, data=True) if G.is_multigraph()
-        else ((u, v, None, data) for u, v, data in G.edges(data=True))
-    )
-
-    def edge_geometries():
-        geoms = []
-        for u, v, _, data in edges:
-            geom = data.get("geometry")
-            if geom is None:
-                geom = sg.LineString([
-                    (G.nodes[u]["x"], G.nodes[u]["y"]),
-                    (G.nodes[v]["x"], G.nodes[v]["y"]),
-                ])
-            geoms.append(geom)
-        return geoms
-
-    # L2 (asset-level) adaptations are intentionally not applied to road edges:
-    # they protect specific assets, not roads, regardless of spatial overlap.
-    depth_reduction = np.zeros(len(edges))
-    if l1_area_geojson is not None:
-        adaptation_gdf = (
-            gpd.read_file(l1_area_geojson)
-            if isinstance(l1_area_geojson, (str, Path))
-            else l1_area_geojson.copy()
-        )
-        if "depth_red" not in adaptation_gdf.columns:
-            adaptation_gdf['depth_red'] = 0.3
-            if verbose:
-                print("Warning: L1 GeoJSON missing 'depth_red' column, using default 0.3m")
-        if adaptation_gdf.crs != "EPSG:4326":
-            adaptation_gdf = adaptation_gdf.to_crs("EPSG:4326")
-        depth_reduction = l1_edge_depth_reduction(
-            edge_geometries(), adaptation_gdf.geometry.values,
-            adaptation_gdf["depth_red"].to_numpy(dtype=float),
-        )
-        if verbose:
-            print(f"Applied L1 to {int((depth_reduction != 0).sum())} edges")
-
-    # Resolve the footprint into a single shapely geometry (graph CRS, EPSG:4326)
-    footprint_geom = None
-    if event_footprint is not None:
-        if isinstance(event_footprint, (str, Path)):
-            footprint_gdf = gpd.read_file(event_footprint)
-        elif isinstance(event_footprint, gpd.GeoDataFrame):
-            footprint_gdf = event_footprint
-        elif isinstance(event_footprint, gpd.GeoSeries):
-            footprint_gdf = gpd.GeoDataFrame(geometry=event_footprint)
-        else:
-            # Assume a shapely geometry already in the graph CRS
-            footprint_gdf = None
-            footprint_geom = event_footprint
-
-        if footprint_gdf is not None:
-            if footprint_gdf.crs is not None and str(footprint_gdf.crs) != "EPSG:4326":
-                footprint_gdf = footprint_gdf.to_crs("EPSG:4326")
-            footprint_geom = (
-                footprint_gdf.union_all()
-                if hasattr(footprint_gdf, "union_all")
-                else footprint_gdf.unary_union
-            )
-
-    # Filter edges based on adjusted thresholds
-    footprint_removed = np.zeros(len(edges), dtype=bool)
-    if outside_footprint_policy == "strict" and footprint_geom is not None:
-        # Strict connectivity-boundary policy: an edge that does not intersect
-        # the event footprint at all cannot be used as an exterior bypass to
-        # reconnect components separated by the hazard inside the footprint,
-        # so it is removed regardless of its hazard value.
-        footprint_removed = ~shapely.intersects(
-            np.array(edge_geometries(), dtype=object), footprint_geom
-        )
-
-    hazard = np.array([d.get(hazard_column, 0) for _, _, _, d in edges], dtype=float)
-    exempt = edge_exempt_mask(
-        [d for _, _, _, d in edges],
-        exempt_motorways=exempt_motorways,
-        exempt_bridges=exempt_bridges,
-        exempt_tunnels=exempt_tunnels,
-    )
-    remove = footprint_removed | hazard_removal_mask(hazard, threshold, depth_reduction, exempt)
-
-    edges_to_remove = [
-        (u, v, k) if G.is_multigraph() else (u, v)
-        for (u, v, k, _), r in zip(edges, remove) if r
-    ]
-    footprint_edges_removed = int(footprint_removed.sum())
-    G.remove_edges_from(edges_to_remove)
-    G.remove_nodes_from(list(nx.isolates(G)))
-    
-    if verbose:
-        print(f"Removed {len(edges_to_remove)} edges (adjusted thresholds)")
-        if outside_footprint_policy == "strict" and footprint_geom is not None:
-            print(f"  of which {footprint_edges_removed} removed as outside the event footprint (strict policy)")
-    
-    return G
 
 def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     """Concatenate multiple per-type asset GeoDataFrames into one unified GeoDataFrame.
 
-    The resulting index is a RangeIndex (0, 1, 2, …) so that each row's positional
+    The resulting index is a RangeIndex (0, 1, 2, â€¦) so that each row's positional
     index is also its label.  This is required by :func:`build_voronoi_service_area_map`
     and by :func:`~src.impacts.create_voronoi_for_asset_type`, which both rely on
     the index being the positional identifier of each asset in the combined array.
@@ -301,8 +57,8 @@ def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     Example::
 
         gdf_assets = compile_asset_gdfs([gdf_substations, gdf_hospitals])
-        # Rows 0..N-1  → substations
-        # Rows N..N+M-1 → hospitals
+        # Rows 0..N-1  â†’ substations
+        # Rows N..N+M-1 â†’ hospitals
     """
     if not gdf_list:
         raise ValueError("gdf_list must contain at least one GeoDataFrame.")
@@ -318,7 +74,7 @@ def build_voronoi_service_area_map(
 ) -> dict:
     """Map each secondary asset to the primary asset whose Voronoi polygon contains it.
 
-    The mapping is built once before the simulation starts so the O(N·M) spatial
+    The mapping is built once before the simulation starts so the O(NÂ·M) spatial
     search is performed only once rather than repeated every timestep.
 
     **Spatial search strategy** (reuses :func:`create_spatial_index`):
@@ -355,7 +111,7 @@ def build_voronoi_service_area_map(
 
     Returns:
         dict or tuple[dict, dict]:
-            ``{primary_pos: [secondary_pos, …]}`` – maps each primary asset's
+            ``{primary_pos: [secondary_pos, â€¦]}`` â€“ maps each primary asset's
             positional index to the list of secondary asset positional indices that
             fall within its Voronoi polygon.  Primary assets with no secondary assets
             in their polygon are omitted.
@@ -429,14 +185,14 @@ def build_voronoi_service_area_map(
         # Use centroid as anchor for fallback nearest/contains checks.
         point = sec_geom.centroid if hasattr(sec_geom, 'centroid') else sec_geom
 
-        # Step 1 – bounding-box candidates from R-tree.
+        # Step 1 â€“ bounding-box candidates from R-tree.
         candidate_labels = list(voronoi_sindex.intersection(sec_geom.bounds))
 
         best_label = None
         best_overlap_area = -1.0
         resolution_method = None
 
-        # Step 2a – polygon/geometry overlap scoring.
+        # Step 2a â€“ polygon/geometry overlap scoring.
         for vor_label in candidate_labels:
             record = voronoi_records.get(int(vor_label))
             if record is None:
@@ -455,7 +211,7 @@ def build_voronoi_service_area_map(
                 best_label = int(vor_label)
                 resolution_method = "overlap"
 
-        # Step 2b – fallback to point-in-polygon if overlap did not resolve a match.
+        # Step 2b â€“ fallback to point-in-polygon if overlap did not resolve a match.
         if best_label is None:
             point_candidate_labels = list(voronoi_sindex.intersection(point.bounds))
             for vor_label in point_candidate_labels:
@@ -470,7 +226,7 @@ def build_voronoi_service_area_map(
                     resolution_method = "point_in_polygon"
                     break
 
-        # Step 2c – nearest-neighbour fallback to avoid unmatched assets.
+        # Step 2c â€“ nearest-neighbour fallback to avoid unmatched assets.
         if best_label is None:
             nearest_label = None
             nearest_distance = float("inf")
