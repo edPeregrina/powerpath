@@ -191,6 +191,23 @@ def hospital_fragility_function(
     )
 
 
+def resolve_fragility_model(asset_name, fragility_models=None):
+    """Explicit model for ``asset_name`` if given, else the default depth-logistic model."""
+    model = (fragility_models or {}).get(str(asset_name))
+    if model is not None:
+        return model
+    if str(asset_name) == "hospital":
+        median = 0.5
+    else:
+        median = 0.3 if str(asset_name) == "ls" else 0.6 if str(asset_name) == "msls" else 0.0
+    return {
+        "mode": "depth_logistic",
+        "median_failure_depth": median,
+        "steepness_range": (5.0, 7.5),
+        "activation_threshold": 0.0,
+    }
+
+
 def default_fragility_function(
     hazard_values,
     asset_type,
@@ -240,22 +257,7 @@ def default_fragility_function(
         if not np.any(asset_mask):
             continue
 
-        model = fragility_models.get(str(asset_name))
-        if model is None:
-            if str(asset_name) == "hospital":
-                model = {
-                    "mode": "depth_logistic",
-                    "median_failure_depth": 0.5,
-                    "steepness_range": (5.0, 7.5),
-                    "activation_threshold": 0.0,
-                }
-            else:
-                model = {
-                    "mode": "depth_logistic",
-                    "median_failure_depth": 0.3 if str(asset_name) == "ls" else 0.6 if str(asset_name) == "msls" else 0.0,
-                    "steepness_range": (5.0, 7.5),
-                    "activation_threshold": 0.0,
-                }
+        model = resolve_fragility_model(asset_name, fragility_models)
 
         operational_status[asset_mask] = _sample_fragility_operational_status(
             hazard_values[asset_mask],
