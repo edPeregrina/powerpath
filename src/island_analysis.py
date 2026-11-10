@@ -437,6 +437,17 @@ def nearest_road_rfids(assets_gdf, islands_gdf, search_radius=100, spatial_idx=N
     return centroids.apply(find_nearest_road)
 
 
+def baseline_boundary(islands_gdf, asset_island_ids, main_island_id):
+    """Boundary assets (off the main island, or on none) and boundary roads
+    (all sections of non-main islands) of an undisrupted road network.
+    Returns ``(boundary_asset_indices, boundary_islands_rfids)``.
+    """
+    boundary_asset_mask = (asset_island_ids != main_island_id) | (asset_island_ids == -1)
+    boundary_asset_indices = asset_island_ids[boundary_asset_mask].index.tolist()
+    boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
+    return boundary_asset_indices, boundary_islands_rfids
+
+
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
                        l1_area_geojson=None, l1_active_timesteps=None):
@@ -567,12 +578,10 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         #             print(f"          WARNING: rfid {asset_66_rfid} not found in islands_gdf!")
 
         # Now, boundary assets are those with island_id != main_island_id or still -1
-        boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
-        boundary_asset_indices = temp_gdf[boundary_asset_mask].index.tolist()
+        boundary_asset_indices, boundary_islands_rfids = baseline_boundary(
+            islands_gdf, temp_gdf['island_id'], main_island_id
+        )
         print(f"Identified {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
-
-        # Identify boundary islands (non-main islands that exist in baseline)
-        boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
         
         # Pickle for future use. Uses the same atomic-merge-and-lock save as
         # island_cache/overlap_cache/etc (src/caching.py::_atomic_merge_save)
@@ -604,6 +613,21 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
     except Exception as e:
         print(f"Error in computing islands from graph: {e}")
         return None, None, None, None
+
+def assign_asset_islands(islands_gdf, access_rfids, boundary_asset_indices, main_island_id):
+    """Map assets to island ids on a road state.
+
+    ``islands_gdf`` must already exclude the baseline boundary roads.
+    Assets whose road is flooded/absent get -1; baseline boundary assets (those
+    not on the baseline main island) are forced onto ``main_island_id``.
+    Returns ``(asset_island_ids, rfids_islands)``.
+    """
+    rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+    asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in access_rfids]
+    asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
+                        for i in range(len(asset_island_ids))]
+    return np.array(asset_island_ids, dtype=int), dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+
 
 def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_islands_rfids=None, 
                             hazard_threshold=0.2, hazard_column='EV1_ma', config=None,
@@ -711,13 +735,9 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
 
         if asset_island_ids is None or rfids_islands is None:
-            # Map assets to island ids
-            rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
-            asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in temp_gdf['access_rfid']]
-            asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
-                                for i in range(len(asset_island_ids))]
-            asset_island_ids = np.array(asset_island_ids, dtype=int)
-            rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+            asset_island_ids, rfids_islands = assign_asset_islands(
+                islands_gdf, temp_gdf['access_rfid'], boundary_asset_indices, main_island_id
+            )
 
         # Cache the results only when this road state was not already cached.
         if island_cache is not None and cache_dir is not None and not cache_hit:
