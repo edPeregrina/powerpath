@@ -8,7 +8,6 @@ from shapely.geometry import LineString, Point, Polygon, box
 from config import get_config
 
 import src.island_analysis as island_analysis
-import src.grid_based_accessibility_hex as grid_hex_module
 import src.impacts as impacts_module
 import src.simulation as simulation_module
 from src.adaptation import simulate_asset_damage_recovery_access_breakdown_ema
@@ -1512,14 +1511,6 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
             crs="EPSG:28992",
         ),
     )
-    accessibility_calls = {"count": 0}
-    monkeypatch.setattr(
-        grid_hex_module,
-        "accessibility_model",
-        lambda *args, **kwargs: accessibility_calls.__setitem__(
-            "count", accessibility_calls["count"] + 1
-        ) or [True] * len(args[0]),
-    )
 
     societal_access_config = {
         "pop_grid_gdf": pop,
@@ -1553,7 +1544,6 @@ def test_simulation_smoke_builds_allocation_cache_and_finite_hospital_ema(monkey
     assert math.isfinite(summary_row["societal_access_pct__hospital__total"])
     assert summary_row["societal_access_pct__hospital__total"] == pytest.approx(100.0)
     assert all("islands_gdf" not in entry for entry in cache_updated["island_cache"].values())
-    assert accessibility_calls["count"] == 0
 
     ema_result = simulate_asset_damage_recovery_access_breakdown_ema(
         gdf_assets=gdf_assets.copy(),
@@ -1664,11 +1654,6 @@ def _build_hospital_msls_scenario(monkeypatch, tmp_path):
             geometry=[LineString([(0, 0), (10, 0)])],
             crs="EPSG:28992",
         ),
-    )
-    monkeypatch.setattr(
-        grid_hex_module,
-        "accessibility_model",
-        lambda *args, **kwargs: [True] * len(args[0]),
     )
 
     societal_access_config = {

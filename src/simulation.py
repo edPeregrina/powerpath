@@ -487,42 +487,6 @@ def _update_hazard_map_states(
             )
             state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
 
-    accessibility_model = _config['simulation_config']['accessibility_model']
-    if accessibility_model is not None:
-        # Daily accessibility update
-        accessibility_cache_key = create_accessibility_cache_key(
-            map_counter, flood_threshold, hazard_dir,
-            accessibility_model=accessibility_model
-        )
-        if accessibility_cache_key in accessibility_cache:
-            state.accessible = accessibility_cache[accessibility_cache_key]
-            if verbose:
-                print(f"Using cached accessibility for map {map_counter} (hazard dir: {haz_dir_name})")
-        else:
-            try:
-                assets_copy = temp_gdf.copy()
-                accessibility_result = grid_hex.accessibility_model(
-                    assets_copy.geometry, 
-                    hazard_map, 
-                    state.current_hazard_values,
-                    verbose=verbose,
-                    day_string=str(state.day_counter).zfill(2),
-                    project_root=_config['paths']['root_dir'],
-                )
-                # accessibility_result = state.accessible  # Defaulting to accessible, to use only islands logic
-                state.accessible = np.array(accessibility_result, dtype=bool)
-                accessibility_cache[accessibility_cache_key] = state.accessible
-                cache_updated['accessibility_cache'] = accessibility_cache
-
-                if verbose:
-                    print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
-                    print(f"Accessible assets: {state.accessible.sum()} out of {num_assets}")
-            except Exception as e:
-                print(f"Warning: Accessibility model failed: {e}")
-                print("Keeping current accessibility status")
-    else:
-        pass
-
     return available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated
 
 def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 
@@ -1120,11 +1084,12 @@ def _initialize_simulation(
     elif not isinstance(recovery_parameters, dict):
         raise TypeError("recovery_parameters must be a dictionary or None")
 
-    # Initialize grid-based accessibility if configured
     if _config['simulation_config']['accessibility_model'] is not None:
-        print("Initializing grid-based accessibility analysis...")
-        grid_hex.initialize_grid_analysis(root_dir)
-        
+        raise NotImplementedError(
+            "The grid-based accessibility model was removed; set "
+            "simulation_config['accessibility_model'] to None (island-based access is used)."
+        )
+
     # Load caches if not provided
     if accessibility_cache is None:
         print("\nLoading accessibility cache...")
