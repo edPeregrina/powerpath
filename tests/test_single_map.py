@@ -117,8 +117,19 @@ def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
         )
 
 
+def test_sample_flood_durations():
+    u = np.linspace(0, 1, 101)
+    h = single_map.sample_flood_durations(u)
+    assert h[0] == 0.0 and 12.0 < h[50] < 24.0
+    assert (np.diff(h) >= 0).all() and h[-1] == pytest.approx(7 * 24.0)
+    h2 = single_map.sample_flood_durations(u, {"min": 0.5, "max": 3.0, "median": 2.0})
+    assert h2[0] == pytest.approx(12.0) and h2[-1] == pytest.approx(72.0)
+
+
 def test_single_map_societal_metrics_match_postprocessor():
     from shapely.geometry import Point
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     from test_societal_access import _make_islands_gdf, _make_population_gdf
 
     pop = _make_population_gdf().iloc[:2].copy()

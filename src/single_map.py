@@ -37,6 +37,22 @@ def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
     return ids, roads
 
 
+def sample_flood_durations(uniforms, params=None):
+    """Flood duration in hours per uniform draw (one per map; reuse across policies).
+
+    Truncated lognormal in days, parameters from ``recovery_parameters["flood_duration_days"]``
+    (``min``, ``max``, ``median``, ``sigma``); inverse-CDF so draws stay common random numbers.
+    """
+    from scipy.stats import norm
+
+    p = {"min": 0.0, "max": 7.0, "median": 1.0, "sigma": 1.0, **(params or {})}
+    mu, sigma = np.log(p["median"]), p["sigma"]
+    cdf = lambda d: norm.cdf((np.log(d) - mu) / sigma) if d > 0 else 0.0
+    lo, hi = cdf(p["min"]), cdf(p["max"])
+    q = lo + np.asarray(uniforms, dtype=float) * (hi - lo)
+    return np.exp(mu + sigma * norm.ppf(q)) * 24.0
+
+
 def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, random_values,
                         recovery_parameters, flood_threshold, flood_duration=0.0,
                         fragility_k=None, fragility_exclusions=None, method="random"):

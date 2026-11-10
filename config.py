@@ -223,6 +223,9 @@ def get_config(root_dir=None, hazard_dir_override=None):
                     'activation_threshold': 0.0,
                 },
             },
+            # Single-map mode only (multi-map reads durations from the flood maps):
+            # per-map flood duration, truncated lognormal in days.
+            'flood_duration_days': {'min': 0.0, 'max': 7.0, 'median': 1.0, 'sigma': 1.0},
             # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
