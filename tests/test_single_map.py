@@ -44,6 +44,32 @@ def test_map_asset_islands_matches_time_explicit(tmp_path, assets, column, thres
     assert ids.tolist() == np.asarray(expected).tolist()
 
 
+def test_simulate_single_map(assets):
+    undisrupted = single_map.undisrupted_state(assets, GRAPH)
+    island_ids, roads = single_map.map_asset_islands(undisrupted, GRAPH, "EV2_ma", 0.2)
+    hazard = np.linspace(0, 1.5, len(assets))
+    params = get_config(root_dir=Path("."), hazard_dir_override=HAZARD_DIR)["recovery_parameters"]
+
+    def run(u, n_crews=5):
+        return single_map.simulate_single_map(
+            hazard, assets["type"], island_ids, roads, n_crews, u, params,
+            flood_threshold=0.2, flood_duration=24.0, fragility_k=6.0,
+        )
+
+    all_fail = run(np.zeros(len(assets)))
+    assert (all_fail["intrinsic_operational"] == ~all_fail["flooded"]).all()
+    assert run(np.ones(len(assets)))["intrinsic_operational"].all()
+
+    assert not all_fail["repair_crews_assigned"][~all_fail["flooded"]].any()
+    assert all_fail["repair_crews_assigned"].sum() <= 5
+    assert (all_fail["repair_time"][all_fail["flooded"]] > 0).all()
+    assert (all_fail["recovery_time"][all_fail["flooded"]]
+            == all_fail["repair_time"][all_fail["flooded"]] + 24.0).all()
+
+    u = np.random.default_rng(1).random(len(assets))
+    assert (run(u)["intrinsic_operational"] == run(u)["intrinsic_operational"]).all()
+
+
 def test_fragility_common_random_numbers(assets):
     depth = np.linspace(0, 1.5, len(assets))
     types = assets["type"].to_numpy()
