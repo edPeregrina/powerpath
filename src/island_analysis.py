@@ -414,6 +414,29 @@ def compute_island_geodataframe_from_graph(
         print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
     return gdf
 
+def nearest_road_rfids(assets_gdf, islands_gdf, search_radius=100, spatial_idx=None):
+    """Return a Series (indexed like ``assets_gdf``) with the rfid of the road
+    section nearest to each asset centroid within ``search_radius`` metres, or
+    -1 if none. Both frames must share a projected CRS.
+    """
+    if spatial_idx is None:
+        spatial_idx = create_spatial_index(islands_gdf)
+    centroids = assets_gdf.geometry.centroid
+
+    def find_nearest_road(asset_centroid):
+        candidate_idxs = list(spatial_idx.intersection(asset_centroid.buffer(search_radius).bounds))
+        if candidate_idxs:
+            candidates = islands_gdf.iloc[candidate_idxs]
+            if not candidates.empty:
+                distances = candidates.geometry.distance(asset_centroid)
+                if not distances.empty:
+                    nearest_idx = distances.idxmin()
+                    return candidates.loc[nearest_idx, 'rfid']
+        return -1
+
+    return centroids.apply(find_nearest_road)
+
+
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
                        l1_area_geojson=None, l1_active_timesteps=None):
@@ -498,28 +521,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
 
         # For each asset, find nearest road section within a reasonable search radius
         search_radius = 100  # meters
-
-        # Precompute centroids and buffers
-        temp_gdf['centroid'] = temp_gdf.geometry.centroid
-        temp_gdf['buffer'] = temp_gdf['centroid'].apply(lambda c: c.buffer(search_radius))
-
-        # For each asset, get candidate road indices and assign closest
-        def find_nearest_road(asset_row, spatial_idx, islands_gdf):
-            asset_centroid = asset_row['centroid']
-            asset_buffer = asset_row['buffer']
-            candidate_idxs = list(spatial_idx.intersection(asset_buffer.bounds))
-            if candidate_idxs:
-                candidates = islands_gdf.iloc[candidate_idxs]
-                if not candidates.empty:
-                    distances = candidates.geometry.distance(asset_centroid)
-                    if not distances.empty:
-                        nearest_idx = distances.idxmin()
-                        return candidates.loc[nearest_idx, 'rfid']
-            return -1
-        
-        temp_gdf['access_rfid'] = temp_gdf.apply(
-            lambda row: find_nearest_road(row, spatial_idx, islands_gdf), axis=1
-        )
+        temp_gdf['access_rfid'] = nearest_road_rfids(temp_gdf, islands_gdf, search_radius, spatial_idx)
         # # DEBUG 8: Check rfid assignments
         # print(f"DEBUG 8: access_rfid distribution:")
         # rfid_counts = temp_gdf['access_rfid'].value_counts()

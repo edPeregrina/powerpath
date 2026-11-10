@@ -235,6 +235,22 @@ def test_filter_hazard_graph_exemption_flags(flag, attrs):
     assert still.has_edge(1, 2)
 
 
+def test_nearest_road_rfids_picks_closest_within_radius():
+    roads = gpd.GeoDataFrame(
+        {"rfid": [10, 20]},
+        geometry=[LineString([(0, 0), (100, 0)]), LineString([(0, 50), (100, 50)])],
+        crs="EPSG:28992",
+    )
+    assets = gpd.GeoDataFrame(
+        {"type": ["a", "a", "a"]},
+        geometry=[Point(50, 10), Point(50, 45), Point(500, 500)],
+        crs="EPSG:28992",
+    )
+    result = island_analysis.nearest_road_rfids(assets, roads, search_radius=100)
+    assert result.tolist() == [10, 20, -1]
+    assert result.index.tolist() == assets.index.tolist()
+
+
 def test_adaptation_geodataframe_is_not_mutated():
     from src.adaptation import build_l1_l2_reduction_array
 
