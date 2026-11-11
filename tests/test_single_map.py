@@ -113,8 +113,10 @@ def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
 
     params = config["recovery_parameters"]
     kg, edges = build_dependency_runtime(config, assets)
+    depths = single_map.map_asset_depths(HAZARD_DIR / f"Frag_timesteps_test{n - 1}.tif", assets, n - 1, config)
+    np.testing.assert_allclose(depths, np.asarray(last["hazard_value"], float))
     out = single_map.simulate_single_map(
-        last["hazard_value"], assets["type"], ids, roads, 5, np.full(len(assets), 0.5), params,
+        depths, assets["type"], ids, roads, 5, np.full(len(assets), 0.5), params,
         flood_threshold=threshold, fragility_k=k,
         fragility_exclusions=_fragility_exclusions_from_knowledge_graph(config, assets["type"].to_numpy()),
         config=config, knowledge_graph=kg, dependency_edges=edges,
@@ -181,6 +183,19 @@ def test_single_map_fragility_config_as_multi_map(assets):
     assert out[types == "hospital"].all()
     assert not out[types == "msls"].any()
     assert config["recovery_parameters"]["fragility_models"]["msls"].get("steepness") is None
+
+
+def test_adaptation_depth_reduction_applied_to_map_depths(tmp_path, assets):
+    config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
+    config["interim_dir"].mkdir(parents=True, exist_ok=True)
+    hazard_map = HAZARD_DIR / "Frag_timesteps_test2.tif"
+    base = single_map.map_asset_depths(hazard_map, assets, 2, config)
+    l2 = gpd.GeoDataFrame({"depth_red": [0.2]}, geometry=[assets.geometry.iloc[0].buffer(1)], crs=assets.crs)
+    red = single_map.adaptation_depth_reduction(assets, l2_asset_geojson=l2)
+    assert red[0] == pytest.approx(0.2) and (red[1:][~assets.geometry.iloc[1:].intersects(l2.geometry.iloc[0])] == 0).all()
+    adapted = single_map.map_asset_depths(hazard_map, assets, 2, config, depth_reduction=red)
+    np.testing.assert_allclose(adapted, np.maximum(0.0, base - red))
+    assert not single_map.adaptation_depth_reduction(assets).any()
 
 
 def test_single_map_societal_metrics_match_postprocessor():

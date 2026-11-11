@@ -1,11 +1,13 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
 import numpy as np
 
+from src.adaptation import build_l1_l2_reduction_array
 from src.damage_recovery import (
     default_fragility_function,
     update_damage_and_repair,
     with_steepness_overrides,
 )
+from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.island_analysis import _compute_initial_distribution
 from src.road_islands import (
     attach_assets_undisrupted,
@@ -43,6 +45,38 @@ def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
     )
     ids, _, roads = road_state_asset_islands(roads, access_rfids, boundary_assets, boundary_rfids)
     return ids, roads
+
+
+def adaptation_depth_reduction(gdf_assets, l1_area_geojson=None, l2_asset_geojson=None, config=None):
+    """Per-asset depth reduction (m) from L1 areas and L2 assets, as multi-map applies it.
+
+    Depends only on the policy and the asset set, not on the map, so compute it once per
+    policy and reuse it for every map.
+    """
+    if l1_area_geojson is None and l2_asset_geojson is None:
+        return np.zeros(len(gdf_assets))
+    reductions = build_l1_l2_reduction_array(
+        gdf_assets, l1_area_geojson=l1_area_geojson, l2_asset_geojson=l2_asset_geojson,
+        hazard_maps=[None], major_timestep=1, config=config,
+    )
+    return reductions.sum(axis=2)[0].astype(float)
+
+
+def map_asset_depths(hazard_map, gdf_assets, map_counter, config, hazard_cache=None, depth_reduction=None):
+    """Depth (m) at each asset for one map, extracted as in multi-map.
+
+    Extraction is cached per (map, asset set), independent of the policy;
+    ``depth_reduction`` (see :func:`adaptation_depth_reduction`) is applied afterwards.
+    """
+    extracted = find_hazard_value_at_points_optimized(
+        hazard_map, gdf_assets[["type", "geometry"]].copy(), map_counter,
+        extraction_method=config["analysis_config"]["hazard_extraction_method"],
+        hazard_cache=hazard_cache, hazard_dir=config["hazard_dir"], _config=config,
+    )
+    depths = extracted[f"EV{map_counter}_ma"].fillna(0.0).to_numpy(dtype=float)
+    if depth_reduction is not None:
+        depths = np.maximum(0.0, depths - depth_reduction)
+    return depths
 
 
 def common_random_numbers(seed, map_id, asset_ids=None, stream="fragility"):
