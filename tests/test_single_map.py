@@ -117,6 +117,18 @@ def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
         )
 
 
+def test_common_random_numbers():
+    ids = np.arange(2000)
+    u = single_map.common_random_numbers(7, "mapA", ids)
+    assert ((u >= 0) & (u < 1)).all() and abs(u.mean() - 0.5) < 0.03
+    assert np.array_equal(u, single_map.common_random_numbers(7, "mapA", ids))
+    assert np.array_equal(u[[5, 1, 9]], single_map.common_random_numbers(7, "mapA", ids[[5, 1, 9]]))
+    assert not np.array_equal(u, single_map.common_random_numbers(8, "mapA", ids))
+    assert not np.array_equal(u, single_map.common_random_numbers(7, "mapB", ids))
+    assert not np.array_equal(u, single_map.common_random_numbers(7, "mapA", ids, stream="x"))
+    assert 0 <= single_map.common_random_numbers(7, "mapA") < 1
+
+
 def test_sample_flood_durations():
     u = np.linspace(0, 1, 101)
     h = single_map.sample_flood_durations(u)

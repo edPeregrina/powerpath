@@ -41,6 +41,22 @@ def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
     return ids, roads
 
 
+def common_random_numbers(seed, map_id, asset_ids=None, stream="fragility"):
+    """Uniform draws in [0, 1) that depend only on ``(seed, stream, map_id, asset_id)``.
+
+    Each draw is a hash of its own key, so it is the same in every policy and does not change
+    if assets or maps are added, removed or reordered. ``asset_ids=None`` returns one draw
+    for the map (e.g. ``stream="duration"``).
+    """
+    import pandas as pd
+
+    ids = [""] if asset_ids is None else list(asset_ids)
+    keys = np.array([f"{seed}|{stream}|{map_id}|{i}" for i in ids], dtype=object)
+    # hash_array gives a 64-bit integer; keep its top 53 bits (exact in a float) and scale to [0, 1)
+    u = (pd.util.hash_array(keys) >> np.uint64(11)).astype(float) / 2.0**53
+    return u[0] if asset_ids is None else u
+
+
 def sample_flood_durations(uniforms, params=None):
     """Flood duration in hours per uniform draw (one per map; reuse across policies).
 
