@@ -13,7 +13,11 @@ from src.road_islands import (
     road_state_asset_islands,
 )
 from src.societal_access import postprocess_societal_access_from_config
-from src.simulation import update_repair_crew_assignment_optimized
+from src.simulation import (
+    SimulationState,
+    _update_operational_state,
+    update_repair_crew_assignment_optimized,
+)
 
 BUFFER_M = 20
 PROJECTED_CRS = "EPSG:28992"
@@ -86,14 +90,19 @@ def map_draws(seed, map_id, asset_ids, duration_params=None):
 def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, random_values,
                         recovery_parameters, flood_threshold, flood_duration=0.0,
                         fragility_k=None, fragility_steepness_overrides=None,
-                        fragility_exclusions=None, method="random"):
+                        fragility_exclusions=None, method="random",
+                        config=None, knowledge_graph=None, dependency_edges=None):
     """Peak-state outcome for one map via the shared multi-map building blocks (no time stepping).
 
     ``random_values``: one uniform draw per asset, reused across policies (common random numbers).
     Fragility is configured as in multi-map: ``recovery_parameters["fragility_models"]``,
     per-type ``fragility_steepness_overrides`` and ``fragility_exclusions`` (see
     ``simulation._fragility_exclusions_from_knowledge_graph``).
-    ``recovery_time`` = flood duration + ``repair_time`` for assets that are not intrinsically operational.
+    With ``config`` (plus ``knowledge_graph``/``dependency_edges`` from
+    ``simulation.build_dependency_runtime``), ``operational`` also applies hazard blocking
+    (e.g. flooded hospitals) and dependencies; otherwise it equals ``intrinsic_operational``.
+    ``recovery_time`` = flood duration + ``repair_time`` if not intrinsically operational,
+    flood duration alone if only blocked while flooded, else 0 (dependency waits excluded).
     """
     hazard_values = np.asarray(hazard_values, dtype=float)
     asset_type = np.asarray(asset_type)
@@ -129,13 +138,30 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
         0, available_repair_crews, np.zeros(len(hazard_values), dtype=bool), island_ids != -1,
         np.zeros(len(hazard_values), dtype=bool), repair_time, island_ids, method=method,
     )
+
+    # Hazard blocking and dependencies: the multi-map evaluator, run once on the peak state.
+    operational = intrinsic_operational
+    if config is not None:
+        state = SimulationState(None, len(hazard_values))
+        state.intrinsic_operational = intrinsic_operational.copy()
+        state.recovery_wait_vectors["repair_time"] = repair_time.copy()
+        _update_operational_state(
+            state, asset_type, flooded, config, recovery_parameters.get("repair_threshold", 2.0),
+            knowledge_graph=knowledge_graph, dependency_edges=dependency_edges,
+        )
+        operational = state.operational
+
     return {
         "flooded": flooded,
         "intrinsic_operational": intrinsic_operational,
+        "operational": operational,
         "damage_ratio": damage_ratio,
         "repair_time": repair_time,
         "repair_crews_assigned": repair_crews_assigned,
-        "recovery_time": np.where(intrinsic_operational, 0.0, repair_time + flood_duration),
+        "recovery_time": np.where(
+            ~intrinsic_operational, repair_time + flood_duration,
+            np.where(~operational & flooded, flood_duration, 0.0),
+        ),
     }
 
 
@@ -143,12 +169,12 @@ def single_map_societal_metrics(societal_access_config, gdf_assets, outcome, isl
                                 road_state_key, map_name="map", allocation_cache=None, **overrides):
     """Societal/population metrics for one map via the shared multi-map postprocessor.
 
-    The map is one timestep (0). Dependencies are not modelled yet, so ``operational``
-    equals ``intrinsic_operational``. Returns the flat metrics dict.
+    The map is one timestep (0); uses the outcome's ``operational`` (falls back to
+    ``intrinsic_operational``). Returns the flat metrics dict.
     """
     detail = {
         "timestep": 0, "map": map_name, "road_state_key": road_state_key,
-        "operational": np.asarray(outcome["intrinsic_operational"]),
+        "operational": np.asarray(outcome.get("operational", outcome["intrinsic_operational"])),
         "island_id": np.asarray(island_ids),
     }
     results, _ = postprocess_societal_access_from_config(

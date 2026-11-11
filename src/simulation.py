@@ -1346,6 +1346,20 @@ def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
         active_masks={"repair_time": can_repair_mask},
     )
 
+def build_dependency_runtime(config, gdf_assets):
+    """``(knowledge_graph, dependency_edges)`` for a config and asset set; ``(None, [])`` without rules."""
+    dep_config = config.get('dependency_parameters', {})
+    kg_config = dep_config.get('knowledge_graph', None) or []
+    if not kg_config:
+        return None, []
+    from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+    knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+    edges = dep_config.get('dependency_edges', None)
+    if edges is None:
+        edges = expand_dependency_edges(gdf_assets, knowledge_graph)
+    return knowledge_graph, edges
+
+
 def _update_operational_state(
     state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None, dependency_edges=None,
     profiler=NULL_PROFILER,
@@ -1793,16 +1807,8 @@ def simulate_asset_damage_recovery_access_breakdown(
 
     # Pre-build the knowledge graph and runtime dependency edges once to avoid
     # reconstructing/expanding them every timestep.
-    _knowledge_graph = None
-    _dependency_edges = []
+    _knowledge_graph, _dependency_edges = build_dependency_runtime(_config, gdf_assets)
     _dep_config = _config.get('dependency_parameters', {})
-    _kg_config = _dep_config.get('knowledge_graph', None) or []
-    if _kg_config:
-        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-        _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
-        _dependency_edges = _dep_config.get('dependency_edges', None)
-        if _dependency_edges is None:
-            _dependency_edges = expand_dependency_edges(gdf_assets, _knowledge_graph)
 
     # Named distinctly from the per-timestep "simulation.total" aggregate produced by
     # profiler.timestep(loop="simulation") below -- both would otherwise share the

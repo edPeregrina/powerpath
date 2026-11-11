@@ -82,8 +82,14 @@ def test_fragility_common_random_numbers(assets):
 
 
 def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
-    from src.simulation import simulate_asset_damage_recovery_access_breakdown
+    from src.simulation import (
+        _fragility_exclusions_from_knowledge_graph,
+        build_dependency_runtime,
+        simulate_asset_damage_recovery_access_breakdown,
+    )
 
+    assets = assets.copy()
+    assets.loc[assets.index[::3], "type"] = "hospital"
     config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
     config["simulation_config"]["verbose"] = False
     config["interim_dir"].mkdir(parents=True, exist_ok=True)
@@ -106,12 +112,20 @@ def test_matches_time_explicit_at_last_map(tmp_path, assets, monkeypatch):
     assert ids.tolist() == np.asarray(last["island_id"]).tolist()
 
     params = config["recovery_parameters"]
+    kg, edges = build_dependency_runtime(config, assets)
     out = single_map.simulate_single_map(
         last["hazard_value"], assets["type"], ids, roads, 5, np.full(len(assets), 0.5), params,
         flood_threshold=threshold, fragility_k=k,
+        fragility_exclusions=_fragility_exclusions_from_knowledge_graph(config, assets["type"].to_numpy()),
+        config=config, knowledge_graph=kg, dependency_edges=edges,
     )
+    hosp = (assets["type"].to_numpy() == "hospital") & np.asarray(last["flooded"], bool)
+    assert hosp.any()
+    assert not np.asarray(last["operational"], bool)[hosp].any()
+    assert not out["operational"][hosp].any()
+    assert out["intrinsic_operational"][hosp].all()
     for key, ref in [("damage_ratio", "damage_ratio"), ("repair_time", "repair_time"),
-                     ("intrinsic_operational", "intrinsic_operational")]:
+                     ("intrinsic_operational", "intrinsic_operational"), ("operational", "operational")]:
         np.testing.assert_allclose(
             np.asarray(out[key], float)[first_here], np.asarray(last[ref], float)[first_here], err_msg=key
         )
