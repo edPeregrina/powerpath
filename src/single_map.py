@@ -73,6 +73,16 @@ def sample_flood_durations(uniforms, params=None):
     return np.exp(mu + sigma * norm.ppf(q)) * 24.0
 
 
+def map_draws(seed, map_id, asset_ids, duration_params=None):
+    """``(random_values, flood_duration_hours)`` for one map, from independent hashed streams.
+
+    Feed to :func:`simulate_single_map`; ``seed`` is the EMA parameter that varies scenarios.
+    """
+    u = common_random_numbers(seed, map_id, asset_ids, stream="fragility")
+    duration = sample_flood_durations(common_random_numbers(seed, map_id, stream="duration"), duration_params)
+    return u, float(duration)
+
+
 def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, random_values,
                         recovery_parameters, flood_threshold, flood_duration=0.0,
                         fragility_k=None, fragility_steepness_overrides=None,

@@ -129,6 +129,15 @@ def test_common_random_numbers():
     assert 0 <= single_map.common_random_numbers(7, "mapA") < 1
 
 
+def test_map_draws():
+    ids = np.arange(50)
+    u, d = single_map.map_draws(3, "m1", ids)
+    u2, d2 = single_map.map_draws(3, "m1", ids)
+    assert np.array_equal(u, u2) and d == d2 and 0 <= d <= 7 * 24
+    assert single_map.map_draws(4, "m1", ids)[1] != d
+    assert not np.array_equal(u, single_map.common_random_numbers(3, "m1", ids, stream="duration"))
+
+
 def test_sample_flood_durations():
     u = np.linspace(0, 1, 101)
     h = single_map.sample_flood_durations(u)
