@@ -41,7 +41,9 @@ def test_map_asset_islands_matches_time_explicit(tmp_path, assets, column, thres
 
     undisrupted = single_map.undisrupted_state(assets, GRAPH)
     ids, _ = single_map.map_asset_islands(undisrupted, GRAPH, column, threshold)
-    assert ids.tolist() == np.asarray(expected).tolist()
+    expected = np.asarray(expected)
+    # Ids are canonical, so compare the grouping of assets, not the numbers.
+    assert _partition(dict(enumerate(ids.tolist()))) == _partition(dict(enumerate(expected.tolist())))
 
 
 def test_simulate_single_map(assets):
@@ -270,3 +272,34 @@ def test_incremental_l1_islands_directed():
     for l1 in L1_FILES:
         _, incremental, full = _incremental_vs_full(D, "EV3_ma", 0.0, l1)
         assert _partition(incremental) == _partition(full)
+
+
+def _rfid_partition(table):
+    return _partition(dict(zip(table["rfid"], table["island_id"])))
+
+
+def test_road_island_table_matches_full_and_caches():
+    l1 = L1_FILES[0]
+    cache = {}
+    for threshold in (0.0, 0.2):
+        for l1_file in (None, l1):
+            table = single_map.road_island_table(GRAPH, "EV3_ma", threshold, l1_file, cache)
+            full = island_analysis.compute_island_geodataframe_from_graph(
+                GRAPH, threshold, "EV3_ma", l1_area_geojson=l1_file
+            )
+            assert _rfid_partition(table) == _rfid_partition(full)
+            assert sorted(table["rfid"]) == sorted(full["rfid"])
+    n = len(cache)
+    again = single_map.road_island_table(GRAPH, "EV3_ma", 0.0, l1, cache)
+    assert len(cache) == n and again is cache[next(k for k in cache if "L1" in k and "0.0" in k)][0]
+    single_map.road_island_table(GRAPH, "EV3_ma", 0.3, None, cache)  # new threshold: a miss
+    assert len(cache) == n + 1
+
+
+def test_equal_partitions_share_island_ids():
+    from src.road_islands import canonical_island_ids
+
+    _, incremental, full = _incremental_vs_full(
+        island_analysis._load_and_project_graph(GRAPH), "EV3_ma", 0.0, L1_FILES[0]
+    )
+    assert canonical_island_ids(incremental) == canonical_island_ids(full)

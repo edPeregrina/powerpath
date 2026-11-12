@@ -1,5 +1,7 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
+import geopandas as gpd
 import numpy as np
+import pandas as pd
 
 from src.adaptation import build_l1_l2_reduction_array
 from src.damage_recovery import (
@@ -9,9 +11,16 @@ from src.damage_recovery import (
 )
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
 from src.island_analysis import _compute_initial_distribution
+from src.caching import _compute_l1_hash, create_island_cache_key
 from src.road_islands import (
+    _load_and_project_graph,
     attach_assets_undisrupted,
+    canonical_island_ids,
     compute_island_geodataframe_from_graph,
+    edge_removal,
+    filter_hazard_graph,
+    l1_node_islands,
+    label_road_islands,
     road_state_asset_islands,
 )
 from src.societal_access import postprocess_societal_access_from_config
@@ -35,14 +44,92 @@ def undisrupted_state(assets_gdf, graph_path, l1_area_geojson=None, **exemptions
     return attach_assets_undisrupted(assets_gdf.to_crs(PROJECTED_CRS), roads.to_crs(PROJECTED_CRS))
 
 
-def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
-                      l1_area_geojson=None, **kwargs):
-    """Asset island ids and island gdf for one map. ``kwargs``: footprint/exemptions."""
-    access_rfids, boundary_assets, boundary_rfids = undisrupted
-    roads = compute_island_geodataframe_from_graph(
-        graph_path, hazard_threshold=hazard_threshold, hazard_column=hazard_column,
-        buffer_distance=BUFFER_M, l1_area_geojson=l1_area_geojson, **kwargs,
+def road_island_table(graph_path, hazard_column, threshold, l1_area_geojson=None,
+                      cache=None, **kwargs):
+    """Road sections with their island on one map: DataFrame ``rfid, island_id, length_m``.
+
+    Same rows as :func:`compute_island_geodataframe_from_graph` (including its
+    drop of duplicate geometries) but without geometry, and island ids are canonical
+    (see :func:`canonical_island_ids`), so equal partitions share ids and allocation-cache
+    entries. With an L1 file and no footprint, islands are derived from the cached no-L1
+    labels of the same map and threshold instead of recomputing connected components.
+    ``cache`` is a dict (e.g. the island cache) keyed by map column, threshold, L1 and
+    ``kwargs`` (footprint/exemptions), so changing any of them is a miss.
+    """
+    return _road_islands(graph_path, hazard_column, threshold, l1_area_geojson, cache, kwargs)[0]
+
+
+def _road_islands(graph_path, hazard_column, threshold, l1, cache, kwargs):
+    """``(table, node_labels)``; node labels are kept so an L1 variant can build on them."""
+    footprint = kwargs.get("event_footprint")
+    key = create_island_cache_key(hazard_column, threshold, "road_table", l1_area_geojson=l1) + (
+        "_" + repr(sorted(
+            (k, _compute_l1_hash(footprint) if k == "event_footprint" and v is not None else v)
+            for k, v in kwargs.items()
+        ))
     )
+    if cache is not None and key in cache:
+        return cache[key]
+
+    G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
+    edges, remove, _ = edge_removal(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
+    if l1 is not None and footprint is None:
+        _, baseline = _road_islands(graph_path, hazard_column, threshold, None, cache, kwargs)
+        labels = l1_node_islands(G, baseline, threshold, hazard_column, l1, **kwargs)
+    else:
+        labels = label_road_islands(
+            filter_hazard_graph(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
+        )
+    labels = canonical_island_ids(labels)
+
+    rows, seen = [], set()
+    for (u, v, _, data), removed in zip(edges, remove):
+        if removed:
+            continue
+        island = labels.get(v, -1)
+        geom = data.get("geometry_m")
+        dedup = (island, geom.wkb if geom is not None else (u, v))
+        if dedup in seen:  # same as compute_island_geodataframe_from_graph
+            continue
+        seen.add(dedup)
+        length = data.get("length")
+        rows.append((data["rfid"], island, geom.length if length is None else length))
+    table = pd.DataFrame(rows, columns=["rfid", "island_id", "length_m"])
+    if cache is not None:
+        cache[key] = (table, labels)
+    return table, labels
+
+
+_road_geometry_cache = {}
+
+
+def _road_geometries(graph_path):
+    """rfid -> buffered road geometry (static per graph, built once per process)."""
+    geoms = _road_geometry_cache.get(str(graph_path))
+    if geoms is None:
+        G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
+        geoms = {
+            d["rfid"]: d["geometry_m"].buffer(BUFFER_M, cap_style="square", join_style="mitre")
+            for _, _, d in G.edges(data=True) if d.get("geometry_m") is not None
+        }
+        _road_geometry_cache[str(graph_path)] = geoms
+    return geoms
+
+
+def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
+                      l1_area_geojson=None, island_cache=None, **kwargs):
+    """Asset island ids and island gdf for one map. ``kwargs``: footprint/exemptions.
+    ``island_cache``: dict for :func:`road_island_table`."""
+    access_rfids, boundary_assets, boundary_rfids = undisrupted
+    table = road_island_table(
+        graph_path, hazard_column, hazard_threshold, l1_area_geojson, island_cache, **kwargs
+    )
+    geoms = _road_geometries(graph_path)
+    roads = gpd.GeoDataFrame(
+        table.assign(geometry=table["rfid"].map(geoms)), geometry="geometry", crs=PROJECTED_CRS
+    )
+    sizes = roads.groupby("island_id")["length_m"].transform("sum") / 1000.0
+    roads["island_size_km"] = sizes
     ids, _, roads = road_state_asset_islands(roads, access_rfids, boundary_assets, boundary_rfids)
     return ids, roads
 
