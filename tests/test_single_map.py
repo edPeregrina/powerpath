@@ -219,3 +219,54 @@ def test_single_map_societal_metrics_match_postprocessor():
     assert row["societal_access_pct__hospital__total"] == pytest.approx(66.67, abs=0.01)
     assert row["societal_access_pct__education__total"] == pytest.approx(0.0)
     assert row["societal_access_pct__emergency_response__total"] == pytest.approx(33.33, abs=0.01)
+
+
+L1_FILES = [
+    REPO / "data" / "test_samples" / "adaptation" / "l1_adapt_polygon.geojson",
+    *sorted((REPO / "data" / "test_samples" / "adaptation" / "L1_adaptations").glob("*.geojson")),
+]
+
+
+def _partition(labels):
+    groups = {}
+    for node, label in labels.items():
+        groups.setdefault(label, set()).add(node)
+    return {frozenset(g) for g in groups.values()}
+
+
+def _incremental_vs_full(G, column, threshold, l1):
+    from src.road_islands import filter_hazard_graph, label_road_islands, l1_node_islands
+
+    baseline = label_road_islands(filter_hazard_graph(G.copy(), threshold, column))
+    incremental = l1_node_islands(G, baseline, threshold, column, l1)
+    full = label_road_islands(filter_hazard_graph(G.copy(), threshold, column, l1_area_geojson=l1))
+    return baseline, incremental, full
+
+
+@pytest.mark.parametrize("column,threshold", [("EV2_ma", 0.2), ("EV5_ma", 0.5), ("EV3_ma", 0.0)])
+def test_incremental_l1_islands_match_full(column, threshold):
+    G = island_analysis._load_and_project_graph(GRAPH)
+    changed = 0
+    for l1 in L1_FILES:
+        baseline, incremental, full = _incremental_vs_full(G, column, threshold, l1)
+        assert _partition(incremental) == _partition(full)
+        changed += _partition(baseline) != _partition(full)
+    if threshold == 0.0:  # L1 merges islands and adds new ones here, so the check bites
+        assert changed
+
+
+def test_incremental_l1_islands_directed():
+    rng = np.random.default_rng(0)
+    G = island_analysis._load_and_project_graph(GRAPH)
+    import networkx as nx
+
+    D = nx.MultiDiGraph()
+    D.add_nodes_from(G.nodes(data=True))
+    for u, v, k, d in G.edges(keys=True, data=True):
+        a, b = (u, v) if rng.random() < 0.5 else (v, u)
+        D.add_edge(a, b, **d)
+        if rng.random() < 0.7:  # most roads two-way, so cycles exist
+            D.add_edge(b, a, **d)
+    for l1 in L1_FILES:
+        _, incremental, full = _incremental_vs_full(D, "EV3_ma", 0.0, l1)
+        assert _partition(incremental) == _partition(full)

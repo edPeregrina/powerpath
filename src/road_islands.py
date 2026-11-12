@@ -109,22 +109,15 @@ def hazard_removal_mask(hazard, threshold, depth_reduction, exempt):
     return (hazard > threshold + depth_reduction) & ~exempt
 
 
-def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
-                        l1_area_geojson=None,
-                        event_footprint=None, outside_footprint_policy="permissive",
-                        verbose=False, exempt_motorways=True, exempt_bridges=True,
-                        exempt_tunnels=True) -> nx.Graph:
-    """Remove edges whose hazard exceeds ``threshold`` plus the edge's L1 depth reduction (in place).
-
-    L2 (asset-level) adaptations are deliberately not accepted: they never apply to roads.
-
-    ``outside_footprint_policy``: "permissive" (default) leaves roads outside
-    ``event_footprint`` to the normal threshold; "strict" removes roads not
-    intersecting the footprint first (no exterior bypass) and requires a footprint.
-    ``event_footprint``: path/GeoDataFrame (reprojected to EPSG:4326) or a shapely
-    geometry already in the graph CRS.
-    ``exempt_*``: True (default) keeps motorways/bridges/tunnels regardless of hazard.
-    """
+def edge_removal(G: nx.Graph, threshold: float, hazard_column: str,
+                 l1_area_geojson=None,
+                 event_footprint=None, outside_footprint_policy="permissive",
+                 verbose=False, exempt_motorways=True, exempt_bridges=True,
+                 exempt_tunnels=True):
+    """Which edges of ``G`` hazard filtering removes (``G`` is not modified).
+    Returns ``(edges, remove, footprint_removed)``: ``edges`` as ``(u, v, key, data)`` tuples
+    (key is None on simple graphs), and boolean arrays aligned with it.
+    Arguments are those of :func:`filter_hazard_graph`."""
     if outside_footprint_policy not in ("strict", "permissive"):
         raise ValueError(
             f"Invalid outside_footprint_policy: {outside_footprint_policy!r}. "
@@ -209,7 +202,31 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
         exempt_tunnels=exempt_tunnels,
     )
     remove = footprint_removed | hazard_removal_mask(hazard, threshold, depth_reduction, exempt)
+    return edges, remove, footprint_removed
 
+
+def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
+                        l1_area_geojson=None,
+                        event_footprint=None, outside_footprint_policy="permissive",
+                        verbose=False, exempt_motorways=True, exempt_bridges=True,
+                        exempt_tunnels=True) -> nx.Graph:
+    """Remove edges whose hazard exceeds ``threshold`` plus the edge's L1 depth reduction (in place).
+
+    L2 (asset-level) adaptations are deliberately not accepted: they never apply to roads.
+
+    ``outside_footprint_policy``: "permissive" (default) leaves roads outside
+    ``event_footprint`` to the normal threshold; "strict" removes roads not
+    intersecting the footprint first (no exterior bypass) and requires a footprint.
+    ``event_footprint``: path/GeoDataFrame (reprojected to EPSG:4326) or a shapely
+    geometry already in the graph CRS.
+    ``exempt_*``: True (default) keeps motorways/bridges/tunnels regardless of hazard.
+    """
+    edges, remove, footprint_removed = edge_removal(
+        G, threshold, hazard_column, l1_area_geojson=l1_area_geojson,
+        event_footprint=event_footprint, outside_footprint_policy=outside_footprint_policy,
+        verbose=verbose, exempt_motorways=exempt_motorways, exempt_bridges=exempt_bridges,
+        exempt_tunnels=exempt_tunnels,
+    )
     edges_to_remove = [
         (u, v, k) if G.is_multigraph() else (u, v)
         for (u, v, k, _), r in zip(edges, remove) if r
@@ -220,7 +237,7 @@ def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str,
     
     if verbose:
         print(f"Removed {len(edges_to_remove)} edges (adjusted thresholds)")
-        if outside_footprint_policy == "strict" and footprint_geom is not None:
+        if outside_footprint_policy == "strict" and event_footprint is not None:
             print(f"  of which {footprint_edges_removed} removed as outside the event footprint (strict policy)")
     
     return G
@@ -240,6 +257,69 @@ def label_road_islands(G):
             fid_to_island[u] = i
             fid_to_island[v] = i
     return fid_to_island
+
+
+def l1_node_islands(G, baseline_labels, threshold, hazard_column, l1_area_geojson, **filter_kwargs):
+    """Node -> island id after L1, derived from the no-L1 labels without recomputing components.
+
+    L1 only lowers the removal threshold, so it only restores edges. Each baseline island
+    is therefore one super-node; restored edges merge super-nodes (nodes the baseline
+    dropped as isolated start as their own). ``G`` is the unfiltered graph (not modified);
+    ``baseline_labels`` is ``label_road_islands`` of ``G`` filtered without L1, with the
+    same ``filter_kwargs``. Island ids are not renumbered: merged islands keep the lowest
+    baseline id, new ones continue after the highest.
+    """
+    edges, remove_l1, _ = edge_removal(G, threshold, hazard_column,
+                                       l1_area_geojson=l1_area_geojson, **filter_kwargs)
+    _, remove_base, _ = edge_removal(G, threshold, hazard_column, **filter_kwargs)
+    restored = remove_base & ~remove_l1
+    if not restored.any():
+        return dict(baseline_labels)
+
+    def supernode(node):
+        label = baseline_labels.get(node)
+        return ("island", label) if label is not None else ("node", node)
+
+    directed = G.is_directed()
+    H = nx.DiGraph() if directed else nx.Graph()
+    for (u, v, _, _), is_restored, is_removed in zip(edges, restored, remove_base):
+        # Undirected merging only needs the restored edges; strong connectivity needs
+        # the baseline's edges between islands too (a restored edge may close a cycle).
+        if is_restored or (directed and not is_removed):
+            H.add_edge(supernode(u), supernode(v))
+    components = (
+        nx.strongly_connected_components(H) if directed else nx.connected_components(H)
+    )
+
+    next_label = max(baseline_labels.values(), default=-1) + 1
+    node_labels = dict(baseline_labels)
+    supernode_label = {}
+    for comp in components:
+        has_edge = len(comp) > 1 or any(H.has_edge(s, s) for s in comp)
+        if not has_edge:
+            continue
+        known = [s[1] for s in comp if s[0] == "island"]
+        label = min(known) if known else next_label
+        next_label += 0 if known else 1
+        for s in comp:
+            supernode_label[s] = label
+    restored_nodes = {n for (u, v, _, _), r in zip(edges, restored) if r for n in (u, v)}
+    for node in restored_nodes:
+        s = supernode(node)
+        if s in supernode_label:
+            node_labels[node] = supernode_label[s]
+    old_to_new = {s[1]: lab for s, lab in supernode_label.items() if s[0] == "island"}
+    for node, label in baseline_labels.items():
+        node_labels[node] = old_to_new.get(label, label)
+    return node_labels
+
+
+def canonical_island_ids(node_labels):
+    """Renumber islands 0..n-1 by their lowest node id, so equal partitions get equal ids."""
+    first = {}
+    for node in sorted(node_labels):
+        first.setdefault(node_labels[node], len(first))
+    return {node: first[label] for node, label in node_labels.items()}
 
 
 def compute_island_geodataframe_from_graph(
