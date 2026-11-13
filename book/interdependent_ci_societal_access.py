@@ -812,6 +812,65 @@ def build_adaptation_policies(root_dir, args, l1_dir=None, l2_dir=None,
     return policies
 
 
+def prepare_model_inputs(config, checkpoint=lambda label: None):
+    """Load assets, hazard maps, population/land use and caches shared by the multi-map and
+    single-map runners. Returns a dict with ``config_combined``, ``gdf_assets``, ``hazard_maps``,
+    ``asset_population_map``, ``asset_to_lu``, ``caches`` and ``societal_access_config``."""
+    root_dir = Path(config["root_dir"])
+
+    gdf_assets_combined, substation_idx, osm_asset_idx = load_combined_assets(config)
+    checkpoint("combined assets loaded")
+
+    LOGGER.info("Loading hazard maps from %s", config["hazard_dir"])
+    hazard_maps = load_hazard_maps(config["hazard_dir"], max_days=None)
+    LOGGER.info("Loaded %d hazard maps", len(hazard_maps))
+    checkpoint("hazard maps loaded")
+
+    # Voronoi generators padded beyond the true extent shape boundary cells
+    # correctly; results are clipped to model_extent_raw before any
+    # downstream use (see CLAUDE.md "Dataset-extent alignment").
+    model_extent_raw = get_model_extent(config)
+    model_extent_buffered = get_model_extent(config, buffer_frac=0.05)
+
+    LOGGER.info("Building Voronoi service areas for electricity substations...")
+    substation_voronoi = create_voronoi_for_asset_type(
+        gdf_assets_combined, "msls", boundary=model_extent_buffered,
+    )
+    substation_voronoi_clipped = gpd.clip(substation_voronoi, model_extent_raw)
+    checkpoint("substation Voronoi built")
+
+    config_combined, service_area_map = build_dependency_config(
+        config, gdf_assets_combined, substation_voronoi_clipped, osm_asset_idx,
+    )
+    checkpoint("dependency config + service-area map built")
+
+    asset_population_map, asset_to_lu, population_for_societal = prepare_population_and_land_use(
+        config_combined, gdf_assets_combined, substation_idx,
+        substation_voronoi_clipped, root_dir, model_extent_raw,
+    )
+    population_for_societal = clip_population_to_service_area(
+        population_for_societal, gdf_assets_combined,
+    )
+    checkpoint("population + land-use data ready")
+
+    caches = load_simulation_caches(config["interim_dir"], config["hazard_dir"])
+    LOGGER.info("Loaded caches: %s", [k for k in caches if caches[k] is not None])
+    checkpoint("simulation caches loaded")
+
+    societal_access_config = get_societal_access_config(
+        config_combined, population_for_societal, caches=caches,
+        asset_types=["msls", *AMENITY_CATEGORY_LABELS.keys()],
+        namespace="interdependent_ci_societal_access",
+    )
+    LOGGER.info("Societal access functions: %s", societal_access_config["all_functions"])
+    return {
+        "config_combined": config_combined, "gdf_assets": gdf_assets_combined,
+        "hazard_maps": hazard_maps, "asset_population_map": asset_population_map,
+        "asset_to_lu": asset_to_lu, "caches": caches,
+        "societal_access_config": societal_access_config,
+    }
+
+
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
@@ -841,51 +900,14 @@ def main():
 
     root_dir = Path(config["root_dir"])
 
-    gdf_assets_combined, substation_idx, osm_asset_idx = load_combined_assets(config)
-    _checkpoint("combined assets loaded")
-
-    LOGGER.info("Loading hazard maps from %s", config["hazard_dir"])
-    hazard_maps = load_hazard_maps(config["hazard_dir"], max_days=None)
-    LOGGER.info("Loaded %d hazard maps", len(hazard_maps))
-    _checkpoint("hazard maps loaded")
-
-    # Voronoi generators padded beyond the true extent shape boundary cells
-    # correctly; results are clipped to model_extent_raw before any
-    # downstream use (see CLAUDE.md "Dataset-extent alignment").
-    model_extent_raw = get_model_extent(config)
-    model_extent_buffered = get_model_extent(config, buffer_frac=0.05)
-
-    LOGGER.info("Building Voronoi service areas for electricity substations...")
-    substation_voronoi = create_voronoi_for_asset_type(
-        gdf_assets_combined, "msls", boundary=model_extent_buffered,
-    )
-    substation_voronoi_clipped = gpd.clip(substation_voronoi, model_extent_raw)
-    _checkpoint("substation Voronoi built")
-
-    config_combined, service_area_map = build_dependency_config(
-        config, gdf_assets_combined, substation_voronoi_clipped, osm_asset_idx,
-    )
-    _checkpoint("dependency config + service-area map built")
-
-    asset_population_map, asset_to_lu, population_for_societal = prepare_population_and_land_use(
-        config_combined, gdf_assets_combined, substation_idx,
-        substation_voronoi_clipped, root_dir, model_extent_raw,
-    )
-    population_for_societal = clip_population_to_service_area(
-        population_for_societal, gdf_assets_combined,
-    )
-    _checkpoint("population + land-use data ready")
-
-    caches = load_simulation_caches(config["interim_dir"], config["hazard_dir"])
-    LOGGER.info("Loaded caches: %s", [k for k in caches if caches[k] is not None])
-    _checkpoint("simulation caches loaded")
-
-    societal_access_config = get_societal_access_config(
-        config_combined, population_for_societal, caches=caches,
-        asset_types=["msls", *AMENITY_CATEGORY_LABELS.keys()],
-        namespace="interdependent_ci_societal_access",
-    )
-    LOGGER.info("Societal access functions: %s", societal_access_config["all_functions"])
+    inputs = prepare_model_inputs(config, _checkpoint)
+    config_combined = inputs["config_combined"]
+    gdf_assets_combined = inputs["gdf_assets"]
+    hazard_maps = inputs["hazard_maps"]
+    asset_population_map = inputs["asset_population_map"]
+    asset_to_lu = inputs["asset_to_lu"]
+    caches = inputs["caches"]
+    societal_access_config = inputs["societal_access_config"]
 
     execution_id = int(time.time())
     profiler = None
