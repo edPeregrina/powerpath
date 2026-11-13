@@ -34,11 +34,14 @@ from src.simulation import (
     build_per_type_crew_uncertainties,
     build_per_type_fragility_steepness_uncertainties,
 )
-from src.single_map import return_periods, run_single_map_experiment
+from src.single_map import MONETARY_CATEGORIES, return_periods, run_single_map_experiment
 from src.societal_access import list_societal_metric_names
 
 LOGGER = logging.getLogger(__name__)
-COUNT_OUTCOMES = ["flooded_assets", "non_operational_assets", "max_recovery_time_h"]
+COUNT_OUTCOMES = [
+    "flooded_assets", "non_operational_assets", "max_recovery_time_h",
+    *(f"monetary_impact_{c}" for c in [*MONETARY_CATEGORIES, "total"]),  # EUR/h at peak
+]
 
 
 def parse_args():
@@ -83,6 +86,7 @@ def build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
         Constant("societal_access_config", societal),
         Constant("flood_threshold", args.flood_threshold),
         Constant("seed", args.seed),
+        Constant("asset_to_lu", inputs["asset_to_lu"]),
         Constant("island_cache", caches.get("island_cache")),
         Constant("hazard_extraction_cache", caches.get("hazard_extraction_cache")),
     ]

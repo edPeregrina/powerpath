@@ -26,6 +26,7 @@ from src.road_islands import (
     label_road_islands,
     road_state_asset_islands,
 )
+from src.impacts import calculate_cumulative_monetized_impacts_ema
 from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import (
     SimulationState,
@@ -363,10 +364,28 @@ def _extent_state(gdf_assets, graph_path, config):
     return state
 
 
+MONETARY_CATEGORIES = ["residential", "commercial", "industrial", "transport", "public_sector"]
+
+
+def single_map_monetary_rate(operational, asset_ids, asset_to_lu):
+    """Monetary impact rate [EUR/h] of the non-operational assets, per land-use category and total.
+
+    One timestep through the multi-map cumulative function, so the cumsum is the identity and the
+    result is a rate, not an accumulated cost (that would need outage durations).
+    """
+    rate = {f"monetary_impact_{c}": 0.0 for c in [*MONETARY_CATEGORIES, "total"]}
+    if asset_to_lu:
+        step = calculate_cumulative_monetized_impacts_ema(
+            [{"asset_id": asset_ids, "operational": operational}], asset_to_lu
+        ).iloc[0]
+        rate.update({k: float(v) for k, v in step.items() if k.startswith("monetary_impact_")})
+    return rate
+
+
 def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
                               flood_threshold=0.2, seed=0, l1_area_geojson=None, l2_asset_geojson=None,
                               repair_crew_assignment_method="random", island_cache=None,
-                              hazard_extraction_cache=None, **kwargs):
+                              hazard_extraction_cache=None, asset_to_lu=None, **kwargs):
     """EMA model function: every map of one experiment (scenario x policy), independent of each other.
 
     Per-type uncertainties arrive as in multi-map (``repair_crews__<type>``,
@@ -414,6 +433,7 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
             flooded_assets=int(outcome["flooded"].sum()),
             non_operational_assets=int((~outcome["operational"]).sum()),
             max_recovery_time_h=float(outcome["recovery_time"].max(initial=0.0)),
+            **single_map_monetary_rate(outcome["operational"], asset_ids, asset_to_lu),
         )
         names.append(name)
         per_map.append(metrics)

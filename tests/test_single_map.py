@@ -339,6 +339,16 @@ def test_run_single_map_experiment(tmp_path, assets):
         np.testing.assert_array_equal(out[key], again[key])
 
 
+def test_single_map_monetary_rate():
+    lu = {0: [("residential", 10.0, 2.0), ("commercial", 5.0, 1.0)], 1: [("residential", 1.0, 3.0)]}
+    rate = single_map.single_map_monetary_rate(np.array([False, False, True]), np.arange(3), lu)
+    assert rate["monetary_impact_residential"] == pytest.approx(23.0)
+    assert rate["monetary_impact_commercial"] == pytest.approx(5.0)
+    assert rate["monetary_impact_total"] == pytest.approx(28.0)
+    assert single_map.single_map_monetary_rate(np.array([True]), np.arange(1), lu)["monetary_impact_total"] == 0.0
+    assert single_map.single_map_monetary_rate(np.array([False]), np.arange(1), None)["monetary_impact_industrial"] == 0.0
+
+
 def test_return_periods_and_annualised():
     assert single_map.return_periods(["flood_RP10", "flood_RP100", "flood_RP1000"]) == [10, 100, 1000]
     assert single_map.return_periods(["floodA_RP10", "floodB_RP100"]) is None
