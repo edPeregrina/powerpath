@@ -303,3 +303,44 @@ def test_equal_partitions_share_island_ids():
         island_analysis._load_and_project_graph(GRAPH), "EV3_ma", 0.0, L1_FILES[0]
     )
     assert canonical_island_ids(incremental) == canonical_island_ids(full)
+
+
+def _experiment_inputs(tmp_path, assets):
+    from config import get_societal_access_config
+
+    config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
+    config["simulation_config"]["verbose"] = False
+    config["interim_dir"].mkdir(parents=True, exist_ok=True)
+    groups = list(config["service_node_config"]["population_groups"].values())
+    pop = gpd.GeoDataFrame(
+        {g: np.full(len(assets), 10.0) for g in groups}, geometry=assets.geometry.buffer(150).values, crs=assets.crs
+    )
+    pop["cell_id"] = pop.index.astype(str)
+    maps = [HAZARD_DIR / f"Frag_timesteps_test{i}.tif" for i in (0, 2, 5)]
+    return dict(
+        gdf_assets=assets, hazard_maps=maps, config=config, graph_path=GRAPH,
+        societal_access_config=get_societal_access_config(config, pop, asset_types=["ls"]),
+    )
+
+
+def test_run_single_map_experiment(tmp_path, assets):
+    inputs = _experiment_inputs(tmp_path, assets)
+    levers = {"repair_crews__msls": 2, "repair_crews__ls": 1, "fragility_param_k_divby2__msls": 12}
+    out = single_map.run_single_map_experiment(
+        **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, **levers
+    )
+    assert out["flooded_assets"].shape == (3,) and out["flooded_assets"].max() > 0
+    assert any(k.startswith("societal_access_pct") for k in out)
+    assert not any(k.startswith("annualised_") for k in out)
+    again = single_map.run_single_map_experiment(
+        **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, **levers
+    )
+    for key in out:
+        np.testing.assert_array_equal(out[key], again[key])
+
+
+def test_return_periods_and_annualised():
+    assert single_map.return_periods(["flood_RP10", "flood_RP100", "flood_RP1000"]) == [10, 100, 1000]
+    assert single_map.return_periods(["floodA_RP10", "floodB_RP100"]) is None
+    assert single_map.return_periods(["a", "b"]) is None
+    assert single_map.annualised([0.0, 10.0], [100, 10]) == pytest.approx(0.5 * 10.0 * (0.1 - 0.01))

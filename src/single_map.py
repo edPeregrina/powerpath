@@ -1,4 +1,7 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
+import re
+from pathlib import Path
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -10,8 +13,8 @@ from src.damage_recovery import (
     with_steepness_overrides,
 )
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
-from src.island_analysis import _compute_initial_distribution
-from src.caching import _compute_l1_hash, create_island_cache_key
+from src.caching import _compute_l1_hash, create_island_cache_key, get_asset_centroid_hash
+from src.island_analysis import _compute_initial_distribution, _road_exemption_kwargs
 from src.road_islands import (
     _load_and_project_graph,
     attach_assets_undisrupted,
@@ -26,12 +29,17 @@ from src.road_islands import (
 from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import (
     SimulationState,
+    _fragility_exclusions_from_knowledge_graph,
     _update_operational_state,
+    build_dependency_runtime,
+    combine_per_type_crew_kwargs,
+    combine_per_type_fragility_steepness_kwargs,
     update_repair_crew_assignment_optimized,
 )
 
 BUFFER_M = 20
 PROJECTED_CRS = "EPSG:28992"
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
 
 def undisrupted_state(assets_gdf, graph_path, l1_area_geojson=None, **exemptions):
@@ -305,3 +313,113 @@ def single_map_societal_metrics(societal_access_config, gdf_assets, outcome, isl
         islands_gdf_cache={road_state_key: roads}, **overrides,
     )
     return results[0]
+
+
+RETURN_PERIOD_PATTERN = re.compile(r"RP[_-]?(\d+)", re.IGNORECASE)
+
+
+def return_periods(map_names):
+    """Return periods if all maps are the same name except for their ``RP<n>`` (>= 2 distinct), else None.
+
+    ``["flood_RP10", "flood_RP100"]`` -> ``[10, 100]``.
+    """
+    bases, rps = set(), []
+    for name in map_names:
+        match = RETURN_PERIOD_PATTERN.search(name)
+        if match is None:
+            return None
+        bases.add(RETURN_PERIOD_PATTERN.sub("RP", name))
+        rps.append(int(match.group(1)))
+    return rps if len(bases) == 1 and len(set(rps)) >= 2 else None
+
+
+def annualised(values, rps):
+    """Integral of a per-map metric over annual exceedance probability ``1/RP``.
+
+    Trapezoid rule between the rarest and most frequent map only (no extrapolation),
+    so it is a lower bound on the full annualised value.
+    """
+    p = 1.0 / np.asarray(rps, dtype=float)
+    order = np.argsort(p)
+    return float(trapezoid(np.asarray(values, dtype=float)[order], p[order]))
+
+
+_extent_state_cache = {}
+
+
+def _extent_state(gdf_assets, graph_path, config):
+    """Per-extent state shared by all experiments: undisrupted attachment and dependency runtime."""
+    key = (str(graph_path), get_asset_centroid_hash(gdf_assets))
+    state = _extent_state_cache.get(key)
+    if state is None:
+        knowledge_graph, edges = build_dependency_runtime(config, gdf_assets)
+        state = {
+            "undisrupted": undisrupted_state(gdf_assets, graph_path, **_road_exemption_kwargs(config)),
+            "knowledge_graph": knowledge_graph,
+            "dependency_edges": edges,
+            "exclusions": _fragility_exclusions_from_knowledge_graph(config, gdf_assets["type"].to_numpy()),
+        }
+        _extent_state_cache[key] = state
+    return state
+
+
+def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
+                              flood_threshold=0.2, seed=0, l1_area_geojson=None, l2_asset_geojson=None,
+                              repair_crew_assignment_method="random", island_cache=None,
+                              hazard_extraction_cache=None, **kwargs):
+    """EMA model function: every map of one experiment (scenario x policy), independent of each other.
+
+    Per-type uncertainties arrive as in multi-map (``repair_crews__<type>``,
+    ``fragility_param_k_divby2__<type>``); ``seed`` varies the common random numbers.
+    Returns ``{outcome: array of length n_maps}`` (societal metrics plus asset counts and
+    ``max_recovery_time_h``). If the maps are return periods of one flood (see
+    :func:`return_periods`), each outcome also gets an ``annualised_`` counterpart.
+    """
+    combine_per_type_crew_kwargs(kwargs)
+    combine_per_type_fragility_steepness_kwargs(kwargs)
+    n_crews = kwargs.get("number_repair_crews", 1)
+    steepness = kwargs.get("fragility_steepness_overrides")
+    params = config["recovery_parameters"]
+    state = _extent_state(gdf_assets, graph_path, config)
+    asset_hash = get_asset_centroid_hash(gdf_assets)
+    reduction = adaptation_depth_reduction(gdf_assets, l1_area_geojson, l2_asset_geojson, config)
+    asset_ids = np.arange(len(gdf_assets))
+    allocation_cache = societal_access_config.get("allocation_cache")
+
+    names, per_map = [], []
+    for counter, hazard_map in enumerate(hazard_maps):
+        name = Path(hazard_map).stem
+        column = f"EV{counter}_ma"
+        depths = map_asset_depths(hazard_map, gdf_assets, counter, config, hazard_extraction_cache, reduction)
+        ids, roads = map_asset_islands(
+            state["undisrupted"], graph_path, column, flood_threshold, l1_area_geojson,
+            island_cache, **_road_exemption_kwargs(config),
+        )
+        draws, duration = map_draws(seed, name, asset_ids, params.get("flood_duration_days"))
+        outcome = simulate_single_map(
+            depths, gdf_assets["type"], ids, roads, n_crews, draws, params, flood_threshold,
+            flood_duration=duration, fragility_steepness_overrides=steepness,
+            fragility_exclusions=state["exclusions"], method=repair_crew_assignment_method,
+            config=config, knowledge_graph=state["knowledge_graph"],
+            dependency_edges=state["dependency_edges"],
+        )
+        road_state_key = create_island_cache_key(column, flood_threshold, asset_hash, l1_area_geojson)
+        metrics = single_map_societal_metrics(
+            societal_access_config, gdf_assets, outcome, ids, roads, road_state_key, name,
+            allocation_cache,
+        )
+        metrics = {k: v for k, v in metrics.items()
+                   if k != "timestep" and isinstance(v, (int, float, np.number))}
+        metrics.update(
+            flooded_assets=int(outcome["flooded"].sum()),
+            non_operational_assets=int((~outcome["operational"]).sum()),
+            max_recovery_time_h=float(outcome["recovery_time"].max(initial=0.0)),
+        )
+        names.append(name)
+        per_map.append(metrics)
+
+    results = {key: np.array([m[key] for m in per_map], dtype=float) for key in per_map[0]}
+    rps = return_periods(names)
+    if rps is not None:
+        results.update({f"annualised_{k}": np.array([annualised(v, rps)]) for k, v in list(results.items())})
+    return results
