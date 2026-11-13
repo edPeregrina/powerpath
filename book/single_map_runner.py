@@ -30,6 +30,7 @@ from ema_workbench.util.utilities import save_results
 import interdependent_ci_societal_access as multi
 from config import get_config, get_development_config, setup_directories
 from src.caching import save_hazard_extraction_cache, save_island_cache, save_societal_allocation_cache
+from src.graph_manager import build_single_map_graph
 from src.simulation import (
     build_per_type_crew_uncertainties,
     build_per_type_fragility_steepness_uncertainties,
@@ -49,6 +50,8 @@ def parse_args():
     parser.add_argument("--scenarios", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0, help="Constant seed of the common random numbers.")
     parser.add_argument("--flood-threshold", type=float, default=0.2)
+    parser.add_argument("--graph-path", type=Path, default=None,
+                        help="Prebuilt graph with EV<i>_ma columns in map order; default: built per extent and maps.")
     parser.add_argument("--repair-crews-range", nargs=3, metavar=("ASSET_TYPE", "MIN", "MAX"),
                         action="append", default=None)
     parser.add_argument("--fragility-steepness-range", nargs=3, metavar=("ASSET_TYPE", "MIN", "MAX"),
@@ -111,7 +114,8 @@ def main():
     steepness_ranges = multi.resolve_fragility_steepness_ranges(args)
 
     inputs = multi.prepare_model_inputs(config)
-    graph_path = config["hazard_dir"].parent / "static" / "output_graph" / "base_graph_hazard_editted.p"
+    graph_path = args.graph_path or build_single_map_graph(inputs["hazard_maps"], config["hazard_dir"].parent)
+    LOGGER.info("Road graph: %s", graph_path)
     model = build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
     policies = multi.build_adaptation_policies(
         Path(config["root_dir"]), args, l1_dir=args.l1_dir, l2_dir=args.l2_dir,

@@ -27,6 +27,7 @@ from src.road_islands import (
     road_state_asset_islands,
 )
 from src.impacts import calculate_cumulative_monetized_impacts_ema
+from src.graph_manager import file_fingerprint
 from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import (
     SimulationState,
@@ -72,7 +73,7 @@ def _road_islands(graph_path, hazard_column, threshold, l1, cache, kwargs):
     """``(table, node_labels)``; node labels are kept so an L1 variant can build on them."""
     footprint = kwargs.get("event_footprint")
     key = create_island_cache_key(hazard_column, threshold, "road_table", l1_area_geojson=l1) + (
-        "_" + repr(sorted(
+        f"_graph{file_fingerprint(graph_path)}_" + repr(sorted(
             (k, _compute_l1_hash(footprint) if k == "event_footprint" and v is not None else v)
             for k, v in kwargs.items()
         ))
@@ -161,15 +162,23 @@ def adaptation_depth_reduction(gdf_assets, l1_area_geojson=None, l2_asset_geojso
 def map_asset_depths(hazard_map, gdf_assets, map_counter, config, hazard_cache=None, depth_reduction=None):
     """Depth (m) at each asset for one map, extracted as in multi-map.
 
-    Extraction is cached per (map, asset set), independent of the policy;
+    Extraction is cached per (map file, asset set), independent of the policy;
     ``depth_reduction`` (see :func:`adaptation_depth_reduction`) is applied afterwards.
+    The entry sits in ``hazard_cache`` under its own key, which includes the map's
+    fingerprint (a changed file is a miss) and never collides with multi-map's entries.
     """
-    extracted = find_hazard_value_at_points_optimized(
-        hazard_map, gdf_assets[["type", "geometry"]].copy(), map_counter,
-        extraction_method=config["analysis_config"]["hazard_extraction_method"],
-        hazard_cache=hazard_cache, hazard_dir=config["hazard_dir"], _config=config,
-    )
-    depths = extracted[f"EV{map_counter}_ma"].fillna(0.0).to_numpy(dtype=float)
+    method = config["analysis_config"]["hazard_extraction_method"]
+    key = (f"single_map_depths|{method}|{Path(hazard_map).name}|{file_fingerprint(hazard_map)}"
+           f"|map{map_counter}|{get_asset_centroid_hash(gdf_assets)}")
+    depths = hazard_cache.get(key) if hazard_cache is not None else None
+    if depths is None:
+        extracted = find_hazard_value_at_points_optimized(
+            hazard_map, gdf_assets[["type", "geometry"]].copy(), map_counter,
+            extraction_method=method, hazard_cache=None, hazard_dir=config["hazard_dir"], _config=config,
+        )
+        depths = extracted[f"EV{map_counter}_ma"].fillna(0.0).to_numpy(dtype=float)
+        if hazard_cache is not None:
+            hazard_cache[key] = depths
     if depth_reduction is not None:
         depths = np.maximum(0.0, depths - depth_reduction)
     return depths
@@ -350,7 +359,7 @@ _extent_state_cache = {}
 
 def _extent_state(gdf_assets, graph_path, config):
     """Per-extent state shared by all experiments: undisrupted attachment and dependency runtime."""
-    key = (str(graph_path), get_asset_centroid_hash(gdf_assets))
+    key = (str(graph_path), file_fingerprint(graph_path), get_asset_centroid_hash(gdf_assets))
     state = _extent_state_cache.get(key)
     if state is None:
         knowledge_graph, edges = build_dependency_runtime(config, gdf_assets)
@@ -422,7 +431,8 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
             config=config, knowledge_graph=state["knowledge_graph"],
             dependency_edges=state["dependency_edges"],
         )
-        road_state_key = create_island_cache_key(column, flood_threshold, asset_hash, l1_area_geojson)
+        road_state_key = (create_island_cache_key(column, flood_threshold, asset_hash, l1_area_geojson)
+                          + f"_graph{file_fingerprint(graph_path)}")
         metrics = single_map_societal_metrics(
             societal_access_config, gdf_assets, outcome, ids, roads, road_state_key, name,
             allocation_cache,

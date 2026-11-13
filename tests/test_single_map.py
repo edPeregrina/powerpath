@@ -349,6 +349,41 @@ def test_single_map_monetary_rate():
     assert single_map.single_map_monetary_rate(np.array([False]), np.arange(1), None)["monetary_impact_industrial"] == 0.0
 
 
+def test_shift_overlay_columns():
+    import networkx as nx
+    from src.graph_manager import shift_overlay_columns
+
+    G = nx.MultiGraph()
+    G.add_edge(0, 1, EV1_ma=0.5, EV1_fr=1.0, EV2_ma=0.1, EV5_ma=9.0)
+    G.add_edge(1, 2)
+    shift_overlay_columns(G, 2)
+    first, second = (d for *_, d in G.edges(data=True))
+    assert first == {"EV0_ma": 0.5, "EV0_fr": 1.0, "EV1_ma": 0.1}  # EV5 dropped (beyond n_maps)
+    assert second == {"EV0_ma": 0.0, "EV1_ma": 0.0}
+
+
+def test_graph_manager_keys(tmp_path):
+    from src.graph_manager import file_fingerprint, single_map_extent_key
+
+    maps = [HAZARD_DIR / f"Frag_timesteps_test{i}.tif" for i in (1, 2)]
+    key, polygon, _ = single_map_extent_key(maps)
+    assert key == single_map_extent_key(maps)[0] != single_map_extent_key(maps, ("MOTORWAY",))[0]
+    assert polygon.contains(polygon.centroid)
+    copy = tmp_path / "m.tif"
+    copy.write_bytes(maps[0].read_bytes())
+    assert file_fingerprint(copy) != file_fingerprint(maps[0]) or copy.stat().st_mtime_ns == maps[0].stat().st_mtime_ns
+
+
+def test_depth_cache_keyed_by_file(tmp_path, assets):
+    inputs = _experiment_inputs(tmp_path, assets)
+    cache = {}
+    first = single_map.map_asset_depths(inputs["hazard_maps"][1], assets, 1, inputs["config"], cache)
+    assert len(cache) == 1 and next(iter(cache)).startswith("single_map_depths|")
+    cache[next(iter(cache))] = np.full(len(assets), 7.0)  # a hit returns the cached entry
+    assert (single_map.map_asset_depths(inputs["hazard_maps"][1], assets, 1, inputs["config"], cache) == 7.0).all()
+    assert (first != 7.0).any()
+
+
 def test_return_periods_and_annualised():
     assert single_map.return_periods(["flood_RP10", "flood_RP100", "flood_RP1000"]) == [10, 100, 1000]
     assert single_map.return_periods(["floodA_RP10", "floodB_RP100"]) is None
