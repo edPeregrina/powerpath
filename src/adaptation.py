@@ -27,6 +27,25 @@ BLOCKING_REASON_LABELS = {
     4: "other_blocked",
 }
 
+def blocking_reason_codes(operational, intrinsic, hazard_avail, dependency_avail):
+    """Per-asset code (see ``BLOCKING_REASON_LABELS``) for why an asset is non-operational.
+
+    1=physically_damaged (not intrinsically operational), 2=hazard_blocked, 3=dependency_blocked,
+    4=other_blocked (e.g. a dependency-restart delay), 0=operational.
+    """
+    operational = np.asarray(operational).astype(bool)
+    intrinsic = np.asarray(intrinsic).astype(bool)
+    hazard_avail = np.asarray(hazard_avail).astype(bool)
+    dependency_avail = np.asarray(dependency_avail).astype(bool)
+    reason = np.zeros(len(operational), dtype=int)
+    blocked = ~operational
+    reason[blocked & ~intrinsic] = 1
+    reason[blocked & intrinsic & ~hazard_avail] = 2
+    reason[blocked & intrinsic & hazard_avail & ~dependency_avail] = 3
+    reason[blocked & intrinsic & hazard_avail & dependency_avail] = 4
+    return reason
+
+
 def _build_adaptation_arrays_cached(
     gdf_assets: gpd.GeoDataFrame,
     n_timesteps: int,
@@ -651,13 +670,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         hazard_avail = np.asarray(detailed_ts.get('hazard_available', np.ones(n_assets)))[:n_assets].astype(bool)
         dependency_avail = np.asarray(detailed_ts.get('dependency_available', np.ones(n_assets)))[:n_assets].astype(bool)
 
-        reason = np.zeros(n_assets, dtype=int)
-        blocked = ~operational
-        reason[blocked & ~intrinsic] = 1
-        reason[blocked & intrinsic & ~hazard_avail] = 2
-        reason[blocked & intrinsic & hazard_avail & ~dependency_avail] = 3
-        reason[blocked & intrinsic & hazard_avail & dependency_avail] = 4
-        return reason
+        return blocking_reason_codes(operational, intrinsic, hazard_avail, dependency_avail)
 
     def _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
         """Aggregate and store metric as scalar in 2D array."""

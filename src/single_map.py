@@ -1,12 +1,13 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-from src.adaptation import build_l1_l2_reduction_array
+from src.adaptation import blocking_reason_codes, build_l1_l2_reduction_array
 from src.damage_recovery import (
     default_fragility_function,
     update_damage_and_repair,
@@ -33,6 +34,7 @@ from src.simulation import (
     SimulationState,
     _fragility_exclusions_from_knowledge_graph,
     _update_operational_state,
+    _update_unreachable_assets,
     build_dependency_runtime,
     combine_per_type_crew_kwargs,
     combine_per_type_fragility_steepness_kwargs,
@@ -126,20 +128,39 @@ def _road_geometries(graph_path):
     return geoms
 
 
-def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
-                      l1_area_geojson=None, island_cache=None, **kwargs):
-    """Asset island ids and island gdf for one map. ``kwargs``: footprint/exemptions.
-    ``island_cache``: dict for :func:`road_island_table`."""
-    access_rfids, boundary_assets, boundary_rfids = undisrupted
+def island_road_sections(graph_path, hazard_column, threshold, l1_area_geojson=None, island_cache=None,
+                         **kwargs):
+    """Buffered road sections (GeoDataFrame ``rfid, island_id, length_m, island_size_km``) of one map."""
     table = road_island_table(
-        graph_path, hazard_column, hazard_threshold, l1_area_geojson, island_cache, **kwargs
+        graph_path, hazard_column, threshold, l1_area_geojson, island_cache, **kwargs
     )
     geoms = _road_geometries(graph_path)
     roads = gpd.GeoDataFrame(
         table.assign(geometry=table["rfid"].map(geoms)), geometry="geometry", crs=PROJECTED_CRS
     )
-    sizes = roads.groupby("island_id")["length_m"].transform("sum") / 1000.0
-    roads["island_size_km"] = sizes
+    roads["island_size_km"] = roads.groupby("island_id")["length_m"].transform("sum") / 1000.0
+    return roads
+
+
+def road_peak_depths(graph_path, hazard_column):
+    """rfid -> peak flood depth [m] of the road section on one map (max over duplicate edges)."""
+    G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
+    depths = {}
+    for _, _, data in G.edges(data=True):
+        value = data.get(hazard_column)
+        if value is not None:
+            depths[data["rfid"]] = max(depths.get(data["rfid"], 0.0), float(value))
+    return depths
+
+
+def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
+                      l1_area_geojson=None, island_cache=None, **kwargs):
+    """Asset island ids and island gdf for one map. ``kwargs``: footprint/exemptions.
+    ``island_cache``: dict for :func:`road_island_table`."""
+    access_rfids, boundary_assets, boundary_rfids = undisrupted
+    roads = island_road_sections(
+        graph_path, hazard_column, hazard_threshold, l1_area_geojson, island_cache, **kwargs
+    )
     ids, _, roads = road_state_asset_islands(roads, access_rfids, boundary_assets, boundary_rfids)
     return ids, roads
 
@@ -280,6 +301,7 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
 
     # Hazard blocking and dependencies: the multi-map evaluator, run once on the peak state.
     operational = intrinsic_operational
+    hazard_available = dependency_available = np.ones(len(hazard_values), dtype=bool)
     if config is not None:
         state = SimulationState(None, len(hazard_values))
         state.intrinsic_operational = intrinsic_operational.copy()
@@ -289,11 +311,29 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
             knowledge_graph=knowledge_graph, dependency_edges=dependency_edges,
         )
         operational = state.operational
+        if state.hazard_available is not None:
+            hazard_available = state.hazard_available
+        if state.dependency_available is not None:
+            dependency_available = state.dependency_available
+
+    unreachable_state = SimpleNamespace(
+        island_ids=island_ids, damage_ratio=damage_ratio, repair_crews_assigned=repair_crews_assigned,
+    )
+    _update_unreachable_assets(
+        unreachable_state, available_repair_crews, flooded, recovery_parameters.get("damage_threshold", 0.001),
+    )
 
     return {
         "flooded": flooded,
         "intrinsic_operational": intrinsic_operational,
         "operational": operational,
+        "island_id": island_ids,
+        "accessible": np.ones(len(hazard_values), dtype=bool),  # as in multi-map, never lowered
+        "unreachable": unreachable_state.unreachable,
+        "hazard_available": hazard_available,
+        "dependency_available": dependency_available,
+        "blocking_reason": blocking_reason_codes(
+            operational, intrinsic_operational, hazard_available, dependency_available),
         "damage_ratio": damage_ratio,
         "repair_time": repair_time,
         "repair_crews_assigned": repair_crews_assigned,
@@ -373,6 +413,22 @@ def _extent_state(gdf_assets, graph_path, config):
     return state
 
 
+def single_map_trace_columns(capture, fields):
+    """Long-format trace columns (one row per map x asset) from :func:`run_single_map_experiment`'s
+    ``capture``; ``timestep`` is the map index, ``map`` its name, as multi-map traces use ``timestep``."""
+    n_assets = len(capture[0]["hazard_value"])
+    columns = {
+        "timestep": np.repeat(np.arange(len(capture)), n_assets),
+        "map": np.repeat([c["map"] for c in capture], n_assets),
+        "asset_id": np.tile(np.arange(n_assets), len(capture)),
+    }
+    for field in fields:
+        columns[field] = np.concatenate([
+            np.asarray(c["hazard_value"] if field == "hazard_value" else c["outcome"][field]) for c in capture
+        ])
+    return columns
+
+
 MONETARY_CATEGORIES = ["residential", "commercial", "industrial", "transport", "public_sector"]
 
 
@@ -394,14 +450,15 @@ def single_map_monetary_rate(operational, asset_ids, asset_to_lu):
 def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
                               flood_threshold=0.2, seed=0, l1_area_geojson=None, l2_asset_geojson=None,
                               repair_crew_assignment_method="random", island_cache=None,
-                              hazard_extraction_cache=None, asset_to_lu=None, **kwargs):
+                              hazard_extraction_cache=None, asset_to_lu=None, capture=None, **kwargs):
     """EMA model function: every map of one experiment (scenario x policy), independent of each other.
 
     Per-type uncertainties arrive as in multi-map (``repair_crews__<type>``,
     ``fragility_param_k_divby2__<type>``); ``seed`` varies the common random numbers.
     Returns ``{outcome: array of length n_maps}`` (societal metrics plus asset counts and
     ``max_recovery_time_h``). If the maps are return periods of one flood (see
-    :func:`return_periods`), each outcome also gets an ``annualised_`` counterpart.
+    :func:`return_periods`), each outcome also gets an     ``annualised_`` counterpart. ``capture`` (a list) receives one dict per map (``map``, ``column``,
+    ``hazard_value``, ``outcome``, ``roads``) for spatial-trace export.
     """
     combine_per_type_crew_kwargs(kwargs)
     combine_per_type_fragility_steepness_kwargs(kwargs)
@@ -447,6 +504,9 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
         )
         names.append(name)
         per_map.append(metrics)
+        if capture is not None:
+            capture.append({"map": name, "column": column, "hazard_value": depths,
+                            "outcome": outcome, "roads": roads})
 
     results = {key: np.array([m[key] for m in per_map], dtype=float) for key in per_map[0]}
     rps = return_periods(names)

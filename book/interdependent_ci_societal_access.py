@@ -592,6 +592,34 @@ def write_run_manifest(out_dir, execution_id, input_parameters, output_parameter
     return manifest_path
 
 
+def write_multi_map_island_report(trace_dir, stem, gdf_assets, config, map_index, timestep, threshold,
+                                  experiment, island_ids, operational, asset_population):
+    """Road-section/island-distribution files for one full-day timestep (map ``map_index``) of a trace.
+
+    Islands are recomputed fresh (island cache untouched), with the policy's L1 area when it is
+    active at ``timestep``.
+    """
+    from src.island_analysis import _road_exemption_kwargs
+    from src.island_report import write_island_report
+    from src.single_map import map_asset_islands, road_peak_depths, undisrupted_state
+
+    graph_path = Path(config["hazard_dir"]).parent / "static" / "output_graph" / "base_graph_hazard_editted.p"
+    exemptions = _road_exemption_kwargs(config)
+    l1 = experiment.get("l1_area_geojson")
+    active = experiment.get("l1_active_timesteps")
+    if not isinstance(l1, str) or (active is not None and timestep not in list(active)):
+        l1 = None
+    column = f"EV{map_index}_ma"
+    _, roads = map_asset_islands(
+        undisrupted_state(gdf_assets, graph_path, **exemptions), graph_path, column, threshold, l1, None,
+        **exemptions,
+    )
+    return write_island_report(
+        trace_dir, stem, roads, island_ids, operational, asset_population,
+        road_peak_depths(graph_path, column),
+    )
+
+
 def run_spatial_trace(
     config_combined, gdf_assets_combined, hazard_maps, caches,
     asset_population_map, asset_to_lu, societal_access_config,
@@ -615,6 +643,7 @@ def run_spatial_trace(
     """
     import geopandas as gpd
 
+    from src import island_report
     from src.island_analysis import build_asset_road_match_table
 
     requested_names = [n.strip() for n in args.spatial_trace_policies.split(",") if n.strip()]
@@ -633,6 +662,9 @@ def run_spatial_trace(
         [f.strip() for f in args.spatial_trace_fields.split(",") if f.strip()]
         if args.spatial_trace_fields else DEFAULT_SPATIAL_TRACE_FIELDS
     )
+
+    # island_id/operational are needed for the per-day island reports
+    trace_fields = list(dict.fromkeys([*trace_fields, "island_id", "operational"]))
 
     LOGGER.info(
         "Running spatial trace capture for %d polic(y/ies) x %d scenario(s): fields=%s",
@@ -690,6 +722,7 @@ def run_spatial_trace(
     asset_geometry = gdf_assets_combined[["geometry", "type"]].copy()
     asset_geometry["asset_id"] = asset_geometry.index
     n_assets = len(gdf_assets_combined)
+    asset_population_array = island_report.asset_population_array(asset_population_map, n_assets)
 
     for exp_idx in range(len(experiments_df)):
         policy_name = experiments_df.loc[exp_idx, "policy"]
@@ -704,15 +737,8 @@ def run_spatial_trace(
         for field in trace_fields:
             rows[field] = np.asarray(outcomes[field][exp_idx]).reshape(n_timesteps * n_assets)
 
-        trace_df = pd.DataFrame(rows)
-        trace_gdf = trace_df.merge(asset_geometry, on="asset_id", how="left")
-        trace_gdf = gpd.GeoDataFrame(trace_gdf, geometry="geometry", crs=gdf_assets_combined.crs)
-
         safe_policy = str(policy_name).replace(" ", "_")
         trace_path = trace_dir / f"spatial_trace_{execution_id}_{safe_policy}_scenario{scenario_name}.parquet"
-        trace_gdf.to_parquet(trace_path)
-        LOGGER.info("Saved spatial trace (%d rows) to %s", len(trace_gdf), trace_path)
-
         # Persist the sampled uncertainty values for this draw alongside the
         # trace -- otherwise this scenario's parameters (repair-crew counts,
         # fragility steepness, etc.) are only known in-memory here and get
@@ -720,10 +746,20 @@ def run_spatial_trace(
         # asset explorer dashboard) with only an arbitrary scenario index and
         # no way to say *what* draw they're looking at.
         uncertainty_cols = [c for c in experiments_df.columns if c not in ("scenario", "policy", "model")]
-        uncertainties = _json_safe(experiments_df.loc[exp_idx, uncertainty_cols].to_dict())
-        uncertainties_path = trace_path.with_name(trace_path.stem + "_uncertainties.json")
-        with open(uncertainties_path, "w", encoding="utf-8") as f:
-            json.dump(uncertainties, f, indent=2)
+        island_report.write_trace_file(
+            trace_path, rows, asset_geometry, gdf_assets_combined.crs,
+            _json_safe(experiments_df.loc[exp_idx, uncertainty_cols].to_dict()),
+        )
+
+        for t_idx, t in enumerate(timesteps):
+            if t % args.major_timestep:
+                continue
+            write_multi_map_island_report(
+                trace_dir, f"{trace_path.stem}_day{int(t) // 24}", gdf_assets_combined, config_combined,
+                int(t) // args.major_timestep, int(t), args.flood_threshold, experiments_df.loc[exp_idx],
+                outcomes["island_id"][exp_idx][t_idx], outcomes["operational"][exp_idx][t_idx],
+                asset_population_array,
+            )
 
     road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
     road_match_gdf = build_asset_road_match_table(

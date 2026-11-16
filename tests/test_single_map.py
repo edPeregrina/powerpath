@@ -339,6 +339,51 @@ def test_run_single_map_experiment(tmp_path, assets):
         np.testing.assert_array_equal(out[key], again[key])
 
 
+def test_single_map_trace_and_island_report(tmp_path, assets):
+    from src import island_report
+
+    inputs = _experiment_inputs(tmp_path, assets)
+    levers = {"repair_crews__msls": 2, "repair_crews__ls": 1}
+    capture = []
+    out = single_map.run_single_map_experiment(
+        **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, capture=capture, **levers
+    )
+    fields = ["island_id", "operational", "intrinsic_operational", "accessible", "unreachable",
+              "flooded", "blocking_reason", "hazard_value"]
+    columns = single_map.single_map_trace_columns(capture, fields)
+    n = len(assets)
+    assert len(columns["asset_id"]) == 3 * n and list(columns["map"][::n]) == ["Frag_timesteps_test0",
+                                                                               "Frag_timesteps_test2",
+                                                                               "Frag_timesteps_test5"]
+    last = capture[-1]["outcome"]
+    assert (columns["blocking_reason"][-n:] == last["blocking_reason"]).all()
+    assert ((last["blocking_reason"] == 0) == last["operational"]).all()
+    assert out["non_operational_assets"][-1] == (~last["operational"]).sum()
+
+    c = capture[-1]
+    paths = island_report.write_island_report(
+        tmp_path, "m", c["roads"], c["outcome"]["island_id"], c["outcome"]["operational"],
+        np.full(n, 2.0), single_map.road_peak_depths(GRAPH, c["column"]),
+    )
+    table = island_report.island_distribution(c["roads"], c["outcome"]["island_id"], c["outcome"]["operational"])
+    assert table["n_assets"].sum() == n and all(p.exists() for p in paths)
+    assert gpd.read_parquet(paths[0])["peak_depth_m"].notna().any()
+
+
+def test_multi_map_island_report(tmp_path, assets):
+    sys.path.insert(0, str(REPO / "book"))
+    import interdependent_ci_societal_access as multi
+
+    config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
+    ids, _ = single_map.map_asset_islands(
+        single_map.undisrupted_state(assets, GRAPH), GRAPH, "EV2_ma", 0.2
+    )
+    roads_path, table_path = multi.write_multi_map_island_report(
+        tmp_path, "day2", assets, config, 2, 48, 0.2, {}, ids, np.ones(len(assets), dtype=bool), np.ones(len(assets)),
+    )
+    assert roads_path.exists() and table_path.exists()
+
+
 def test_single_map_monetary_rate():
     lu = {0: [("residential", 10.0, 2.0), ("commercial", 5.0, 1.0)], 1: [("residential", 1.0, 3.0)]}
     rate = single_map.single_map_monetary_rate(np.array([False, False, True]), np.arange(3), lu)

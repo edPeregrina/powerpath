@@ -66,6 +66,11 @@ def parse_args():
     parser.add_argument("--max-l2-files", type=int, default=None)
     parser.add_argument("--repair-priority", type=str, default="population impacts islands")
     parser.add_argument("--multiprocessing", type=int, default=None, metavar="N_PROCESSES")
+    parser.add_argument("--spatial-trace-policies", type=str, default=None, metavar="NAME1,NAME2",
+                        help="Also write per-asset traces and island reports for these policies.")
+    parser.add_argument("--spatial-trace-scenarios", type=int, default=1)
+    parser.add_argument("--spatial-trace-fields", type=str, default=None,
+                        help="Comma-separated trace fields; default as in the multi-map trace.")
     parser.add_argument("--output-name", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--dev-config", action="store_true")
@@ -105,6 +110,49 @@ def build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
         names += [f"annualised_{n}" for n in names]
     model.outcomes = [ArrayOutcome(n) for n in names]
     return model
+
+
+def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, out_dir):
+    """Per-asset peak-state traces and per-map island reports for the requested policies.
+
+    Same flags, fields and file format as the multi-map trace (``timestep`` = map index, plus a
+    ``map`` column); one file per (scenario, policy), plus road sections coloured by island and an
+    island-size distribution for every map. Runs in-process on the draws' sampled uncertainties.
+    """
+    from ema_workbench.em_framework import sample_uncertainties
+
+    from src import island_report
+    from src.single_map import road_peak_depths, single_map_trace_columns
+
+    names = [n.strip() for n in args.spatial_trace_policies.split(",") if n.strip()]
+    selected = [p for p in policies if p.name in names]
+    if missing := sorted(set(names) - {p.name for p in selected}):
+        LOGGER.warning("Unknown spatial-trace policies %s. Available: %s", missing, sorted(p.name for p in policies))
+    fields = ([f.strip() for f in args.spatial_trace_fields.split(",") if f.strip()]
+              if args.spatial_trace_fields else multi.DEFAULT_SPATIAL_TRACE_FIELDS)
+    constants = {c.name: c.value for c in model.constants}
+    gdf_assets = inputs["gdf_assets"]
+    population = island_report.asset_population_array(inputs["asset_population_map"], len(gdf_assets))
+    asset_geometry = gdf_assets[["geometry", "type"]].assign(asset_id=range(len(gdf_assets)))
+    trace_dir = Path(out_dir) / "spatial_traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    scenarios = sample_uncertainties(model, args.spatial_trace_scenarios, Samplers.LHS)
+    for scenario in scenarios:
+        for policy in selected:
+            capture = []
+            run_single_map_experiment(**{**constants, **dict(scenario.items()), **dict(policy.items()), "capture": capture})
+            stem = f"spatial_trace_{execution_id}_{policy.name.replace(' ', '_')}_scenario{scenario.name}"
+            island_report.write_trace_file(
+                trace_dir / f"{stem}.parquet", single_map_trace_columns(capture, fields), asset_geometry,
+                gdf_assets.crs, multi._json_safe(dict(scenario.items())),
+            )
+            for c in capture:
+                island_report.write_island_report(
+                    trace_dir, f"{stem}_{c['map']}", c["roads"], c["outcome"]["island_id"],
+                    c["outcome"]["operational"], population, road_peak_depths(graph_path, c["column"]),
+                )
+            LOGGER.info("Saved spatial trace and island reports for %s to %s", stem, trace_dir)
 
 
 def main():
@@ -164,6 +212,8 @@ def main():
         "results_archive_path": str(out_path),
     })
     LOGGER.info("Saved results to %s", out_path)
+    if args.spatial_trace_policies:
+        run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, out_dir)
 
 
 if __name__ == "__main__":
