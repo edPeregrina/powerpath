@@ -792,10 +792,24 @@ def clip_population_to_service_area(
     return clipped.reset_index(drop=True)
 
 
+_HULL_AREA_MEMO: Dict[tuple, Optional[float]] = {}
+
+
 def _service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
-    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``."""
+    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``.
+
+    Memoised on the asset geometries (the union dominates and the assets are identical across calls).
+    """
     if gdf_assets.empty:
         return None
+    geom_hash = hashlib.sha1(b"".join(gdf_assets.geometry.to_wkb())).hexdigest()
+    memo_key = (str(gdf_assets.crs), str(crs), float(buffer_m), geom_hash)
+    if memo_key not in _HULL_AREA_MEMO:
+        _HULL_AREA_MEMO[memo_key] = _compute_service_area_hull_area(gdf_assets, crs, buffer_m)
+    return _HULL_AREA_MEMO[memo_key]
+
+
+def _compute_service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
     try:
         assets_in_crs = gdf_assets.to_crs(crs) if gdf_assets.crs != crs else gdf_assets
         _geom = assets_in_crs.geometry
