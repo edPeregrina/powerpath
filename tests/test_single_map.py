@@ -259,6 +259,15 @@ def test_incremental_l1_islands_match_full(column, threshold):
         assert changed
 
 
+@pytest.mark.parametrize("column,threshold", [("EV2_ma", 0.2), ("EV3_ma", 0.0)])
+def test_incremental_l1_islands_graph_order_ids_match_full(column, threshold):
+    from src.road_islands import graph_order_island_ids
+
+    G = island_analysis._load_and_project_graph(GRAPH)
+    for l1 in L1_FILES:
+        _, incremental, full = _incremental_vs_full(G, column, threshold, l1)
+        assert graph_order_island_ids(G, incremental) == full
+
 def test_incremental_l1_islands_directed():
     rng = np.random.default_rng(0)
     G = island_analysis._load_and_project_graph(GRAPH)

@@ -196,7 +196,7 @@ from src.road_islands import (  # noqa: F401  re-exported; callers/tests resolve
     _projected_graph_cache, _load_and_project_graph, label_road_islands,
     compute_island_geodataframe_from_graph, nearest_road_rfids, baseline_boundary,
     assign_asset_islands, filter_hazard_graph, project_graph_coords,
-    attach_assets_undisrupted, road_state_asset_islands,
+    attach_assets_undisrupted, road_state_asset_islands, shadow_l1_islands,
 )
 
 sys.path.append(str(Path(__file__).parent.parent))
@@ -443,6 +443,13 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             l1_area_geojson=l1_area_geojson,
             **_road_exemption_kwargs(_config),
         )
+        if l1_area_geojson is not None and _config['simulation_config'].get('shadow_l1_islands'):
+            shadow = shadow_l1_islands(
+                hazard_graph_path, hazard_threshold, hazard_column, l1_area_geojson,
+                **_road_exemption_kwargs(_config),
+            )
+            print(f"SHADOW_L1 {cache_key} " + " ".join(
+                f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in shadow.items()))
 
         computed_ids, computed_rfids_islands, islands_gdf = road_state_asset_islands(
             islands_gdf, temp_gdf['access_rfid'], boundary_asset_indices, boundary_islands_rfids

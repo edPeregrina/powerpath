@@ -284,6 +284,9 @@ def parse_args():
     parser.add_argument("--repair-priority", type=str, default="population impacts islands",
                          help="repair_crew_assignment_method used for the baseline and all L1/L2 "
                               "policies. Default: 'population impacts islands'.")
+    parser.add_argument("--shadow-l1-islands", action="store_true",
+                         help="Diagnostic: on each L1 island-cache miss also run the incremental "
+                              "L1 partition and log SHADOW_L1 timings/equality (results unchanged).")
     return parser.parse_args()
 
 
@@ -922,6 +925,7 @@ def main():
         LOGGER.info("[warm-up] %s (+%.1fs)", label, time.time() - t_start)
 
     config = get_development_config() if args.dev_config else get_config()
+    config['simulation_config']['shadow_l1_islands'] = args.shadow_l1_islands
     is_valid, missing_dirs, warnings = validate_config(config)
     if not is_valid:
         LOGGER.warning("Configuration issues detected: missing=%s warnings=%s", missing_dirs, warnings)

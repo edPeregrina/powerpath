@@ -322,6 +322,63 @@ def canonical_island_ids(node_labels):
     return {node: first[label] for node, label in node_labels.items()}
 
 
+def graph_order_island_ids(G, node_labels):
+    """Renumber islands 0..n-1 in the order :func:`label_road_islands` would enumerate them.
+
+    Matches ``label_road_islands`` of the filtered graph for undirected graphs, where
+    components are emitted in order of their first node in ``G`` (the unfiltered graph).
+    Directed graphs use Tarjan order, which this does not reproduce.
+    """
+    first = {}
+    for node in G:
+        if node in node_labels:
+            first.setdefault(node_labels[node], len(first))
+    return {node: first[label] for node, label in node_labels.items()}
+
+
+_SHADOW_BASELINE_MEMO = {}
+
+
+def shadow_l1_islands(graph_pickle_path, threshold, hazard_column, l1_area_geojson, **filter_kwargs):
+    """Compare the incremental L1 partition with a full recompute (diagnostic only).
+
+    Returns timings (s) and whether the partitions are equal up to relabelling
+    (``same_partition``) and with identical raw ids (``same_ids``). The no-L1 baseline is
+    memoised per (graph, column, threshold, filter_kwargs); its time is reported as
+    ``baseline_s`` only when computed here.
+    """
+    import time
+
+    def fresh():
+        return _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPSG:28992")
+
+    t = time.perf_counter()
+    full = label_road_islands(filter_hazard_graph(
+        fresh(), threshold, hazard_column, l1_area_geojson=l1_area_geojson, **filter_kwargs))
+    full_s = time.perf_counter() - t
+
+    key = (str(graph_pickle_path), hazard_column, threshold, tuple(sorted(filter_kwargs.items())))
+    baseline_s = 0.0
+    if key not in _SHADOW_BASELINE_MEMO:
+        t = time.perf_counter()
+        _SHADOW_BASELINE_MEMO[key] = label_road_islands(
+            filter_hazard_graph(fresh(), threshold, hazard_column, **filter_kwargs))
+        baseline_s = time.perf_counter() - t
+
+    t = time.perf_counter()
+    graph = fresh()
+    incremental = l1_node_islands(graph, _SHADOW_BASELINE_MEMO[key], threshold, hazard_column,
+                                  l1_area_geojson, **filter_kwargs)
+    incremental_s = time.perf_counter() - t
+    renumbered = graph_order_island_ids(graph, incremental)
+
+    return {
+        "full_s": full_s, "baseline_s": baseline_s, "incremental_s": incremental_s,
+        "same_ids": renumbered == full,
+        "same_partition": canonical_island_ids(incremental) == canonical_island_ids(full),
+    }
+
+
 def compute_island_geodataframe_from_graph(
     graph_pickle_path: str, 
     hazard_threshold: float, 
