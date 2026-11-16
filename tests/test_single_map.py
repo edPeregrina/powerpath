@@ -384,6 +384,15 @@ def test_depth_cache_keyed_by_file(tmp_path, assets):
     assert (first != 7.0).any()
 
 
+def test_write_extent_is_wgs84(tmp_path):
+    from shapely.geometry import box
+    from src.graph_manager import write_extent
+
+    path = write_extent(box(80000, 440000, 85000, 445000), "EPSG:28992", tmp_path)
+    extent = gpd.read_file(path)
+    assert extent.crs.to_epsg() == 4326 and 3 < extent.total_bounds[0] < 5
+
+
 def test_return_periods_and_annualised():
     assert single_map.return_periods(["flood_RP10", "flood_RP100", "flood_RP1000"]) == [10, 100, 1000]
     assert single_map.return_periods(["floodA_RP10", "floodB_RP100"]) is None

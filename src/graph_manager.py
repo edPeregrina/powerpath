@@ -7,6 +7,7 @@ a hash of both, so a different extent or a changed map can never be served a sta
 """
 
 import hashlib
+import logging
 import pickle
 import re
 from pathlib import Path
@@ -14,6 +15,8 @@ from pathlib import Path
 import geopandas as gpd
 from rasterio import open as rio_open
 from shapely.geometry import box
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_ROAD_TYPES = (
     "MOTORWAY", "MOTORWAY_LINK", "PRIMARY", "PRIMARY_LINK", "TRUNK", "SECONDARY",
@@ -44,68 +47,24 @@ def build_buffered_extent(hazard_map_path: Path, network_path: Path, buffer_frac
 
 
 def write_extent(polygon, crs, network_path: Path) -> Path:
-    """Save ``polygon`` as the RA2CE network extent shapefile and return its path."""
+    """Save ``polygon`` as the RA2CE network extent shapefile (RA2CE needs EPSG:4326) and return its path."""
     extent_path = network_path / "extent.shp"
     network_path.mkdir(parents=True, exist_ok=True)
-    gpd.GeoDataFrame(geometry=[polygon], crs=crs).to_file(extent_path, driver="ESRI Shapefile")
+    extent = gpd.GeoDataFrame(geometry=[polygon], crs=crs)
+    if crs is not None and crs != "EPSG:4326":
+        extent = extent.to_crs("EPSG:4326")
+    extent.to_file(extent_path, driver="ESRI Shapefile")
     return extent_path
 
 
-def _patch_ra2ce_fraction_flooded():
-    """Replace ra2ce's per-edge rasterize+polygonize fraction-flooded overlay
-    with a precomputed, STRtree-indexed flood-polygon lookup (built once per
-    hazard file instead of once per edge). Exact same result (verified
-    bit-identical on the test fixture), ~150-300x faster than stock: the
-    per-edge cost drops from re-cropping+vectorizing the raster to an
-    `predicate="intersects"` index query plus summed per-candidate
-    intersection lengths. No `unary_union` is needed: polygons from
-    rasterio.features.shapes() are disjoint by construction, so summing each
-    candidate's intersection length independently equals the union's length.
-    """
-    from rasterio.features import shapes
-    from shapely.geometry import shape
-    from shapely import STRtree
-    from ra2ce.network.hazard.hazard_intersect.hazard_intersect_builder_for_tif import (
-        HazardIntersectBuilderForTif,
-    )
-
-    def _fast_fraction_flooded_array(self, line, src):
-        cache = getattr(self, "_flood_index_cache", None)
-        if cache is None:
-            cache = self._flood_index_cache = {}
-        entry = cache.get(src.name)
-        if entry is None:
-            arr = src.read(1)
-            flood_bool = arr > 0
-            polys = [
-                shape(geom)
-                for geom, _ in shapes(
-                    flood_bool.astype("uint8"), mask=flood_bool, transform=src.transform
-                )
-            ]
-            tree = STRtree(polys) if polys else None
-            entry = cache[src.name] = (polys, tree)
-        polys, tree = entry
-        if tree is None:
-            return 0.0
-        try:
-            idxs = tree.query(line, predicate="intersects")
-            if len(idxs) == 0:
-                return 0.0
-            total = sum(polys[i].intersection(line).length for i in idxs)
-            return total / line.length
-        except Exception as e:
-            print(f"_fast_fraction_flooded_array() {e} for line {line}")
-            return 0
-
-    HazardIntersectBuilderForTif._fraction_flooded_array = _fast_fraction_flooded_array
-
-
 def run_ra2ce(extent_path: Path, hazard_files: list[Path], hazard_crs, root_dir: Path, static_path: Path,
-              road_types=DEFAULT_ROAD_TYPES):
+              road_types=DEFAULT_ROAD_TYPES, skip_fraction_flooded=False):
     """Build the RA2CE road network and overlay it with the hazard timesteps.
 
     RA2CE numbers the overlay columns by list position: the i-th file becomes ``EV{i+1}_ma``.
+    The overlay runs through :mod:`src.ra2ce_fast_overlay` (exact for the max depth,
+    ``EV*_ma``). The flooded fraction ``EV*_fr`` is kept unless ``skip_fraction_flooded=True``
+    (then it is all 0.0; nothing in the model reads it, but it is useful for artefact checks).
     """
     from ra2ce.network.network_config_data.enums.aggregate_wl_enum import AggregateWlEnum
     from ra2ce.network.network_config_data.enums.source_enum import SourceEnum
@@ -117,8 +76,12 @@ def run_ra2ce(extent_path: Path, hazard_files: list[Path], hazard_crs, root_dir:
         NetworkSection,
     )
     from ra2ce.ra2ce_handler import Ra2ceHandler
+    from src.ra2ce_fast_overlay import patch_ra2ce_hazard_overlay, unpatch
 
-    _patch_ra2ce_fraction_flooded()
+    unsupported = [name for name in road_types if not hasattr(RoadTypeEnum, name)]
+    if unsupported:
+        LOGGER.warning("Installed ra2ce has no road type(s) %s; they are left out of the network.", unsupported)
+    road_types = [name for name in road_types if name not in unsupported]
 
     network_section = NetworkSection(
         network_type=NetworkTypeEnum.DRIVE,
@@ -147,8 +110,12 @@ def run_ra2ce(extent_path: Path, hazard_files: list[Path], hazard_crs, root_dir:
         hazard=hazard_section,
     )
 
-    handler = Ra2ceHandler.from_config(network_config_data, analysis=None)
-    handler.configure()
+    patch_ra2ce_hazard_overlay(fraction_flooded="skip" if skip_fraction_flooded else "fast")
+    try:
+        handler = Ra2ceHandler.from_config(network_config_data, analysis=None)
+        handler.configure()
+    finally:
+        unpatch()
 
 
 def zero_pad_hazard_graph(output_path: Path, number_of_timesteps: int):
@@ -241,23 +208,34 @@ def shift_overlay_columns(graph, n_maps):
     return graph
 
 
-def build_single_map_graph(hazard_maps, root_dir, road_types=DEFAULT_ROAD_TYPES):
+def build_single_map_graph(hazard_maps, root_dir, road_types=DEFAULT_ROAD_TYPES, include_living_streets=True,
+                           skip_fraction_flooded=False):
     """Path of the hazard-overlaid graph for these maps (map ``i`` is column ``EV{i}_ma``).
 
     Stored as ``<root_dir>/static_single/extent_<extent key>/graph_<maps key>.p``. The network
     is shared by every map set with the same extent; the overlay file is keyed by the ordered
-    maps and their fingerprints, so a changed map gives a new file. Existing files are reused.
+    maps, their fingerprints and ``skip_fraction_flooded``, so a changed map gives a new file.
+    Existing files are reused. Living streets are included unless ``include_living_streets=False``
+    (they make large graphs much bigger and slower, hence the warning). The flooded fraction
+    ``EV{i}_fr`` is kept unless ``skip_fraction_flooded=True`` (then it is all 0.0).
     """
+    road_types = tuple(t for t in road_types if include_living_streets or t != "LIVING_STREET")
+    if "LIVING_STREET" in road_types:
+        LOGGER.warning("Road graph includes living streets: large extents get many more edges "
+                       "(slower graph build and island computation).")
     maps = [Path(m) for m in hazard_maps]
     extent_key, polygon, crs = single_map_extent_key(maps, road_types)
     extent_dir = Path(root_dir) / "static_single" / f"extent_{extent_key}"
-    graph_path = extent_dir / f"graph_{_digest(extent_key, *(f'{m.name}:{file_fingerprint(m)}' for m in maps))}.p"
+    graph_key = _digest(extent_key, skip_fraction_flooded,
+                        *(f"{m.name}:{file_fingerprint(m)}" for m in maps))
+    graph_path = extent_dir / f"graph_{graph_key}.p"
     if graph_path.exists():
         return graph_path
 
     static_path = extent_dir / "static"
     extent_path = write_extent(polygon, crs, static_path / "network")
-    run_ra2ce(extent_path, maps, crs, extent_dir, static_path, road_types)
+    run_ra2ce(extent_path, maps, crs, extent_dir, static_path, road_types,
+              skip_fraction_flooded=skip_fraction_flooded)
     graph = shift_overlay_columns(read_pickle(static_path / "output_graph" / "base_graph_hazard.p"), len(maps))
     tmp = graph_path.with_suffix(".tmp")
     with open(tmp, "wb") as file:

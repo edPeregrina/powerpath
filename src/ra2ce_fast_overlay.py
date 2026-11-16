@@ -1,9 +1,9 @@
 """Optional speed-ups for the ra2ce hazard overlay (tested against ra2ce 1.2.2).
 
 Additive and opt-in: nothing here runs unless :func:`patch_ra2ce_hazard_overlay`
-is called. The multi-map preprocessing patch in
-``book/preprocessing/prep_data_from_extent.py`` is deliberately left untouched
-so that existing preprocessing stays reproducible.
+is called. ``src/graph_manager.run_ra2ce`` (multi-map preprocessing and the single-map
+graph builder) calls it; the former book-only fraction-flooded patch was replaced by the
+equivalent ``fraction_flooded="fast"`` option.
 
 ra2ce's ``HazardIntersectBuilderForTif._from_networkx`` spends its time in two
 per-edge computations:

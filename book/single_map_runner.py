@@ -50,6 +50,10 @@ def parse_args():
     parser.add_argument("--scenarios", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0, help="Constant seed of the common random numbers.")
     parser.add_argument("--flood-threshold", type=float, default=0.2)
+    parser.add_argument("--no-living-streets", action="store_true",
+                        help="Leave living streets out of the built road graph (included by default, with a warning).")
+    parser.add_argument("--skip-fraction-flooded", action="store_true",
+                        help="Do not compute the flooded fraction per edge (EV<i>_fr = 0.0); faster graph build.")
     parser.add_argument("--graph-path", type=Path, default=None,
                         help="Prebuilt graph with EV<i>_ma columns in map order; default: built per extent and maps.")
     parser.add_argument("--repair-crews-range", nargs=3, metavar=("ASSET_TYPE", "MIN", "MAX"),
@@ -114,7 +118,10 @@ def main():
     steepness_ranges = multi.resolve_fragility_steepness_ranges(args)
 
     inputs = multi.prepare_model_inputs(config)
-    graph_path = args.graph_path or build_single_map_graph(inputs["hazard_maps"], config["hazard_dir"].parent)
+    graph_path = args.graph_path or build_single_map_graph(
+        inputs["hazard_maps"], config["hazard_dir"].parent, include_living_streets=not args.no_living_streets,
+        skip_fraction_flooded=args.skip_fraction_flooded,
+    )
     LOGGER.info("Road graph: %s", graph_path)
     model = build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
     policies = multi.build_adaptation_policies(
