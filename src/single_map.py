@@ -33,6 +33,9 @@ from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import (
     SimulationState,
     _fragility_exclusions_from_knowledge_graph,
+    _assign_repair_crews,
+    _build_crew_pools,
+    _normalize_number_repair_crews_config,
     _update_operational_state,
     _update_unreachable_assets,
     build_dependency_runtime,
@@ -251,7 +254,7 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
                         recovery_parameters, flood_threshold, flood_duration=0.0,
                         fragility_k=None, fragility_steepness_overrides=None,
                         fragility_exclusions=None, method="random",
-                        config=None, knowledge_graph=None, dependency_edges=None):
+                        config=None, knowledge_graph=None, dependency_edges=None, asset_impact_map=None):
     """Peak-state outcome for one map via the shared multi-map building blocks (no time stepping).
 
     ``random_values``: one uniform draw per asset, reused across policies (common random numbers).
@@ -291,12 +294,31 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
     )
 
     rfids_islands = dict(zip(roads["rfid"], roads["island_id"]))
-    available_repair_crews, _ = _compute_initial_distribution(
-        n_crews, rfids_islands, dict(zip(roads["rfid"], roads["length_m"]))
-    )
-    _, repair_crews_assigned = update_repair_crew_assignment_optimized(
-        0, available_repair_crews, np.zeros(len(hazard_values), dtype=bool), island_ids != -1,
-        np.zeros(len(hazard_values), dtype=bool), repair_time, island_ids, method=method,
+    rfid_lengths = dict(zip(roads["rfid"], roads["length_m"]))
+
+    def initial_distribution(count):
+        return count if isinstance(count, dict) else _compute_initial_distribution(
+            count, rfids_islands, rfid_lengths)[0]
+
+    # n_crews: scalar, or per-type dict as built from the per-type crew uncertainties (see multi-map)
+    crews = _normalize_number_repair_crews_config(n_crews)
+    available_repair_crews = initial_distribution(crews["default"])
+    crew_pools = _build_crew_pools(crews["typed"])
+    for pool in (crew_pools or {"pools": []})["pools"]:
+        pool["available"] = initial_distribution(pool["available"])
+    available_repair_crews, repair_crews_assigned = _assign_repair_crews(
+        timestep=0,
+        available_repair_crews=available_repair_crews,
+        repair_crews_assigned=np.zeros(len(hazard_values), dtype=bool),
+        accessible=island_ids != -1,
+        flooded_mask=np.zeros(len(hazard_values), dtype=bool),
+        repair_time=repair_time,
+        island_ids=island_ids,
+        method=method,
+        verbose=False,
+        asset_type=asset_type,
+        crew_pools=crew_pools,
+        asset_impact_map=asset_impact_map,
     )
 
     # Hazard blocking and dependencies: the multi-map evaluator, run once on the peak state.
@@ -321,6 +343,7 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
     )
     _update_unreachable_assets(
         unreachable_state, available_repair_crews, flooded, recovery_parameters.get("damage_threshold", 0.001),
+        asset_type=asset_type, crew_pools=crew_pools,
     )
 
     return {
@@ -447,17 +470,28 @@ def single_map_monetary_rate(operational, asset_ids, asset_to_lu):
     return rate
 
 
+def repair_impact_map(method, asset_to_lu=None, asset_population_map=None):
+    """Per-asset value that impact-based crew assignment ranks by, chosen as in multi-map."""
+    if "monetary" in method and asset_to_lu is not None:
+        return {a: sum(area * rate for (_, area, rate) in uses) for a, uses in asset_to_lu.items()}
+    if "population" in method and asset_population_map is not None:
+        return asset_population_map
+    return None
+
+
 def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
                               flood_threshold=0.2, seed=0, l1_area_geojson=None, l2_asset_geojson=None,
                               repair_crew_assignment_method="random", island_cache=None,
-                              hazard_extraction_cache=None, asset_to_lu=None, capture=None, **kwargs):
+                              hazard_extraction_cache=None, asset_to_lu=None, asset_population_map=None,
+                              capture=None, **kwargs):
     """EMA model function: every map of one experiment (scenario x policy), independent of each other.
 
-    Per-type uncertainties arrive as in multi-map (``repair_crews__<type>``,
+    Per-type uncertainties arrive as in multi-map (``number_repair_crews__<type>``,
     ``fragility_param_k_divby2__<type>``); ``seed`` varies the common random numbers.
     Returns ``{outcome: array of length n_maps}`` (societal metrics plus asset counts and
     ``max_recovery_time_h``). If the maps are return periods of one flood (see
-    :func:`return_periods`), each outcome also gets an     ``annualised_`` counterpart. ``capture`` (a list) receives one dict per map (``map``, ``column``,
+    :func:`return_periods`), each outcome also gets an ``annualised_`` counterpart.
+    ``capture`` (a list) receives one dict per map (``map``, ``column``,
     ``hazard_value``, ``outcome``, ``roads``) for spatial-trace export.
     """
     combine_per_type_crew_kwargs(kwargs)
@@ -470,6 +504,7 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
     reduction = adaptation_depth_reduction(gdf_assets, l1_area_geojson, l2_asset_geojson, config)
     asset_ids = np.arange(len(gdf_assets))
     allocation_cache = societal_access_config.get("allocation_cache")
+    impact_map = repair_impact_map(repair_crew_assignment_method, asset_to_lu, asset_population_map)
 
     names, per_map = [], []
     for counter, hazard_map in enumerate(hazard_maps):
@@ -486,7 +521,7 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
             flood_duration=duration, fragility_steepness_overrides=steepness,
             fragility_exclusions=state["exclusions"], method=repair_crew_assignment_method,
             config=config, knowledge_graph=state["knowledge_graph"],
-            dependency_edges=state["dependency_edges"],
+            dependency_edges=state["dependency_edges"], asset_impact_map=impact_map,
         )
         road_state_key = (create_island_cache_key(column, flood_threshold, asset_hash, l1_area_geojson)
                           + f"_graph{file_fingerprint(graph_path)}")

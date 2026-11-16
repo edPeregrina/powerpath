@@ -325,7 +325,7 @@ def _experiment_inputs(tmp_path, assets):
 
 def test_run_single_map_experiment(tmp_path, assets):
     inputs = _experiment_inputs(tmp_path, assets)
-    levers = {"repair_crews__msls": 2, "repair_crews__ls": 1, "fragility_param_k_divby2__msls": 12}
+    levers = {"number_repair_crews__msls": 2, "number_repair_crews__ls": 1, "fragility_param_k_divby2__msls": 12}
     out = single_map.run_single_map_experiment(
         **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, **levers
     )
@@ -343,7 +343,7 @@ def test_single_map_trace_and_island_report(tmp_path, assets):
     from src import island_report
 
     inputs = _experiment_inputs(tmp_path, assets)
-    levers = {"repair_crews__msls": 2, "repair_crews__ls": 1}
+    levers = {"number_repair_crews__msls": 2, "number_repair_crews__ls": 1}
     capture = []
     out = single_map.run_single_map_experiment(
         **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, capture=capture, **levers
@@ -382,6 +382,17 @@ def test_multi_map_island_report(tmp_path, assets):
         tmp_path, "day2", assets, config, 2, 48, 0.2, {}, ids, np.ones(len(assets), dtype=bool), np.ones(len(assets)),
     )
     assert roads_path.exists() and table_path.exists()
+
+
+def test_impact_based_crew_assignment(tmp_path, assets):
+    inputs = _experiment_inputs(tmp_path, assets)
+    out = single_map.run_single_map_experiment(
+        **inputs, seed=1, island_cache={}, hazard_extraction_cache={}, number_repair_crews__msls=1,
+        number_repair_crews__ls=1, repair_crew_assignment_method="population impacts islands",
+        asset_population_map={i: float(i) for i in range(len(assets))},
+    )
+    assert out["flooded_assets"].max() > 0
+    assert single_map.repair_impact_map("random", None, {1: 1.0}) is None
 
 
 def test_single_map_monetary_rate():
