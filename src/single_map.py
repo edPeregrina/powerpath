@@ -119,12 +119,12 @@ _road_geometry_cache = {}
 
 
 def _road_geometries(graph_path):
-    """rfid -> buffered road geometry (static per graph, built once per process)."""
+    """rfid -> (centreline, buffered geometry); static per graph, built once per process."""
     geoms = _road_geometry_cache.get(str(graph_path))
     if geoms is None:
         G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
         geoms = {
-            d["rfid"]: d["geometry_m"].buffer(BUFFER_M, cap_style="square", join_style="mitre")
+            d["rfid"]: (d["geometry_m"], d["geometry_m"].buffer(BUFFER_M, cap_style="square", join_style="mitre"))
             for _, _, d in G.edges(data=True) if d.get("geometry_m") is not None
         }
         _road_geometry_cache[str(graph_path)] = geoms
@@ -133,13 +133,18 @@ def _road_geometries(graph_path):
 
 def island_road_sections(graph_path, hazard_column, threshold, l1_area_geojson=None, island_cache=None,
                          **kwargs):
-    """Buffered road sections (GeoDataFrame ``rfid, island_id, length_m, island_size_km``) of one map."""
+    """Buffered road sections (GeoDataFrame ``rfid, island_id, length_m, island_size_km``) of one map,
+    with the unbuffered line in ``original_geometry`` as in :func:`compute_island_geodataframe_from_graph`."""
     table = road_island_table(
         graph_path, hazard_column, threshold, l1_area_geojson, island_cache, **kwargs
     )
     geoms = _road_geometries(graph_path)
     roads = gpd.GeoDataFrame(
-        table.assign(geometry=table["rfid"].map(geoms)), geometry="geometry", crs=PROJECTED_CRS
+        table.assign(
+            geometry=table["rfid"].map(lambda r: geoms[r][1] if r in geoms else None),
+            original_geometry=table["rfid"].map(lambda r: geoms[r][0] if r in geoms else None),
+        ),
+        geometry="geometry", crs=PROJECTED_CRS,
     )
     roads["island_size_km"] = roads.groupby("island_id")["length_m"].transform("sum") / 1000.0
     return roads

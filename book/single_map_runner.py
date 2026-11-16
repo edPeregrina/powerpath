@@ -138,6 +138,7 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
     constants = {c.name: c.value for c in model.constants}
     config = constants["config"]
     gdf_assets = inputs["gdf_assets"]
+    map_files = {Path(m).stem: m for m in inputs["hazard_maps"]}
     population = island_report.asset_population_array(inputs["asset_population_map"], len(gdf_assets))
     asset_geometry = gdf_assets[["geometry", "type"]].assign(asset_id=range(len(gdf_assets)))
     trace_dir = Path(out_dir) / "spatial_traces"
@@ -157,6 +158,8 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
                 island_report.write_island_report(
                     trace_dir, f"{stem}_{c['map']}", c["roads"], c["outcome"]["island_id"],
                     c["outcome"]["operational"], population, road_peak_depths(graph_path, c["column"]),
+                    footprint=island_report.raster_footprint(map_files[c["map"]], c["roads"].crs),
+                    asset_geometry=gdf_assets.geometry,
                 )
             LOGGER.info("Saved spatial trace and island reports for %s to %s", stem, trace_dir)
 

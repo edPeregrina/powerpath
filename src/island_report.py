@@ -44,12 +44,36 @@ def island_distribution(roads, island_ids, operational, asset_population=None):
     return table.astype({"n_road_sections": int, "n_assets": int, "n_non_operational": int})
 
 
-def write_island_report(out_dir, stem, roads, island_ids, operational, asset_population=None, depth_by_rfid=None):
+def raster_footprint(raster_path, crs):
+    """Bounding box of a raster as a shapely polygon in ``crs``."""
+    import rasterio
+    from shapely.geometry import box
+
+    with rasterio.open(raster_path) as src:
+        return gpd.GeoSeries([box(*src.bounds)], crs=src.crs).to_crs(crs).iloc[0]
+
+
+def write_island_report(out_dir, stem, roads, island_ids, operational, asset_population=None, depth_by_rfid=None,
+                        footprint=None, asset_geometry=None):
     """Write ``<stem>_road_islands.parquet`` (road sections coloured by island, GIS-ready) and
-    ``<stem>_island_distribution.csv``. Returns both paths."""
+    ``<stem>_island_distribution.csv``. Returns both paths.
+
+    With a ``footprint`` (polygon in the roads' CRS), only road sections intersecting it are written
+    and counted; ``asset_geometry`` (per-asset GeoSeries) likewise restricts the asset counts. Island ids
+    stay those of the whole network."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if footprint is not None:
+        centrelines = gpd.GeoSeries(roads["original_geometry"], crs=roads.crs) if "original_geometry" in roads else roads.geometry
+        roads = roads[centrelines.intersects(footprint).to_numpy()]
+        if asset_geometry is not None:
+            inside = asset_geometry.to_crs(roads.crs).intersects(footprint).to_numpy()
+            island_ids, operational = np.asarray(island_ids)[inside], np.asarray(operational)[inside]
+            if asset_population is not None:
+                asset_population = np.asarray(asset_population)[inside]
     sections = roads.copy()
+    if "original_geometry" in sections:  # export the centrelines; the buffers only serve asset matching
+        sections = sections.set_geometry("original_geometry").drop(columns="geometry").rename_geometry("geometry")
     if depth_by_rfid is not None:
         sections["peak_depth_m"] = sections["rfid"].map(depth_by_rfid)
     roads_path = out_dir / f"{stem}_road_islands.parquet"

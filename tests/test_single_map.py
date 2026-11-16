@@ -3,7 +3,9 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pytest
+from shapely.geometry import box
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -368,8 +370,17 @@ def test_single_map_trace_and_island_report(tmp_path, assets):
     table = island_report.island_distribution(c["roads"], c["outcome"]["island_id"], c["outcome"]["operational"])
     assert table["n_assets"].sum() == n and all(p.exists() for p in paths)
     assert gpd.read_parquet(paths[0])["peak_depth_m"].notna().any()
+    exported = gpd.read_parquet(paths[0])
+    assert set(exported.geom_type) == {"LineString"} and "original_geometry" not in exported
 
-
+    minx, miny, maxx, maxy = c["roads"].total_bounds
+    half = box(minx, miny, (minx + maxx) / 2, maxy)
+    clipped = island_report.write_island_report(
+        tmp_path, "clip", c["roads"], c["outcome"]["island_id"], c["outcome"]["operational"],
+        footprint=half, asset_geometry=assets.geometry,
+    )
+    assert 0 < len(gpd.read_parquet(clipped[0])) < len(exported)
+    assert pd.read_csv(clipped[1])["n_assets"].sum() < n
 def test_multi_map_island_report(tmp_path, assets):
     sys.path.insert(0, str(REPO / "book"))
     import interdependent_ci_societal_access as multi
