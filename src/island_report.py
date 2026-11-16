@@ -73,7 +73,8 @@ def write_island_report(out_dir, stem, roads, island_ids, operational, asset_pop
                 asset_population = np.asarray(asset_population)[inside]
     sections = roads.copy()
     if "original_geometry" in sections:  # export the centrelines; the buffers only serve asset matching
-        sections = sections.set_geometry("original_geometry").drop(columns="geometry").rename_geometry("geometry")
+        sections["geometry"] = gpd.GeoSeries(sections["original_geometry"], crs=roads.crs)
+        sections = sections.drop(columns="original_geometry")
     if depth_by_rfid is not None:
         sections["peak_depth_m"] = sections["rfid"].map(depth_by_rfid)
     roads_path = out_dir / f"{stem}_road_islands.parquet"

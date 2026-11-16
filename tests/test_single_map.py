@@ -372,6 +372,7 @@ def test_single_map_trace_and_island_report(tmp_path, assets):
     assert gpd.read_parquet(paths[0])["peak_depth_m"].notna().any()
     exported = gpd.read_parquet(paths[0])
     assert set(exported.geom_type) == {"LineString"} and "original_geometry" not in exported
+    assert exported.crs == c["roads"].crs
 
     minx, miny, maxx, maxy = c["roads"].total_bounds
     half = box(minx, miny, (minx + maxx) / 2, maxy)
