@@ -7,6 +7,7 @@ are constants. Outcomes are one value per map; if the maps are return periods of
 (names equal except ``RP<n>``), ``annualised_*`` outcomes are added.
 """
 import argparse
+import hashlib
 import logging
 import sys
 import time
@@ -54,6 +55,8 @@ def parse_args():
                         help="Leave living streets out of the built road graph (included by default, with a warning).")
     parser.add_argument("--skip-fraction-flooded", action="store_true",
                         help="Do not compute the flooded fraction per edge (EV<i>_fr = 0.0); faster graph build.")
+    parser.add_argument("--hazard-dir", type=Path, default=None,
+                        help="Directory with the hazard maps (default: the config's hazard_dir).")
     parser.add_argument("--graph-path", type=Path, default=None,
                         help="Prebuilt graph with EV<i>_ma columns in map order; default: built per extent and maps.")
     parser.add_argument("--repair-crews-range", nargs=3, metavar=("ASSET_TYPE", "MIN", "MAX"),
@@ -99,6 +102,7 @@ def build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
         Constant("flood_threshold", args.flood_threshold),
         Constant("seed", args.seed),
         Constant("asset_to_lu", inputs["asset_to_lu"]),
+        Constant("asset_population_map", inputs["asset_population_map"]),
         Constant("island_cache", caches.get("island_cache")),
         Constant("hazard_extraction_cache", caches.get("hazard_extraction_cache")),
     ]
@@ -122,6 +126,7 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
     from ema_workbench.em_framework import sample_uncertainties
 
     from src import island_report
+    from src.island_analysis import build_asset_road_match_table
     from src.single_map import road_peak_depths, single_map_trace_columns
 
     names = [n.strip() for n in args.spatial_trace_policies.split(",") if n.strip()]
@@ -131,6 +136,7 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
     fields = ([f.strip() for f in args.spatial_trace_fields.split(",") if f.strip()]
               if args.spatial_trace_fields else multi.DEFAULT_SPATIAL_TRACE_FIELDS)
     constants = {c.name: c.value for c in model.constants}
+    config = constants["config"]
     gdf_assets = inputs["gdf_assets"]
     population = island_report.asset_population_array(inputs["asset_population_map"], len(gdf_assets))
     asset_geometry = gdf_assets[["geometry", "type"]].assign(asset_id=range(len(gdf_assets)))
@@ -154,13 +160,41 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
                 )
             LOGGER.info("Saved spatial trace and island reports for %s to %s", stem, trace_dir)
 
+    if selected:
+        # Static baseline road match, as in multi-map; uses the first map's road state
+        road_match = build_asset_road_match_table(
+            gdf_assets, config["hazard_dir"], hazard_threshold=args.flood_threshold,
+            hazard_column=capture[0]["column"], config=config,
+                        graph_path=graph_path,
+                    )
+        road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
+        road_match.to_parquet(road_match_path)
+        LOGGER.info("Saved static asset-to-road match table (%d rows) to %s", len(road_match), road_match_path)
+
+
+def scope_run_dirs(config):
+    """Give a non-default hazard folder its own interim/output dirs.
+
+    Cache files and dirs are named after the hazard folder's last component only, so same-named
+    folders would share them. Appends `<parent>_<sha1(full path)[:8]>`; scope.txt records the source.
+    """
+    hazard_dir = Path(config["hazard_dir"]).resolve()
+    suffix = f"{hazard_dir.parent.name}_{hashlib.sha1(str(hazard_dir).lower().encode()).hexdigest()[:8]}"
+    for key in ("interim_dir", "output_dir"):
+        config[key] = Path(f"{config[key]}_{suffix}")
+        config[key].mkdir(parents=True, exist_ok=True)
+        (config[key] / "scope.txt").write_text(f"{hazard_dir}\n", encoding="utf-8")
+    return config
+
 
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
     t_start = time.time()
 
-    config = get_development_config() if args.dev_config else get_config()
+    config = get_development_config() if args.dev_config else get_config(hazard_dir_override=args.hazard_dir)
+    if args.hazard_dir and not args.dev_config:
+        scope_run_dirs(config)
     setup_directories(config)
     crew_ranges = multi.resolve_crew_ranges(args)
     steepness_ranges = multi.resolve_fragility_steepness_ranges(args)

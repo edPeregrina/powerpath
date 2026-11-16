@@ -418,6 +418,9 @@ def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
         (population_data["aantal_inwoners"] > 0) & (~population_data.geometry.isna())
     ].dropna(subset=["geometry"])
     population_study_area = gpd.clip(population_data, population_buffer)
+    # Clipping leaves zero-area line/point slivers where a cell only touches the extent edge;
+    # they hold no population inside the extent and break area-weighting (division by cell area).
+    population_study_area = population_study_area[population_study_area.geometry.area > 0]
     population_above_0 = population_study_area[["aantal_inwoners", "geometry"]].set_crs("EPSG:28992")
 
     # Population grid for societal-access postprocessing (demographic group
@@ -766,6 +769,7 @@ def run_spatial_trace(
         gdf_assets_combined, config_combined["hazard_dir"],
         hazard_threshold=args.flood_threshold, hazard_column="EV0_ma",
         config=config_combined,
+        graph_path=config_combined["hazard_dir"].parent / "static" / "output_graph" / "base_graph_hazard_editted.p",
     )
     road_match_gdf.to_parquet(road_match_path)
     LOGGER.info("Saved static asset-to-road match table (%d rows) to %s", len(road_match_gdf), road_match_path)

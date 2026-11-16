@@ -517,7 +517,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
 
 def build_asset_road_match_table(
     gdf_assets, hazard_dir, hazard_threshold=0.2, hazard_column="EV1_ma",
-    config=None, l1_area_geojson=None, search_radius=100.0,
+    config=None, l1_area_geojson=None, search_radius=100.0, graph_path=None,
 ):
     """Build a static "asset -> nearest road segment" reverse lookup table.
 
@@ -534,6 +534,10 @@ def build_asset_road_match_table(
     per road state of interest (e.g. the baseline, no-adaptation state),
     not once per timestep or experiment.
 
+    ``graph_path``: hazard-annotated road graph. Default: the single-map graph of the maps in
+    ``config['hazard_dir']`` (default road types, fraction flooded kept); multi-map passes its
+    ``static/output_graph/base_graph_hazard_editted.p``.
+
     Returns:
         GeoDataFrame indexed like ``gdf_assets``, with columns
         ``asset_id`` (the original index), ``access_rfid`` (-1 if no road
@@ -544,9 +548,14 @@ def build_asset_road_match_table(
     if config is None:
         config = get_config()
 
-    hazard_graph_path = config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
+    if graph_path is None:
+        from src.data_loader import load_hazard_maps
+        from src.graph_manager import build_single_map_graph
+        graph_path = build_single_map_graph(
+            load_hazard_maps(config['hazard_dir'], max_days=None), config['hazard_dir'].parent
+        )
     islands_gdf = compute_island_geodataframe_from_graph(
-        hazard_graph_path,
+        graph_path,
         hazard_threshold=hazard_threshold,
         hazard_column=hazard_column,
         buffer_distance=20,
