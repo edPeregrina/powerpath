@@ -28,6 +28,7 @@ from src.dependency_knowledge_graph import (
     POLICY_ANY,
     POLICY_AT_LEAST_N,
     POLICY_EXCLUSIVE,
+    build_default_knowledge_graph,
 )
 from src.dependency_topology import DependencyEdge
 from src.simulation import SimulationState, _update_operational_state
@@ -435,6 +436,26 @@ def test_dependency_blocking_does_not_trigger_physical_delayed_failure():
     assert report["dependency_available"].tolist() == [True, False]
     assert not any(k.startswith("hazard_recovery_wait::") for k in wait_vectors)
     assert hazard_active_masks == {}
+
+
+def test_repair_complete_trigger_only_blocks_failed_assets():
+    """A flooded asset that survived fragility keeps operating while awaiting repair; only a
+    failed one stays blocked (default knowledge graph: msls has repair_complete, no hazard block)."""
+    asset_type = np.array(["msls", "msls", "msls"])
+    _, report = evaluate_operational_state(
+        intrinsic_operational=np.array([True, False, True]),
+        asset_type=asset_type,
+        hazard_type="flooding",
+        knowledge_graph=build_default_knowledge_graph(),
+        flooded_mask=np.array([True, True, False]),
+        repair_time=np.array([40.0, 40.0, 40.0]),
+        dependency_edges=[],
+        wait_vectors={"repair_time": np.array([40.0, 40.0, 40.0])},
+        hazard_active_masks={},
+        restart_active_masks={},
+    )
+    assert report["hazard_available"].tolist() == [True, False, True]
+    assert report["effective_operational"].tolist() == [True, False, True]
 
 
 def test_evaluate_operational_state_via_simulation_wiring():

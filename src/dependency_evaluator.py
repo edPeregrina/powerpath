@@ -137,12 +137,17 @@ def compute_hazard_availability(
     flooded_mask: np.ndarray | None = None,
     repair_time: np.ndarray | None = None,
     wait_vectors: dict[str, np.ndarray] | None = None,
+    intrinsic_operational: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute ``hazard_available`` purely from current hazard rules + inputs.
 
     This is a pure function of ``flooded_mask``/``repair_time``/wait-vector
     contents -- it never mutates ``asset_type``, ``flooded_mask``, or
     ``repair_time``, and never touches dependency edges.
+
+    ``return_to_operational`` triggers only apply to assets that have failed
+    (``intrinsic_operational`` False): an asset that survived keeps operating
+    while it awaits repair. ``None`` applies the triggers to every asset.
     """
     num_assets = len(asset_type)
     if flooded_mask is None:
@@ -154,18 +159,21 @@ def compute_hazard_availability(
     else:
         repair_time = np.asarray(repair_time, dtype=np.float64)
 
+    failed = None if intrinsic_operational is None else ~np.asarray(intrinsic_operational, dtype=bool)
+
     hazard_available = np.ones(num_assets, dtype=bool)
     for a_type in np.unique(asset_type):
         a_mask = asset_type == a_type
         rules = knowledge_graph.get_hazard_rules(hazard_type, a_type)
         if not rules:
             continue
+        repair_mask = a_mask if failed is None else a_mask & failed
         blocked = np.zeros(num_assets, dtype=bool)
         for rule in rules:
             if rule.hazard_blocks_operation:
                 blocked |= a_mask & flooded_mask
             blocked |= _hazard_repair_blocked_mask(
-                repair_time, a_mask, rule.return_to_operational, wait_vectors
+                repair_time, repair_mask, rule.return_to_operational, wait_vectors
             )
         hazard_available &= ~blocked
     return hazard_available
@@ -579,6 +587,7 @@ def evaluate_operational_state(
             flooded_mask=flooded_mask,
             repair_time=repair_time,
             wait_vectors=wait_vectors,
+            intrinsic_operational=intrinsic_operational,
         )
         activate_hazard_recovery_waits(
             hazard_available,
