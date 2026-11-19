@@ -32,6 +32,7 @@ from src.island_analysis import (  # noqa: E402
     compute_island_geodataframe_from_graph,
 )
 from src.utils import filter_hazard_graph  # noqa: E402
+from tests.l1_fixtures import make_l1_layers  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURE_GRAPH = REPO / "data" / "test_samples" / "static" / "output_graph" / "base_graph_hazard_editted.p"
@@ -39,8 +40,7 @@ ADAPT = REPO / "data" / "test_samples" / "adaptation"
 L1_LAYERS = {
     "none": None,
     "polygon": ADAPT / "l1_adapt_polygon.geojson",
-    "monetary30_0.4": ADAPT / "L1_adaptations" / "policy_L1_area_monetary_top30_red_0.4.geojson",
-    "population30_0.4": ADAPT / "L1_adaptations" / "policy_L1_area_population_top30_red_0.4.geojson",
+    **make_l1_layers(FIXTURE_GRAPH),
 }
 GOLDEN_PATH = Path(__file__).resolve().parent / "data" / "island_golden.json"
 GEOM_COLS = ("geometry", "original_geometry")

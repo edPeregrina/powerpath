@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO))
 from config import get_config  # noqa: E402
 from src import island_analysis, single_map  # noqa: E402
 from src.damage_recovery import default_fragility_function  # noqa: E402
+from tests.l1_fixtures import make_l1_layers  # noqa: E402
 
 HAZARD_DIR = REPO / "data" / "test_samples" / "test_hazard_timesteps"
 GRAPH = HAZARD_DIR.parent / "static" / "output_graph" / "base_graph_hazard_editted.p"
@@ -227,7 +228,7 @@ def test_single_map_societal_metrics_match_postprocessor():
 
 L1_FILES = [
     REPO / "data" / "test_samples" / "adaptation" / "l1_adapt_polygon.geojson",
-    *sorted((REPO / "data" / "test_samples" / "adaptation" / "L1_adaptations").glob("*.geojson")),
+    *make_l1_layers(GRAPH).values(),
 ]
 
 
