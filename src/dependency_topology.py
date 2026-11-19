@@ -184,13 +184,11 @@ def _expand_direct_topology(gdf_assets, rule: KnowledgeGraphRule) -> list[Depend
 # Voronoi topology
 # ---------------------------------------------------------------------------
 def _assign_targets_to_voronoi_providers(voronoi_gdf, target_gdf) -> dict[int, int | None]:
-    """Assign each target to at most one Voronoi provider, with no fallback.
+    """Assign each target to at most one Voronoi provider, by cell only.
 
-    Deliberately omits the nearest-neighbour fallback used by the legacy
-    ``build_voronoi_service_area_map`` helper: an exclusive Voronoi mapping
-    must never silently substitute a nearby alternate provider. Targets that
-    cannot be resolved by overlap or point-in-polygon containment are
-    assigned ``None``.
+    Targets that cannot be resolved by overlap or point-in-polygon
+    containment are assigned ``None``; the nearest-source fallback is applied
+    by the caller.
     """
     assignments: dict[int, int | None] = {}
     if voronoi_gdf.empty:
@@ -249,11 +247,10 @@ def _assign_targets_to_voronoi_providers(voronoi_gdf, target_gdf) -> dict[int, i
 def _expand_voronoi_topology(gdf_assets, rule: KnowledgeGraphRule) -> list[DependencyEdge]:
     """Expand a ``topology="voronoi"`` rule.
 
-    Each target is assigned to exactly one governing provider (the Voronoi
-    cell containing it), with no fallback -- if no cell can be resolved for a
-    target, its edge has an empty ``provider_indices``. Voronoi topology
-    therefore always yields 0 or 1 providers per target by construction,
-    regardless of ``availability_policy``.
+    Each target is assigned to exactly one governing provider     (the Voronoi
+    cell containing it); a target no cell resolves falls back to its nearest
+    source asset. Voronoi topology therefore yields at most 1 provider per
+    target, regardless of ``availability_policy``.
     """
     target_indices = _type_indices(gdf_assets, rule.target_type)
     if not target_indices:
@@ -275,6 +272,20 @@ def _expand_voronoi_topology(gdf_assets, rule: KnowledgeGraphRule) -> list[Depen
         target_gdf = target_gdf.to_crs(voronoi_gdf.crs)
 
     assignments = _assign_targets_to_voronoi_providers(voronoi_gdf, target_gdf)
+
+    # Unbounded edge cells are dropped, so targets near the outer ring can be
+    # left without a cell; give those their nearest source asset.
+    unassigned = [t for t in target_indices if assignments.get(t) is None]
+    if unassigned:
+        source_gdf = gdf_assets.loc[source_indices]
+        if source_gdf.crs is not None and source_gdf.crs != target_gdf.crs:
+            source_gdf = source_gdf.to_crs(target_gdf.crs)
+        source_geoms = source_gdf.geometry
+        for target_idx in unassigned:
+            geom = target_gdf.geometry.loc[target_idx]
+            if geom is None or geom.is_empty:
+                continue
+            assignments[target_idx] = int(source_geoms.distance(geom).idxmin())
 
     edges = []
     for target_idx in target_indices:
