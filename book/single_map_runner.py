@@ -32,6 +32,7 @@ import interdependent_ci_societal_access as multi
 from config import get_config, get_development_config, setup_directories
 from src.caching import save_hazard_extraction_cache, save_island_cache, save_societal_allocation_cache
 from src.graph_manager import build_single_map_graph
+from src.island_analysis import add_road_exemption_args, apply_road_exemption_args
 from src.simulation import (
     build_per_type_crew_uncertainties,
     build_per_type_fragility_steepness_uncertainties,
@@ -55,12 +56,7 @@ def parse_args():
                         help="Leave living streets out of the built road graph (included by default, with a warning).")
     parser.add_argument("--skip-fraction-flooded", action="store_true",
                         help="Do not compute the flooded fraction per edge (EV<i>_fr = 0.0); faster graph build.")
-    parser.add_argument("--no-exempt-motorways", action="store_true",
-                        help="Let flooding cut motorways (default: exempt from the flood threshold).")
-    parser.add_argument("--no-exempt-bridges", action="store_true",
-                        help="Let flooding cut bridges (default: exempt from the flood threshold).")
-    parser.add_argument("--no-exempt-tunnels", action="store_true",
-                        help="Let flooding cut tunnels (default: exempt from the flood threshold).")
+    add_road_exemption_args(parser)
     parser.add_argument("--hazard-dir", type=Path, default=None,
                         help="Directory with the hazard maps (default: the config's hazard_dir).")
     parser.add_argument("--graph-path", type=Path, default=None,
@@ -204,9 +200,7 @@ def main():
     config = get_development_config() if args.dev_config else get_config(hazard_dir_override=args.hazard_dir)
     if args.hazard_dir and not args.dev_config:
         scope_run_dirs(config)
-    for road_type in ("motorways", "bridges", "tunnels"):
-        if getattr(args, f"no_exempt_{road_type}"):
-            config["simulation_config"][f"exempt_{road_type}"] = False
+    apply_road_exemption_args(config, args)
     setup_directories(config)
     crew_ranges = multi.resolve_crew_ranges(args)
     steepness_ranges = multi.resolve_fragility_steepness_ranges(args)

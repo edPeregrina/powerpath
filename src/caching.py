@@ -335,10 +335,13 @@ def create_island_cache_key(
     l1_active_timesteps=None,
     l2_asset_geojson=None,
     l2_active_timesteps=None,
+    exemptions=None,
 ):
     """
     Create a standardized cache key for island assignment, including asset count and bounds.
     Adaptation hashes (including timesteps) are appended only when active.
+    Road exemption flags (``exempt_*``) are appended only when some are False, so
+    default-exemption keys (and the caches built with them) are unchanged.
     
     Args:
         hazard_column (str): The hazard column name (e.g., 'EV1_ma')
@@ -365,6 +368,11 @@ def create_island_cache_key(
     if l2_asset_geojson is not None:
         l2_hash = _compute_l1_hash(l2_asset_geojson, l2_active_timesteps)
         key = f"{key}_L2{l2_hash}"
+
+    if exemptions:
+        not_exempt = sorted(k.removeprefix("exempt_") for k, v in exemptions.items() if not v)
+        if not_exempt:
+            key = f"{key}_noexempt-{'-'.join(not_exempt)}"
     
     return key
 

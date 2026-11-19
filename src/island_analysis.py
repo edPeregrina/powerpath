@@ -229,6 +229,23 @@ def _road_exemption_kwargs(config):
     }
 
 
+ROAD_EXEMPTION_TYPES = ('motorways', 'bridges', 'tunnels')
+
+
+def add_road_exemption_args(parser):
+    """Add ``--no-exempt-<road type>`` switches to an argparse parser."""
+    for road_type in ROAD_EXEMPTION_TYPES:
+        parser.add_argument(f"--no-exempt-{road_type}", action="store_true",
+                            help=f"Let flooding cut {road_type} (default: exempt from the flood threshold).")
+
+
+def apply_road_exemption_args(config, args):
+    """Write the parsed ``--no-exempt-*`` switches into ``simulation_config``."""
+    for road_type in ROAD_EXEMPTION_TYPES:
+        if getattr(args, f"no_exempt_{road_type}"):
+            config['simulation_config'][f'exempt_{road_type}'] = False
+
+
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
                        l1_area_geojson=None, l1_active_timesteps=None):
@@ -256,6 +273,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(_config),
     )
 
     # Check if cached or initialize empty dictionaries
@@ -368,6 +386,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(_config),
     )
 
     cache_hit = (

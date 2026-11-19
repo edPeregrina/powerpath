@@ -137,6 +137,20 @@ def test_get_or_build_allocation_uses_cache_key():
     assert changed_key != key_1
 
 
+def test_island_cache_key_includes_non_default_road_exemptions():
+    default_key = create_island_cache_key("EV0_ma", 0.2, "assets")
+    all_exempt = dict(exempt_motorways=True, exempt_bridges=True, exempt_tunnels=True)
+    assert create_island_cache_key("EV0_ma", 0.2, "assets", exemptions=all_exempt) == default_key
+
+    tunnels_cut = create_island_cache_key(
+        "EV0_ma", 0.2, "assets", exemptions={**all_exempt, "exempt_tunnels": False}
+    )
+    bridges_cut = create_island_cache_key(
+        "EV0_ma", 0.2, "assets", exemptions={**all_exempt, "exempt_bridges": False}
+    )
+    assert len({default_key, tunnels_cut, bridges_cut}) == 3
+
+
 def test_island_cache_key_includes_l2_road_adaptation():
     l2 = gpd.GeoDataFrame(
         {"depth_red": [0.5]},

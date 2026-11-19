@@ -45,6 +45,7 @@ from src.hazard_analysis_electricity import (
     find_hazard_value_at_points_optimized,
 )
 from src.island_analysis import (
+    _road_exemption_kwargs,
     match_assets_access,
     match_island_ids_assets,
     update_repair_crew_islands,
@@ -312,6 +313,7 @@ def _update_hazard_map_states(
             asset_hash,
             l1_area_geojson=active_l1_area_geojson,
             l1_active_timesteps=l1_active_timesteps,
+            exemptions=_road_exemption_kwargs(_config),
         )
         state.road_state_key = cache_key
         try:

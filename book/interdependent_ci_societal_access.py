@@ -102,6 +102,7 @@ from src.caching import (
 )
 from src.data_loader import load_electricity_assets, load_hazard_maps, load_osm_assets
 from src.dependency_knowledge_graph import build_default_knowledge_graph
+from src.island_analysis import add_road_exemption_args, apply_road_exemption_args
 from src.impacts import (
     create_voronoi_for_asset_type,
     prepare_land_use_impact_data,
@@ -209,6 +210,7 @@ def parse_args():
                          ))
     parser.add_argument("--flood-threshold", type=float, default=0.2,
                          help="Flood depth threshold (m) above which an asset is considered flooded. Default: 0.2.")
+    add_road_exemption_args(parser)
     parser.add_argument("--adaptation-active-timesteps", type=int, default=198,
                          help="Number of leading timesteps during which L1/L2 adaptation measures are active. Default: 198.")
     parser.add_argument(
@@ -926,6 +928,7 @@ def main():
 
     config = get_development_config() if args.dev_config else get_config()
     config['simulation_config']['shadow_l1_islands'] = args.shadow_l1_islands
+    apply_road_exemption_args(config, args)
     is_valid, missing_dirs, warnings = validate_config(config)
     if not is_valid:
         LOGGER.warning("Configuration issues detected: missing=%s warnings=%s", missing_dirs, warnings)
