@@ -32,12 +32,6 @@ def create_spatial_index(gdf):
     return idx
 
 
-from src.road_islands import (  # noqa: E402,F401  re-exported for compatibility
-    project_graph_coords, is_motorway, _tag_is_set, edge_exempt_mask,
-    l1_edge_depth_reduction, hazard_removal_mask, filter_hazard_graph,
-)
-
-
 def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     """Concatenate multiple per-type asset GeoDataFrames into one unified GeoDataFrame.
 

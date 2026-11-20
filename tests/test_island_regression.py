@@ -31,7 +31,7 @@ from src.island_analysis import (  # noqa: E402
     _load_and_project_graph,
     compute_island_geodataframe_from_graph,
 )
-from src.utils import filter_hazard_graph  # noqa: E402
+from src.road_islands import filter_hazard_graph  # noqa: E402
 from tests.l1_fixtures import make_l1_layers  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent

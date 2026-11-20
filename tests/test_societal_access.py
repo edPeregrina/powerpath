@@ -197,7 +197,7 @@ def test_filter_hazard_graph_rejects_l2_kwarg():
     does not accept an ``l2_asset_geojson`` kwarg at all, making this
     structurally impossible rather than merely unused."""
     nx = pytest.importorskip("networkx")
-    from src.utils import filter_hazard_graph
+    from src.road_islands import filter_hazard_graph
 
     graph = nx.Graph()
     graph.add_node(1, x=0.0, y=0.0)
@@ -228,7 +228,7 @@ def test_filter_hazard_graph_rejects_l2_kwarg():
 )
 def test_filter_hazard_graph_exemption_flags(flag, attrs):
     nx = pytest.importorskip("networkx")
-    from src.utils import filter_hazard_graph
+    from src.road_islands import filter_hazard_graph
 
     def build():
         g = nx.Graph()
