@@ -29,6 +29,23 @@ SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS = {
     "school_so": 8e6,
 }
 
+# Default (min, max) repair crews per asset type; runners override via --repair-crews-range.
+DEFAULT_CREW_RANGES = {
+    "msls": (10, 20),
+    "ems": (1, 3),
+    "hospital": (1, 3),
+    "primary_care": (1, 3),
+    "pharmacy": (1, 3),
+    "supermarket": (1, 1),
+}
+
+# Default (min, max) fragility steepness k, sampled in 0.5 steps; runners override via
+# --fragility-steepness-range. Only types whose flooding rule has hazard_blocks_operation=False
+# in the knowledge graph are fragility-eligible (currently 'msls').
+DEFAULT_FRAGILITY_STEEPNESS_RANGES = {
+    "msls": (5.0, 7.5),
+}
+
 
 def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=None,
                                 cell_id_column="cell_id", namespace="societal_access"):

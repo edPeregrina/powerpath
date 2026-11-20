@@ -6,6 +6,12 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
+# Default per-asset trace fields; 'blocking_reason' codes: src.adaptation.BLOCKING_REASON_LABELS.
+DEFAULT_SPATIAL_TRACE_FIELDS = [
+    "island_id", "operational", "intrinsic_operational",
+    "accessible", "unreachable", "flooded", "blocking_reason",
+]
+
 
 def asset_population_array(asset_population_map, n_assets):
     """Per-asset served population from an ``asset_id -> population`` dict (0 where missing)."""

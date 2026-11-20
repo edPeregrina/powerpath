@@ -27,7 +27,7 @@ from src.road_islands import (
     label_road_islands,
     road_state_asset_islands,
 )
-from src.impacts import calculate_cumulative_monetized_impacts_ema
+from src.impacts import MONETARY_CATEGORIES, calculate_cumulative_monetized_impacts_ema
 from src.graph_manager import file_fingerprint
 from src.societal_access import postprocess_societal_access_from_config
 from src.simulation import (
@@ -510,9 +510,6 @@ def single_map_trace_columns(capture, fields):
             np.asarray(c["hazard_value"] if field == "hazard_value" else c["outcome"][field]) for c in capture
         ])
     return columns
-
-
-MONETARY_CATEGORIES = ["residential", "commercial", "industrial", "transport", "public_sector"]
 
 
 def single_map_monetary_rate(operational, asset_ids, asset_to_lu):

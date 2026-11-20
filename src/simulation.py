@@ -59,7 +59,7 @@ from src.timing_profiler import NULL_PROFILER
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import get_config
+from config import DEFAULT_CREW_RANGES, DEFAULT_FRAGILITY_STEEPNESS_RANGES, get_config
 from shutil import copyfile
 
 _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS = {}
@@ -769,6 +769,27 @@ def repair_crew_uncertainty(asset_type, min_crews, max_crews):
     """
     from ema_workbench import IntegerParameter
     return IntegerParameter(f'{REPAIR_CREWS_PARAM_PREFIX}__{asset_type}', min_crews, max_crews)
+
+
+def resolve_per_type_ranges(defaults, overrides, flag, cast):
+    """Merge CLI ``(asset_type, min, max)`` overrides into ``defaults``; only types in ``defaults`` are valid."""
+    ranges = dict(defaults)
+    for asset_type, low, high in overrides or []:
+        if asset_type not in defaults:
+            raise ValueError(f"Unknown asset type '{asset_type}' in {flag}; expected one of {list(defaults)}.")
+        ranges[asset_type] = (cast(low), cast(high))
+    return ranges
+
+
+def resolve_crew_ranges(args):
+    """``DEFAULT_CREW_RANGES`` with ``--repair-crews-range`` overrides."""
+    return resolve_per_type_ranges(DEFAULT_CREW_RANGES, args.repair_crews_range, "--repair-crews-range", int)
+
+
+def resolve_fragility_steepness_ranges(args):
+    """``DEFAULT_FRAGILITY_STEEPNESS_RANGES`` with ``--fragility-steepness-range`` overrides."""
+    return resolve_per_type_ranges(DEFAULT_FRAGILITY_STEEPNESS_RANGES, args.fragility_steepness_range,
+                                   "--fragility-steepness-range", float)
 
 
 def build_per_type_crew_uncertainties(asset_type_ranges):

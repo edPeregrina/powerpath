@@ -48,12 +48,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
 from config import get_config  # noqa: E402
-from src.data_loader import load_hazard_maps  # noqa: E402
+from src.data_loader import AMENITY_CATEGORY_LABELS, load_combined_assets, load_hazard_maps  # noqa: E402
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized  # noqa: E402
-from book.interdependent_ci_societal_access import (  # noqa: E402
-    AMENITY_CATEGORY_LABELS,
-    load_combined_assets,
-)
 from book.postprocessing.produce_figures_group_equity import (  # noqa: E402
     FUNCTION_LABELS,
     PLOT_STYLE,

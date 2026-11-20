@@ -1,4 +1,7 @@
 ﻿
+import json
+from pathlib import Path
+
 import geopandas as gpd
 import networkx as nx
 import numpy as np
@@ -261,3 +264,45 @@ def build_voronoi_service_area_map(
     if return_diagnostics:
         return service_area_map, diagnostics
     return service_area_map
+
+
+def json_safe(obj):
+    """Best-effort JSON-safe conversion for the run manifest.
+
+    Config/CLI values routinely include ``Path``, ``set``/``frozenset`` and
+    other objects ``json.dump`` cannot serialize directly (e.g. nested
+    knowledge-graph dicts are already plain, but ``l1_dir``/``l2_dir`` etc.
+    are ``Path``). Falls back to ``str()`` for anything else unrecognized
+    rather than raising, since this manifest is a human-readable record, not
+    a round-trippable format.
+    """
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return sorted(json_safe(v) for v in obj)
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def write_run_manifest(out_dir, execution_id, input_parameters, output_parameters):
+    """Write the run's input/output parameters as a single JSON manifest.
+
+    Saved alongside the EMA results archive (``out_dir``) so a run's full
+    configuration and outcome summary travel together when archived (e.g.
+    copied to a results backup folder), instead of relying on manually
+    captured console/log output.
+    """
+    manifest = {
+        "execution_id": execution_id,
+        "input_parameters": json_safe(input_parameters),
+        "output_parameters": json_safe(output_parameters),
+    }
+    manifest_path = Path(out_dir) / f"run_manifest_{execution_id}.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=False)
+    return manifest_path

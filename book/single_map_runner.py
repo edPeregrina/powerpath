@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-sys.path.append(str(Path(__file__).resolve().parent))
 
 import pandas as pd
 from ema_workbench import (
@@ -28,17 +27,23 @@ from ema_workbench import (
 )
 from ema_workbench.util.utilities import save_results
 
-import interdependent_ci_societal_access as multi
 from config import get_config, get_development_config, setup_directories
+from src.adaptation import build_adaptation_policies
 from src.caching import save_hazard_extraction_cache, save_island_cache, save_societal_allocation_cache
+from src.data_loader import prepare_model_inputs
 from src.graph_manager import build_single_map_graph
+from src.impacts import MONETARY_CATEGORIES
 from src.island_analysis import add_road_exemption_args, apply_road_exemption_args
+from src.island_report import DEFAULT_SPATIAL_TRACE_FIELDS
 from src.simulation import (
     build_per_type_crew_uncertainties,
     build_per_type_fragility_steepness_uncertainties,
+    resolve_crew_ranges,
+    resolve_fragility_steepness_ranges,
 )
-from src.single_map import MONETARY_CATEGORIES, return_periods, run_single_map_experiment
+from src.single_map import return_periods, run_single_map_experiment
 from src.societal_access import list_societal_metric_names
+from src.utils import json_safe, write_run_manifest
 
 LOGGER = logging.getLogger(__name__)
 COUNT_OUTCOMES = [
@@ -138,7 +143,7 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
     if missing := sorted(set(names) - {p.name for p in selected}):
         LOGGER.warning("Unknown spatial-trace policies %s. Available: %s", missing, sorted(p.name for p in policies))
     fields = ([f.strip() for f in args.spatial_trace_fields.split(",") if f.strip()]
-              if args.spatial_trace_fields else multi.DEFAULT_SPATIAL_TRACE_FIELDS)
+              if args.spatial_trace_fields else DEFAULT_SPATIAL_TRACE_FIELDS)
     constants = {c.name: c.value for c in model.constants}
     config = constants["config"]
     gdf_assets = inputs["gdf_assets"]
@@ -156,7 +161,7 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
             stem = f"spatial_trace_{execution_id}_{policy.name.replace(' ', '_')}_scenario{scenario.name}"
             island_report.write_trace_file(
                 trace_dir / f"{stem}.parquet", single_map_trace_columns(capture, fields), asset_geometry,
-                gdf_assets.crs, multi._json_safe(dict(scenario.items())),
+                gdf_assets.crs, json_safe(dict(scenario.items())),
             )
             for c in capture:
                 island_report.write_island_report(
@@ -204,17 +209,17 @@ def main():
         scope_run_dirs(config)
     apply_road_exemption_args(config, args)
     setup_directories(config)
-    crew_ranges = multi.resolve_crew_ranges(args)
-    steepness_ranges = multi.resolve_fragility_steepness_ranges(args)
+    crew_ranges = resolve_crew_ranges(args)
+    steepness_ranges = resolve_fragility_steepness_ranges(args)
 
-    inputs = multi.prepare_model_inputs(config)
+    inputs = prepare_model_inputs(config)
     graph_path = args.graph_path or build_single_map_graph(
         inputs["hazard_maps"], config["hazard_dir"].parent, include_living_streets=not args.no_living_streets,
         skip_fraction_flooded=args.skip_fraction_flooded,
     )
     LOGGER.info("Road graph: %s", graph_path)
     model = build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
-    policies = multi.build_adaptation_policies(
+    policies = build_adaptation_policies(
         Path(config["root_dir"]), args, l1_dir=args.l1_dir, l2_dir=args.l2_dir,
         repair_priority=args.repair_priority,
     )
@@ -245,7 +250,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{args.output_name or f'single_map_results_{execution_id}'}.tar.gz"
     save_results((experiments, outcomes), out_path)
-    multi.write_run_manifest(out_dir, execution_id, vars(args), {
+    write_run_manifest(out_dir, execution_id, vars(args), {
         "start_time_utc": datetime.fromtimestamp(t_start, tz=timezone.utc).isoformat(),
         "duration_seconds": time.time() - t_start,
         "num_experiments": len(pd.DataFrame(experiments)),

@@ -79,7 +79,7 @@ import plotly.graph_objects as go
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(REPO_ROOT))
 
-from book.interdependent_ci_societal_access import AMENITY_CATEGORY_LABELS  # noqa: E402
+from src.data_loader import AMENITY_CATEGORY_LABELS  # noqa: E402
 
 FIG_DIR = REPO_ROOT / "data" / "output" / "paper_figures_group_equity"
 DEFAULT_TRACE_GLOB_DIR = (
