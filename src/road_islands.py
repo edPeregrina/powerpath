@@ -303,11 +303,11 @@ def l1_node_islands(G, baseline_labels, threshold, hazard_column, l1_area_geojso
         next_label += 0 if known else 1
         for s in comp:
             supernode_label[s] = label
-    restored_nodes = {n for (u, v, _, _), r in zip(edges, restored) if r for n in (u, v)}
-    for node in restored_nodes:
-        s = supernode(node)
-        if s in supernode_label:
-            node_labels[node] = supernode_label[s]
+    # Every non-island node in a labelled component, not only restored-edge endpoints: on
+    # directed graphs a restored edge can close a cycle through a node it doesn't touch.
+    for s, label in supernode_label.items():
+        if s[0] == "node":
+            node_labels[s[1]] = label
     old_to_new = {s[1]: lab for s, lab in supernode_label.items() if s[0] == "island"}
     for node, label in baseline_labels.items():
         node_labels[node] = old_to_new.get(label, label)

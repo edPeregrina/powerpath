@@ -286,6 +286,22 @@ def test_incremental_l1_islands_directed():
         assert _partition(incremental) == _partition(full)
 
 
+def test_incremental_l1_labels_cycle_nodes_off_restored_edge(monkeypatch):
+    import networkx as nx
+    from src import road_islands
+
+    D = nx.MultiDiGraph([("a", "b"), ("b", "c"), ("c", "a"), ("d", "e"), ("e", "d")])
+    edges = list(D.edges(keys=True, data=True))
+    flooded = np.array([(u, v) == ("c", "a") for u, v, _, _ in edges])
+
+    def fake_removal(G, threshold, hazard_column, l1_area_geojson=None, **kwargs):
+        return edges, flooded & (l1_area_geojson is None), None
+
+    monkeypatch.setattr(road_islands, "edge_removal", fake_removal)
+    labels = road_islands.l1_node_islands(D, {"d": 0, "e": 0}, 0.0, "EV0_ma", "l1.geojson")
+    assert _partition(labels) == _partition({"a": 0, "b": 0, "c": 0, "d": 1, "e": 1})
+
+
 def _rfid_partition(table):
     return _partition(dict(zip(table["rfid"], table["island_id"])))
 
