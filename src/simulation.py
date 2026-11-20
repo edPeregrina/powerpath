@@ -18,7 +18,6 @@ from src.adaptation import (
     build_l1_l2_reduction_array,
 )
 from src.caching import (
-    create_accessibility_cache_key,
     create_island_cache_key,
     get_asset_centroid_hash,
     load_accessibility_cache,

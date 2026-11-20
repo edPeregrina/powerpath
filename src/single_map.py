@@ -42,7 +42,6 @@ from src.simulation import (
     combine_per_type_crew_kwargs,
     combine_per_type_fragility_steepness_kwargs,
     repair_impact_map,
-    update_repair_crew_assignment_optimized,
 )
 
 BUFFER_M = 20

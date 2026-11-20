@@ -8,11 +8,7 @@ import pickle
 # Import hazard extraction method from config
 import sys
 
-import geopandas as gpd
-import networkx as nx
 import numpy as np
-from pyproj import Transformer
-from shapely.geometry import LineString
 
 # ---------------------------------------------------------------------------
 # Actor-by-island redistribution primitives

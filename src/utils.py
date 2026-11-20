@@ -3,12 +3,7 @@ import json
 from pathlib import Path
 
 import geopandas as gpd
-import networkx as nx
-import numpy as np
 import pandas as pd
-import shapely
-import shapely.geometry as sg
-from pyproj import Transformer
 from rtree import index
 from scipy.spatial import Voronoi
 

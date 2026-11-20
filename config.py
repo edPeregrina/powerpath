@@ -207,7 +207,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
             # Diagnostic: on each L1 island-cache miss also run the incremental L1 partition
             # (l1_node_islands) and log SHADOW_L1 timings/equality; results are unchanged.
             'shadow_l1_islands': False,
-            'accessibility_model': None,  # Default to None, can be set to grid_hex.accessibility_model
+            'accessibility_model': None,  # Must stay None: grid-based model removed; island-based access is used
             # Event connectivity-boundary policy (see src.road_islands.filter_hazard_graph):
             #   event_footprint_path=None restricts nothing (no footprint).
             #   outside_footprint_policy='permissive' (default) preserves existing
