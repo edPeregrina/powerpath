@@ -1,5 +1,5 @@
 import math
-
+import warnings
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -2343,11 +2343,12 @@ def test_capacity_missing_initial_state_does_not_select_later_reference(missing)
     assert math.isnan(rows[1]["societal_capacity_retained_pct__hospital__total"])
 
 
-def test_capacity_disrupted_initial_state_warns_and_keeps_initial_reference():
+def test_capacity_disrupted_initial_state_keeps_initial_reference_without_warning():
     kwargs, detail = _capacity_inputs()
     first = detail(0, [True, False, True, True, True])
     first["flooded"] = np.array([0, 1, 0, 0, 0])
-    with pytest.warns(RuntimeWarning, match="initial state, which is already disrupted"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
         rows, _ = postprocess_societal_access_results(
             summary_results=[{"timestep": 0}], detailed_results=[first], **kwargs,
         )

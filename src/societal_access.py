@@ -2245,18 +2245,6 @@ def postprocess_societal_access_results(
                 is_capacity_reference = bool(ts_detail.get("capacity_reference"))
                 if capacity_groups and (is_capacity_reference or ts_idx == 0):
                     with profiler.section("societal_access.capacity_reference"):
-                        if not is_capacity_reference:
-                            disrupted = (
-                                np.any(ts_detail.get("flooded", []))
-                                or np.any(~operational.astype(bool))
-                            )
-                            warnings.warn(
-                                f"Timestep {ts}: capacity reference is the initial state"
-                                + (", which is already disrupted. " if disrupted else ". ")
-                                + "It is not an independently verified undisrupted road network.",
-                                RuntimeWarning,
-                                stacklevel=2,
-                            )
                         capacity_reference_means = _mean_providers_per_person(
                             _provider_counts_by_island(
                                 island_ids, None, provider_positions, asset_func_aliases,
