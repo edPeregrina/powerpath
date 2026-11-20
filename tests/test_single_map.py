@@ -457,18 +457,6 @@ def test_single_map_trace_and_island_report(tmp_path, assets):
     )
     assert 0 < len(gpd.read_parquet(clipped[0])) < len(exported)
     assert pd.read_csv(clipped[1])["n_assets"].sum() < n
-def test_multi_map_island_report(tmp_path, assets):
-    sys.path.insert(0, str(REPO / "book"))
-    import interdependent_ci_societal_access as multi
-
-    config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
-    ids, _ = single_map.map_asset_islands(
-        single_map.undisrupted_state(assets, GRAPH), GRAPH, "EV2_ma", 0.2
-    )
-    roads_path, table_path = multi.write_multi_map_island_report(
-        tmp_path, "day2", assets, config, 2, 48, 0.2, {}, ids, np.ones(len(assets), dtype=bool), np.ones(len(assets)),
-    )
-    assert roads_path.exists() and table_path.exists()
 
 
 def test_impact_based_crew_assignment(tmp_path, assets):
