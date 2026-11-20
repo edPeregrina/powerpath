@@ -466,7 +466,15 @@ def _update_hazard_map_states(
 
     return available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated
 
-def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 
+def repair_impact_map(method, asset_to_lu=None, asset_population_map=None):
+    """Per-asset value that impact-based crew assignment ranks by."""
+    if "monetary" in method and asset_to_lu is not None:
+        return {a: sum(area * rate for (_, area, rate) in uses) for a, uses in asset_to_lu.items()}
+    if "population" in method and asset_population_map is not None:
+        return asset_population_map
+    return None
+
+def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned,
                                            accessible, flooded_mask, repair_time, island_ids=None, method=None, verbose=False, asset_impact_map=None):    
     """
     Assign repair crews to assets based on accessibility, flooding status, repair time, and assignment method.
@@ -1815,15 +1823,7 @@ def simulate_asset_damage_recovery_access_breakdown(
         boundary_asset_indices = None
         boundary_islands_rfids = None
 
-    if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
-        asset_impact_map = {
-            aid: sum(area * rate for (lu, area, rate) in asset_to_lu[aid])
-            for aid in asset_to_lu
-        }
-    elif 'population' in repair_crew_assignment_method and asset_population_map is not None:
-        asset_impact_map = asset_population_map
-    else:
-        asset_impact_map = None
+    asset_impact_map = repair_impact_map(repair_crew_assignment_method, asset_to_lu, asset_population_map)
 
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation

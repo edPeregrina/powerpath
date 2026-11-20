@@ -41,6 +41,7 @@ from src.simulation import (
     build_dependency_runtime,
     combine_per_type_crew_kwargs,
     combine_per_type_fragility_steepness_kwargs,
+    repair_impact_map,
     update_repair_crew_assignment_optimized,
 )
 
@@ -525,15 +526,6 @@ def single_map_monetary_rate(operational, asset_ids, asset_to_lu):
         ).iloc[0]
         rate.update({k: float(v) for k, v in step.items() if k.startswith("monetary_impact_")})
     return rate
-
-
-def repair_impact_map(method, asset_to_lu=None, asset_population_map=None):
-    """Per-asset value that impact-based crew assignment ranks by, chosen as in multi-map."""
-    if "monetary" in method and asset_to_lu is not None:
-        return {a: sum(area * rate for (_, area, rate) in uses) for a, uses in asset_to_lu.items()}
-    if "population" in method and asset_population_map is not None:
-        return asset_population_map
-    return None
 
 
 def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
