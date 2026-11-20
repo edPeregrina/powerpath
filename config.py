@@ -1,4 +1,4 @@
-﻿"""
+"""
 PowerPath Infrastructure Resilience Analysis Configuration
 ==========================================================
 
@@ -230,7 +230,7 @@ def get_config(root_dir=None, hazard_dir_override=None):
         
         # Recovery model parameters
         'recovery_parameters': {
-            'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DRÂ² + b*DR + c
+            'repair_time_coefficients': [702.72, 3.14, 1.9891],  # [a, b, c] for quadratic: repair_time = a*DR² + b*DR + c
             'damage_ratio_coefficients': (0.0468, 0.0077),  # (m, n) for linear: damage_ratio = m*hazard + n
             # Per-asset fragility overrides. Only applies to asset types the
             # knowledge graph marks fragility-eligible (hazard_blocks_operation=
@@ -640,9 +640,9 @@ if __name__ == "__main__":
     setup_directories(config)
     
     if is_valid:
-        print("\nâœ… Configuration is valid and ready for use!")
+        print("\n✅ Configuration is valid and ready for use!")
     else:
-        print(f"\nâŒ Configuration has issues that need to be resolved.")
+        print(f"\n❌ Configuration has issues that need to be resolved.")
         print("Missing directories:")
         for missing_dir in missing_dirs:
             print(f"  - {missing_dir}")

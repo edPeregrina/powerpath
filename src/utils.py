@@ -1,4 +1,4 @@
-﻿
+
 import json
 from pathlib import Path
 
@@ -33,7 +33,7 @@ def create_spatial_index(gdf):
 def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     """Concatenate multiple per-type asset GeoDataFrames into one unified GeoDataFrame.
 
-    The resulting index is a RangeIndex (0, 1, 2, â€¦) so that each row's positional
+    The resulting index is a RangeIndex (0, 1, 2, …) so that each row's positional
     index is also its label.  This is required by :func:`build_voronoi_service_area_map`
     and by :func:`~src.impacts.create_voronoi_for_asset_type`, which both rely on
     the index being the positional identifier of each asset in the combined array.
@@ -49,8 +49,8 @@ def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     Example::
 
         gdf_assets = compile_asset_gdfs([gdf_substations, gdf_hospitals])
-        # Rows 0..N-1  â†’ substations
-        # Rows N..N+M-1 â†’ hospitals
+        # Rows 0..N-1  → substations
+        # Rows N..N+M-1 → hospitals
     """
     if not gdf_list:
         raise ValueError("gdf_list must contain at least one GeoDataFrame.")
@@ -66,7 +66,7 @@ def build_voronoi_service_area_map(
 ) -> dict:
     """Map each secondary asset to the primary asset whose Voronoi polygon contains it.
 
-    The mapping is built once before the simulation starts so the O(NÂ·M) spatial
+    The mapping is built once before the simulation starts so the O(N·M) spatial
     search is performed only once rather than repeated every timestep.
 
     **Spatial search strategy** (reuses :func:`create_spatial_index`):
@@ -103,7 +103,7 @@ def build_voronoi_service_area_map(
 
     Returns:
         dict or tuple[dict, dict]:
-            ``{primary_pos: [secondary_pos, â€¦]}`` â€“ maps each primary asset's
+            ``{primary_pos: [secondary_pos, …]}`` – maps each primary asset's
             positional index to the list of secondary asset positional indices that
             fall within its Voronoi polygon.  Primary assets with no secondary assets
             in their polygon are omitted.
@@ -177,14 +177,14 @@ def build_voronoi_service_area_map(
         # Use centroid as anchor for fallback nearest/contains checks.
         point = sec_geom.centroid if hasattr(sec_geom, 'centroid') else sec_geom
 
-        # Step 1 â€“ bounding-box candidates from R-tree.
+        # Step 1 – bounding-box candidates from R-tree.
         candidate_labels = list(voronoi_sindex.intersection(sec_geom.bounds))
 
         best_label = None
         best_overlap_area = -1.0
         resolution_method = None
 
-        # Step 2a â€“ polygon/geometry overlap scoring.
+        # Step 2a – polygon/geometry overlap scoring.
         for vor_label in candidate_labels:
             record = voronoi_records.get(int(vor_label))
             if record is None:
@@ -203,7 +203,7 @@ def build_voronoi_service_area_map(
                 best_label = int(vor_label)
                 resolution_method = "overlap"
 
-        # Step 2b â€“ fallback to point-in-polygon if overlap did not resolve a match.
+        # Step 2b – fallback to point-in-polygon if overlap did not resolve a match.
         if best_label is None:
             point_candidate_labels = list(voronoi_sindex.intersection(point.bounds))
             for vor_label in point_candidate_labels:
@@ -218,7 +218,7 @@ def build_voronoi_service_area_map(
                     resolution_method = "point_in_polygon"
                     break
 
-        # Step 2c â€“ nearest-neighbour fallback to avoid unmatched assets.
+        # Step 2c – nearest-neighbour fallback to avoid unmatched assets.
         if best_label is None:
             nearest_label = None
             nearest_distance = float("inf")
