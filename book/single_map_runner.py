@@ -111,6 +111,8 @@ def build_model(inputs, config, graph_path, args, crew_ranges, steepness_ranges)
     names = [*COUNT_OUTCOMES, *list_societal_metric_names(
         all_functions=societal["all_functions"], pop_group_columns=societal["pop_group_columns"],
         reference_group=societal.get("reference_group", "total"),
+        capacity_groups=societal.get("capacity_groups"),
+        service_area_function_provider_types=societal.get("service_area_function_provider_types"),
     )]
     if return_periods([Path(m).stem for m in inputs["hazard_maps"]]) is not None:
         names += [f"annualised_{n}" for n in names]

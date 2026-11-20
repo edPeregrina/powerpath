@@ -87,11 +87,19 @@ def _road_islands(graph_path, hazard_column, threshold, l1, cache, kwargs):
         return cache[key]
 
     G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
-    edges, remove, _ = edge_removal(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
-    if l1 is not None and footprint is None:
+    if hazard_column == "__undisrupted__" and threshold == np.inf:
+        edges = list(
+            G.edges(keys=True, data=True) if G.is_multigraph()
+            else ((u, v, None, data) for u, v, data in G.edges(data=True))
+        )
+        remove = np.zeros(len(edges), dtype=bool)
+        labels = label_road_islands(G)
+    elif l1 is not None and footprint is None:
+        edges, remove, _ = edge_removal(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
         _, baseline = _road_islands(graph_path, hazard_column, threshold, None, cache, kwargs)
         labels = l1_node_islands(G, baseline, threshold, hazard_column, l1, **kwargs)
     else:
+        edges, remove, _ = edge_removal(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
         labels = label_road_islands(
             filter_hazard_graph(G, threshold, hazard_column, l1_area_geojson=l1, **kwargs)
         )
@@ -372,25 +380,72 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
     }
 
 
+def undisrupted_reference(state, graph_path, island_cache=None, **exemptions):
+    """``(asset island ids, roads)`` of the undisrupted network, the reference for provider counts.
+
+    Built once per extent (kept in ``state``); no hazard, so threshold is infinite.
+    """
+    if "capacity_reference_islands" not in state:
+        roads = island_road_sections(
+            graph_path, "__undisrupted__", np.inf, None, island_cache, **exemptions
+        )
+        by_rfid = dict(zip(roads["rfid"], roads["island_id"]))
+        access_rfids = state["undisrupted"][0]
+        ids = np.array([by_rfid.get(rfid, -1) for rfid in access_rfids], dtype=int)
+        state["capacity_reference_islands"] = (ids, roads)
+    return state["capacity_reference_islands"]
+
+
 def single_map_societal_metrics(societal_access_config, gdf_assets, outcome, island_ids, roads,
-                                road_state_key, map_name="map", allocation_cache=None, **overrides):
+                                road_state_key, map_name="map", allocation_cache=None, reference=None,
+                                graph_path=None, undisrupted=None, island_cache=None,
+                                **overrides):
     """Societal/population metrics for one map via the shared multi-map postprocessor.
 
     The map is one timestep (0); uses the outcome's ``operational`` (falls back to
-    ``intrinsic_operational``). Returns the flat metrics dict.
+    ``intrinsic_operational``). ``reference`` is ``(island_ids, roads, road_state_key)`` of the
+    undisrupted network: it is a preceding timestep that only sets the provider-count reference.
+    When omitted and capacity groups are enabled, build the reference from
+    ``graph_path`` without removing edges, using ``undisrupted`` attachments
+    if supplied. Returns the flat metrics dict.
     """
+    if reference is None and overrides.get("capacity_groups", societal_access_config.get("capacity_groups")):
+        if graph_path is None:
+            raise ValueError("graph_path is required to build the capacity reference when reference is omitted")
+        state = {
+            "undisrupted": (
+                undisrupted if undisrupted is not None
+                else undisrupted_state(gdf_assets, graph_path)
+            )
+        }
+        ref_ids, ref_roads = undisrupted_reference(state, graph_path, island_cache)
+        ref_key = (
+            create_island_cache_key("__undisrupted__", np.inf, get_asset_centroid_hash(gdf_assets))
+            + f"_graph{file_fingerprint(graph_path)}_capacity_reference_v1"
+        )
+        reference = (ref_ids, ref_roads, ref_key)
     detail = {
         "timestep": 0, "map": map_name, "road_state_key": road_state_key,
         "operational": np.asarray(outcome.get("operational", outcome["intrinsic_operational"])),
         "island_id": np.asarray(island_ids),
     }
+    details, summaries, islands = [detail], [{"timestep": 0, "map": map_name}], {road_state_key: roads}
+    if reference is not None:
+        ref_ids, ref_roads, ref_key = reference
+        details.insert(0, {
+            "timestep": -1, "map": "undisrupted", "road_state_key": ref_key,
+            "operational": np.ones(len(ref_ids), dtype=bool), "island_id": np.asarray(ref_ids),
+            "capacity_reference": True,
+        })
+        summaries.insert(0, {"timestep": -1, "map": "undisrupted"})
+        islands[ref_key] = ref_roads
     results, _ = postprocess_societal_access_from_config(
-        societal_access_config, summary_results=[{"timestep": 0, "map": map_name}],
-        detailed_results=[detail], gdf_assets=gdf_assets,
+        societal_access_config, summary_results=summaries,
+        detailed_results=details, gdf_assets=gdf_assets,
         allocation_cache={} if allocation_cache is None else allocation_cache,
-        islands_gdf_cache={road_state_key: roads}, **overrides,
+        islands_gdf_cache=islands, **overrides,
     )
-    return results[0]
+    return results[-1]
 
 
 RETURN_PERIOD_PATTERN = re.compile(r"RP[_-]?(\d+)", re.IGNORECASE)
@@ -510,7 +565,13 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
     asset_ids = np.arange(len(gdf_assets))
     allocation_cache = societal_access_config.get("allocation_cache")
     impact_map = repair_impact_map(repair_crew_assignment_method, asset_to_lu, asset_population_map)
-
+    reference = None
+    if societal_access_config.get("capacity_groups"):
+        exemptions = _road_exemption_kwargs(config)
+        ref_ids, ref_roads = undisrupted_reference(state, graph_path, island_cache, **exemptions)
+        reference = (ref_ids, ref_roads,
+                     create_island_cache_key("__undisrupted__", np.inf, asset_hash, exemptions=exemptions)
+                     + f"_graph{file_fingerprint(graph_path)}_capacity_reference_v1")
     names, per_map = [], []
     for counter, hazard_map in enumerate(hazard_maps):
         name = Path(hazard_map).stem
@@ -532,7 +593,7 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
                           + f"_graph{file_fingerprint(graph_path)}")
         metrics = single_map_societal_metrics(
             societal_access_config, gdf_assets, outcome, ids, roads, road_state_key, name,
-            allocation_cache,
+            allocation_cache, reference=reference,
         )
         metrics = {k: v for k, v in metrics.items()
                    if k != "timestep" and isinstance(v, (int, float, np.number))}

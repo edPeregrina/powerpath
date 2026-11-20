@@ -331,7 +331,7 @@ def _experiment_inputs(tmp_path, assets):
     maps = [HAZARD_DIR / f"Frag_timesteps_test{i}.tif" for i in (0, 2, 5)]
     return dict(
         gdf_assets=assets, hazard_maps=maps, config=config, graph_path=GRAPH,
-        societal_access_config=get_societal_access_config(config, pop, asset_types=["ls"]),
+        societal_access_config=get_societal_access_config(config, pop, asset_types=["ls", "hospital"]),
     )
 
 
@@ -343,12 +343,77 @@ def test_run_single_map_experiment(tmp_path, assets):
     )
     assert out["flooded_assets"].shape == (3,) and out["flooded_assets"].max() > 0
     assert any(k.startswith("societal_access_pct") for k in out)
+    assert "societal_capacity_retained_pct__hospital__elderly" in out
+    assert out["societal_capacity_retained_pct__hospital__total"].shape == (3,)
     assert not any(k.startswith("annualised_") for k in out)
     again = single_map.run_single_map_experiment(
         **inputs, seed=3, island_cache={}, hazard_extraction_cache={}, **levers
     )
     for key in out:
         np.testing.assert_array_equal(out[key], again[key])
+
+
+def test_single_map_builds_capacity_reference_from_unfiltered_graph(tmp_path):
+    import pickle
+
+    import networkx as nx
+    from pyproj import Transformer
+    from shapely.geometry import LineString, Point
+    from shapely.ops import transform
+
+    project = Transformer.from_crs("EPSG:28992", "EPSG:4326", always_xy=True).transform
+    graph = nx.Graph()
+    coords = {0: (100000, 450000), 1: (100100, 450000), 2: (100200, 450000),
+              3: (101000, 450000), 4: (101100, 450000)}
+    for node, xy in coords.items():
+        x, y = project(*xy)
+        graph.add_node(node, x=x, y=y)
+    for rfid, (u, v) in enumerate([(0, 1), (1, 2), (3, 4)]):
+        graph.add_edge(
+            u, v, rfid=rfid, length=100,
+            geometry=transform(project, LineString([coords[u], coords[v]])),
+            EV0_ma=1.0 if rfid == 1 else 0.0,
+        )
+    graph_path = tmp_path / "reference.p"
+    with graph_path.open("wb") as stream:
+        pickle.dump(graph, stream)
+    points = [Point(100050, 450000), Point(100150, 450000), Point(101050, 450000)]
+    assets = gpd.GeoDataFrame({"type": ["hospital"] * 3}, geometry=points, crs="EPSG:28992")
+    pop = gpd.GeoDataFrame(
+        {"cell_id": ["a", "b", "c"], "population": [10, 10, 10]},
+        geometry=[p.buffer(5) for p in points], crs=assets.crs,
+    )
+    attachments = single_map.undisrupted_state(assets, graph_path)
+    ref_ids, ref_roads = single_map.undisrupted_reference(
+        {"undisrupted": attachments}, graph_path
+    )
+    assert set(ref_roads["rfid"]) == {0, 1, 2}
+    assert ref_ids[0] == ref_ids[1] != ref_ids[2]
+    roads = single_map.island_road_sections(graph_path, "EV0_ma", 0.2)
+    by_rfid = dict(zip(roads["rfid"], roads["island_id"]))
+    ids = np.array([by_rfid.get(rfid, -1) for rfid in attachments[0]])
+    cfg = {
+        "pop_grid_gdf": pop, "cell_id_column": "cell_id",
+        "pop_group_columns": {"total": "population"}, "capacity_groups": ["total"],
+        "taxonomy": {"hospital": "hospital"}, "all_functions": ["hospital"],
+        "service_area_function_provider_types": {},
+    }
+    outcome = {"intrinsic_operational": np.array([True, False, True])}
+    explicit = single_map.single_map_societal_metrics(
+        cfg, assets, outcome, ids, roads, "current",
+        reference=(ref_ids, ref_roads, "reference"),
+    )
+    automatic = single_map.single_map_societal_metrics(
+        cfg, assets, outcome, ids, roads, "current", graph_path=graph_path,
+    )
+    assert automatic["societal_mean_providers_reference__hospital__total"] == pytest.approx(5 / 3)
+    assert automatic["societal_mean_providers__hospital__total"] == pytest.approx(1)
+    assert automatic["societal_capacity_retained_pct__hospital__total"] == 60
+    for key in ("societal_mean_providers_reference__hospital__total",
+                "societal_mean_providers__hospital__total", "societal_capacity_retained_pct__hospital__total"):
+        assert automatic[key] == explicit[key]
+    with graph_path.open("rb") as stream:
+        assert pickle.load(stream).number_of_edges() == 3
 
 
 def test_single_map_trace_and_island_report(tmp_path, assets):

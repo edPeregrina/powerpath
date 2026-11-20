@@ -551,6 +551,8 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
             all_functions=societal_access_config["all_functions"],
             pop_group_columns=societal_access_config["pop_group_columns"],
             reference_group=societal_access_config.get("reference_group", "total"),
+            capacity_groups=societal_access_config.get("capacity_groups"),
+            service_area_function_provider_types=societal_access_config.get("service_area_function_provider_types"),
         )
     )
     model.outcomes = outcomes_list

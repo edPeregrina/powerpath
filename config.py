@@ -93,6 +93,7 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         "cell_id_column": cell_id_column,
         "pop_group_columns": service_node_config["population_groups"],
         "reference_group": service_node_config["reference_group"],
+        "capacity_groups": service_node_config["capacity_groups"],
         "taxonomy": taxonomy,
         "asset_type_column": "type",
         "all_functions": sorted(set(taxonomy.values())),
@@ -281,6 +282,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 'working_age': 'aantal_inwoners_25_tot_45_jaar',
             },
             'reference_group': 'total',
+            # Groups for which provider-count (capacity) metrics are emitted; labels from population_groups.
+            'capacity_groups': ('total', 'elderly'),
         },
 
         'dependency_parameters': {

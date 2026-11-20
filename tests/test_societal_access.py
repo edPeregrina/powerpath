@@ -2207,3 +2207,210 @@ def test_worker_shared_backend_reuses_backend_for_equivalent_configs(tmp_path):
 
     with simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_LOCK:
         assert len(simulation_module._WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS) == 1
+
+
+def _capacity_inputs():
+    """Island 1: 3 hospitals, 5 elderly of 50; island 2: 2 hospitals, 6 elderly of 30."""
+    pop = _make_population_gdf().iloc[1:3].copy()
+    pop["aantal_inwoners_65_jaar_en_ouder"] = [5, 6]
+    allocation_df = build_origin_island_allocations(
+        pop, cell_id_column="cell_id", islands_gdf=_make_islands_gdf(),
+        nearest_max_distance=2.0, road_state_key="0",
+    )
+    assets = gpd.GeoDataFrame(
+        {"type": ["hospital"] * 5}, geometry=[Point(1, 1)] * 5, crs="EPSG:28992"
+    )
+    kwargs = dict(
+        gdf_assets=assets, pop_grid_gdf=pop, cell_id_column="cell_id",
+        allocation_cache={"k": allocation_df}, all_functions=["hospital", "education"],
+        nearest_max_distance=2.0, capacity_groups=["total", "elderly"],
+    )
+    islands = np.array([1, 1, 1, 2, 2])
+
+    def detail(ts, operational):
+        return {"timestep": ts, "map": ts, "road_state_key": "0",
+                "operational": np.array(operational), "island_id": islands}
+
+    return kwargs, detail
+
+
+def test_capacity_metrics_count_operational_providers_per_person():
+    kwargs, detail = _capacity_inputs()
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0}, {"timestep": 1}],
+        detailed_results=[detail(0, [True] * 5), detail(1, [True, True, False, False, False])],
+        **kwargs,
+    )
+    first, second = rows
+    assert first["societal_capacity_retained_pct__hospital__total"] == pytest.approx(100.0)
+    assert first["societal_mean_providers__hospital__total"] == pytest.approx((50 * 3 + 30 * 2) / 80)
+    assert second["societal_mean_providers_reference__hospital__total"] == pytest.approx(210 / 80)
+    assert second["societal_mean_providers__hospital__total"] == pytest.approx(100 / 80)
+    assert second["societal_capacity_retained_pct__hospital__total"] == pytest.approx(47.62, abs=0.01)
+    # groups sit on different islands: elderly weights island 2 more heavily
+    assert second["societal_mean_providers_reference__hospital__elderly"] == pytest.approx(27 / 11)
+    assert second["societal_mean_providers__hospital__elderly"] == pytest.approx(10 / 11)
+    # island 2 lost all hospitals, so the binary access share equals island 1's population share
+    assert second["societal_access_pct__hospital__total"] == pytest.approx(62.5)
+    # a function without providers has no reference, so no retained %
+    assert math.isnan(second["societal_capacity_retained_pct__education__total"])
+    assert "societal_mean_providers__hospital__children" not in second
+
+
+def test_capacity_reference_timestep_sets_undisrupted_counts_and_emits_nothing():
+    kwargs, detail = _capacity_inputs()
+    reference = {**detail(-1, [True] * 5), "capacity_reference": True}
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": -1}, {"timestep": 0}],
+        detailed_results=[reference, detail(0, [True, False, False, False, False])],
+        **kwargs,
+    )
+    assert "societal_mean_providers__hospital__total" not in rows[0]
+    assert rows[1]["societal_capacity_retained_pct__hospital__total"] == pytest.approx(
+        100 * (50 * 1) / (50 * 3 + 30 * 2), abs=0.01
+    )
+
+
+def test_capacity_metric_names_follow_groups_and_skip_service_area_functions():
+    names = list_societal_metric_names(
+        all_functions=["hospital", "electricity"], pop_group_columns={"total": "a", "elderly": "b"},
+        capacity_groups=["elderly"],
+        service_area_function_provider_types={"electricity": {"method": "simple_voronoi"}},
+    )
+    assert "societal_capacity_retained_pct__hospital__elderly" in names
+    assert not any("electricity" in n and "providers" in n for n in names)
+    assert not any(n.endswith("__hospital__total") and "providers" in n for n in names)
+
+
+def test_capacity_groups_must_be_population_groups():
+    kwargs, detail = _capacity_inputs()
+    kwargs["capacity_groups"] = ["nonsense"]
+    with pytest.raises(ValueError):
+        postprocess_societal_access_results(
+            summary_results=[{"timestep": 0}], detailed_results=[detail(0, [True] * 5)], **kwargs
+        )
+
+
+def test_capacity_reference_stays_fixed_when_one_island_splits():
+    kwargs, _ = _capacity_inputs()
+    kwargs["gdf_assets"] = gpd.GeoDataFrame(
+        {"type": ["hospital"] * 10}, geometry=[Point(1, 1)] * 10, crs="EPSG:28992"
+    )
+    reference_roads = gpd.GeoDataFrame(
+        {"island_id": [0]}, geometry=[box(0, 0, 20, 10)], crs="EPSG:28992"
+    )
+    kwargs["allocation_cache"]["reference"] = build_origin_island_allocations(
+        kwargs["pop_grid_gdf"], "cell_id", reference_roads,
+        nearest_max_distance=2.0, road_state_key="reference",
+    )
+    reference = {
+        "timestep": -1, "road_state_key": "reference", "capacity_reference": True,
+        "operational": np.ones(10, dtype=bool), "island_id": np.zeros(10, dtype=int),
+    }
+    current = {
+        "timestep": 0, "road_state_key": "0", "island_id": np.array([1] * 4 + [2] * 6),
+        "operational": np.array([True] * 3 + [False] + [True] * 4 + [False] * 2),
+    }
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": -1}, {"timestep": 0}],
+        detailed_results=[reference, current], **kwargs,
+    )
+    row = rows[-1]
+    assert row["societal_mean_providers_reference__hospital__total"] == 10
+    assert row["societal_mean_providers_reference__hospital__elderly"] == 10
+    assert row["societal_mean_providers__hospital__total"] == pytest.approx(270 / 80)
+    assert row["societal_mean_providers__hospital__elderly"] == pytest.approx(39 / 11)
+    assert row["societal_capacity_retained_pct__hospital__total"] == 33.75
+    assert row["societal_access_pct__hospital__total"] == 100
+
+
+@pytest.mark.parametrize("missing", ["detail", "allocation"])
+def test_capacity_missing_initial_state_does_not_select_later_reference(missing):
+    kwargs, detail = _capacity_inputs()
+    first = detail(0, [True] * 5)
+    if missing == "allocation":
+        first["road_state_key"] = "absent"
+    details = [detail(1, [True] * 5)]
+    if missing != "detail":
+        details.insert(0, first)
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0}, {"timestep": 1}],
+        detailed_results=details, **kwargs,
+    )
+    assert math.isnan(rows[0]["societal_mean_providers__hospital__total"])
+    assert rows[1]["societal_mean_providers__hospital__total"] == pytest.approx(210 / 80)
+    assert math.isnan(rows[1]["societal_mean_providers_reference__hospital__total"])
+    assert math.isnan(rows[1]["societal_capacity_retained_pct__hospital__total"])
+
+
+def test_capacity_disrupted_initial_state_warns_and_keeps_initial_reference():
+    kwargs, detail = _capacity_inputs()
+    first = detail(0, [True, False, True, True, True])
+    first["flooded"] = np.array([0, 1, 0, 0, 0])
+    with pytest.warns(RuntimeWarning, match="initial state, which is already disrupted"):
+        rows, _ = postprocess_societal_access_results(
+            summary_results=[{"timestep": 0}], detailed_results=[first], **kwargs,
+        )
+    assert rows[0]["societal_mean_providers_reference__hospital__total"] == pytest.approx(210 / 80)
+    assert rows[0]["societal_mean_providers__hospital__total"] == pytest.approx(160 / 80)
+
+
+def test_capacity_group_expansion_and_electricity_exclusion_are_config_driven():
+    kwargs, detail = _capacity_inputs()
+    kwargs["capacity_groups"] = ["children"]
+    kwargs["all_functions"] = ["hospital", "electricity"]
+    kwargs["service_area_function_provider_types"] = {}
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0}], detailed_results=[detail(0, [True] * 5)], **kwargs,
+    )
+    row = rows[0]
+    assert row["societal_mean_providers__hospital__children"] == pytest.approx(40 / 15)
+    assert not any("providers" in name and "electricity" in name for name in row)
+    for service_area in (None, {}):
+        names = list_societal_metric_names(
+            kwargs["all_functions"], POPULATION_GROUP_COLUMNS,
+            capacity_groups=["children"], service_area_function_provider_types=service_area,
+        )
+        assert "societal_mean_providers__hospital__children" in names
+        assert not any("capacity_retained" in name and "electricity" in name for name in names)
+        assert not any("providers" in name and "electricity" in name for name in names)
+
+
+def test_capacity_fields_are_computed_on_warm_cache_hits_without_changing_cached_fields():
+    class Cache:
+        def __init__(self):
+            self.data = {}
+
+        def get(self, key):
+            return self.data.get(key)
+
+        def set_if_absent(self, key, value):
+            if key in self.data:
+                return False
+            self.data[key] = value
+            return True
+
+    kwargs, detail = _capacity_inputs()
+    cache = Cache()
+    kwargs["shared_realized_state_cache"] = cache
+    current = detail(0, [True, True, False, False, False])
+    kwargs["capacity_groups"] = []
+    baseline, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0}], detailed_results=[current], **kwargs,
+    )
+    cached_before = {key: dict(value) for key, value in cache.data.items()}
+    assert cached_before
+    kwargs["capacity_groups"] = ["total", "elderly"]
+    telemetry = {}
+    rows, _ = postprocess_societal_access_results(
+        summary_results=[{"timestep": 0}, {"timestep": 1}],
+        detailed_results=[current, {**current, "timestep": 1}],
+        cache_telemetry=telemetry, **kwargs,
+    )
+    assert telemetry["shared_hits"] == 1
+    assert telemetry["local_hits"] == 1
+    assert cache.data == cached_before
+    for key, value in baseline[0].items():
+        assert rows[0][key] == value or (isinstance(value, float) and math.isnan(value) and math.isnan(rows[0][key]))
+    assert rows[0]["societal_mean_providers__hospital__total"] == pytest.approx(100 / 80)
+    assert rows[1]["societal_mean_providers__hospital__total"] == pytest.approx(100 / 80)

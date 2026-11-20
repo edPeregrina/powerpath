@@ -635,6 +635,8 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
             all_functions=all_functions,
             pop_group_columns=pop_group_columns,
             reference_group=reference_group,
+            capacity_groups=societal_access_config.get('capacity_groups'),
+            service_area_function_provider_types=societal_access_config.get('service_area_function_provider_types'),
         )
 
     def _get_metric_value(ts, metric, summary_to_metric, count_to_binary):
