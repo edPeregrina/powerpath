@@ -62,6 +62,7 @@ import hashlib
 import pickle
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
@@ -76,7 +77,7 @@ from ema_workbench.util.utilities import load_results  # noqa: E402
 
 DEFAULT_RESULTS_PATH = Path(
     r"C:\repos\powerpath\powerpath\data\output\output_hazard_maps_ZH_Delfland\ema_exports"
-    r"\ema_results_1793979616_full_extent_adaptation.tar.gz"
+    r"\ema_results_1795188877_full_extent_adaptation.tar.gz"
 )
 CACHE_DIR = REPO_ROOT / "data" / "interim" / "paper_figures_group_equity_cache"
 FIG_DIR = REPO_ROOT / "data" / "output" / "paper_figures_group_equity"
@@ -231,6 +232,9 @@ def build_metric_frame(
     - ``equity_abs_gap``: event-average ``societal_equity_absolute_gap``
       (= total_access_pct - group_access_pct; positive => group worse off
       than the total population), NaN for the reference group itself.
+    - ``capacity_retained_pct``: event-average ``societal_capacity_retained_pct``
+      (operational providers reachable per person, % of the initial state);
+      NaN where the archive has no capacity metric (e.g. electricity).
 
     Also appends a synthetic ``function == "all_functions"`` block (simple
     mean across the available functions) for the cross-function benefit
@@ -246,16 +250,21 @@ def build_metric_frame(
     per_function_access = {}
     per_function_people_days = {}
     per_function_abs_gap = {}
+    per_function_capacity = {}
 
     for func in functions:
         access_pct = np.full((n, len(groups)), np.nan)
         people_days = np.full((n, len(groups)), np.nan)
         abs_gap = np.full((n, len(groups)), np.nan)
+        capacity = np.full((n, len(groups)), np.nan)
         for gi, group in enumerate(groups):
             access_key = f"societal_access_pct__{func}__{group}"
             no_access_key = f"societal_no_access_population__{func}__{group}"
+            capacity_key = f"societal_capacity_retained_pct__{func}__{group}"
             if access_key in outcomes:
                 access_pct[:, gi] = np.nanmean(outcomes[access_key], axis=1)
+            if capacity_key in outcomes:
+                capacity[:, gi] = np.nanmean(outcomes[capacity_key], axis=1)
             if no_access_key in outcomes:
                 people_days[:, gi] = (
                     np.nansum(outcomes[no_access_key], axis=1) * HOURS_PER_TIMESTEP / 24.0
@@ -268,6 +277,7 @@ def build_metric_frame(
         per_function_access[func] = access_pct
         per_function_people_days[func] = people_days
         per_function_abs_gap[func] = abs_gap
+        per_function_capacity[func] = capacity
 
         for gi, group in enumerate(groups):
             frames.append(pd.DataFrame({
@@ -277,6 +287,7 @@ def build_metric_frame(
                 "mean_access_pct": access_pct[:, gi],
                 "people_days_no_access": people_days[:, gi],
                 "equity_abs_gap": abs_gap[:, gi],
+                "capacity_retained_pct": capacity[:, gi],
             }))
 
     # Synthetic cross-function aggregate (unweighted mean of access_pct
@@ -284,6 +295,9 @@ def build_metric_frame(
     stacked_access = np.nanmean(np.stack([per_function_access[f] for f in functions], axis=0), axis=0)
     stacked_people_days = np.nansum(np.stack([per_function_people_days[f] for f in functions], axis=0), axis=0)
     stacked_abs_gap = np.nanmean(np.stack([per_function_abs_gap[f] for f in functions], axis=0), axis=0)
+    with warnings.catch_warnings():  # all-NaN where no function has a capacity metric
+        warnings.simplefilter("ignore", RuntimeWarning)
+        stacked_capacity = np.nanmean(np.stack([per_function_capacity[f] for f in functions], axis=0), axis=0)
     for gi, group in enumerate(groups):
         frames.append(pd.DataFrame({
             **base_cols,
@@ -292,6 +306,7 @@ def build_metric_frame(
             "mean_access_pct": stacked_access[:, gi],
             "people_days_no_access": stacked_people_days[:, gi],
             "equity_abs_gap": stacked_abs_gap[:, gi],
+            "capacity_retained_pct": stacked_capacity[:, gi],
         }))
 
     metric_df = pd.concat(frames, ignore_index=True)
@@ -302,41 +317,78 @@ def build_metric_frame(
 # --------------------------------------------------------------------------
 # Figure 2 -- population-group differences in loss of access
 # --------------------------------------------------------------------------
+def _median_bars(ax, df: pd.DataFrame, func_order: Sequence[str], value_col: str,
+                 groups: Sequence[str] = (REFERENCE_GROUP,)) -> None:
+    """Median bars with p05-p95 whiskers per function (grouped side by side
+    when several population groups are given); functions without data are marked n/a."""
+    x = np.arange(len(func_order))
+    width = 0.6 / len(groups)
+    labelled = set()
+    for xi, f in enumerate(func_order):
+        any_data = False
+        for gi, group in enumerate(groups):
+            values = df.loc[(df["function"] == f) & (df["population_group"] == group), value_col].dropna()
+            if values.empty:
+                continue
+            any_data = True
+            xpos = xi + gi * width - 0.3 + width / 2
+            med = values.median()
+            ax.bar(xpos, med, color=GROUP_COLORS.get(group, None), width=width,
+                   label=None if group in labelled else GROUP_LABELS.get(group, group))
+            labelled.add(group)
+            ax.errorbar(xpos, med, yerr=[[med - values.quantile(0.05)], [values.quantile(0.95) - med]],
+                        fmt="none", ecolor="black", capsize=3, linewidth=1.2)
+        if not any_data:
+            ax.text(xi, 0, "n/a", ha="center", va="bottom", fontsize=11, color="grey")
+    ax.set_xticks(x)
+    ax.set_xlim(-0.5, len(func_order) - 0.5)
+    ax.set_xticklabels([FUNCTION_LABELS.get(f, f) for f in func_order], rotation=35, ha="right")
+
+
 def figure2_loss_of_access(metric_df: pd.DataFrame, baseline_policy: str, functions: Sequence[str],
                             groups: Sequence[str], fig_dir: Path) -> None:
     """3.1 -- who loses access? Baseline (no-adaptation) policy only.
 
     (a) Overall disruption by asset type (total population).
-    (b) Same metric broken down by population group (do losses differ?).
-    (c) Equity gap by function/group (where are the biggest differences?).
+    (b) Loss of provider capacity by asset type, per population group with
+        capacity metrics (``capacity_groups`` in config): how many
+        operational providers each person can still reach, relative to the
+        initial state -- disruption that (a) misses when people keep access
+        to at least one provider.
+    (c) Loss of access broken down by population group (do losses differ?).
+    (d) Equity gap by function/group (where are the biggest differences?).
     """
     base = metric_df[(metric_df["policy"] == baseline_policy) & (metric_df["function"] != "all_functions")]
     base = base.copy()
     base["loss_pct"] = 100.0 - base["mean_access_pct"]
+    base["capacity_loss_pct"] = 100.0 - base["capacity_retained_pct"]
+    n_scenarios = base["scenario"].nunique()
 
     func_order = sorted(functions, key=lambda f: -base.loc[
         (base["function"] == f) & (base["population_group"] == REFERENCE_GROUP), "loss_pct"
     ].median())
 
-    fig, axes = plt.subplots(1, 3, figsize=(22, 9), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 15), constrained_layout=True)
+    totals = base[base["population_group"] == REFERENCE_GROUP]
+    x = np.arange(len(func_order))
 
     # (a) overall disruption by asset type -- total population only
-    ax = axes[0]
-    totals = base[base["population_group"] == REFERENCE_GROUP]
-    medians = [totals.loc[totals["function"] == f, "loss_pct"].median() for f in func_order]
-    lo = [totals.loc[totals["function"] == f, "loss_pct"].quantile(0.05) for f in func_order]
-    hi = [totals.loc[totals["function"] == f, "loss_pct"].quantile(0.95) for f in func_order]
-    x = np.arange(len(func_order))
-    ax.bar(x, medians, color=GROUP_COLORS["total"], width=0.6)
-    ax.errorbar(x, medians, yerr=[np.array(medians) - lo, np.array(hi) - medians],
-                fmt="none", ecolor="black", capsize=4, linewidth=1.2)
-    ax.set_xticks(x)
-    ax.set_xticklabels([FUNCTION_LABELS.get(f, f) for f in func_order], rotation=35, ha="right")
+    ax = axes[0, 0]
+    _median_bars(ax, totals, func_order, "loss_pct")
     ax.set_ylabel("Mean loss of access (%)")
-    ax.set_title("(a) Overall disruption by societal function")
+    ax.set_title("(a) Overall loss of access by societal function")
 
-    # (b) broken down by population group
-    ax = axes[1]
+    # (b) loss of provider capacity -- groups with capacity metrics only
+    ax = axes[0, 1]
+    capacity_groups = [g for g in groups if base.loc[base["population_group"] == g, "capacity_loss_pct"].notna().any()]
+    _median_bars(ax, base, func_order, "capacity_loss_pct", capacity_groups or [REFERENCE_GROUP])
+    ax.set_ylabel("Mean loss of reachable providers per person (%)")
+    ax.set_title("(b) Loss of provider capacity by population group")
+    if len(capacity_groups) > 1:
+        ax.legend(loc="upper right", fontsize=11)
+
+    # (c) broken down by population group
+    ax = axes[1, 0]
     width = 0.8 / len(groups)
     for gi, group in enumerate(groups):
         sub = base[base["population_group"] == group]
@@ -346,11 +398,11 @@ def figure2_loss_of_access(metric_df: pd.DataFrame, baseline_policy: str, functi
     ax.set_xticks(x)
     ax.set_xticklabels([FUNCTION_LABELS.get(f, f) for f in func_order], rotation=35, ha="right")
     ax.set_ylabel("Mean loss of access (%)")
-    ax.set_title("(b) Loss of access by population group")
+    ax.set_title("(c) Loss of access by population group")
     ax.legend(loc="upper right", fontsize=11)
 
-    # (c) equity gap -- pinpoint biggest group differences
-    ax = axes[2]
+    # (d) equity gap -- pinpoint biggest group differences
+    ax = axes[1, 1]
     non_ref_groups = [g for g in groups if g != REFERENCE_GROUP]
     gap_rows = []
     for f in func_order:
@@ -369,30 +421,36 @@ def figure2_loss_of_access(metric_df: pd.DataFrame, baseline_policy: str, functi
     ax.invert_yaxis()
     ax.axvline(0, color="black", linewidth=0.8)
     ax.set_xlabel("Equity gap (total % access - group % access)")
-    ax.set_title("(c) Where the biggest group differences lie")
+    ax.set_title("(d) Where the biggest group differences lie")
 
     fig.suptitle(
         f"Figure 2. Population-group-specific loss of access to societal functions during\n"
-        f"pluvial flooding (baseline policy: {baseline_policy}, n=100 scenarios)",
+        f"pluvial flooding (baseline policy: {baseline_policy}, n={n_scenarios} scenarios)",
         fontsize=15,
     )
     fig_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(fig_dir / "figure2_loss_of_access.png")
     plt.close(fig)
 
-    # Underlying stats: median/p05/p95 loss (panels a/b) and median equity
-    # gap (panel c), one row per function x population group.
+    # Underlying stats: median/p05/p95 loss (panels a/c), capacity loss
+    # (panel b) and median equity gap (panel d), one row per function x
+    # population group.
     stats_rows = []
     for f in func_order:
         for g in groups:
-            sub = base.loc[(base["function"] == f) & (base["population_group"] == g), "loss_pct"]
-            gap_sub = base.loc[(base["function"] == f) & (base["population_group"] == g), "equity_abs_gap"]
+            sel = (base["function"] == f) & (base["population_group"] == g)
+            sub = base.loc[sel, "loss_pct"]
+            cap_sub = base.loc[sel, "capacity_loss_pct"]
+            gap_sub = base.loc[sel, "equity_abs_gap"]
             stats_rows.append({
                 "function": f,
                 "population_group": g,
                 "loss_pct_median": sub.median(),
                 "loss_pct_p05": sub.quantile(0.05),
                 "loss_pct_p95": sub.quantile(0.95),
+                "capacity_loss_pct_median": cap_sub.median(),
+                "capacity_loss_pct_p05": cap_sub.quantile(0.05),
+                "capacity_loss_pct_p95": cap_sub.quantile(0.95),
                 "equity_abs_gap_median": gap_sub.median() if g != REFERENCE_GROUP else np.nan,
                 "n_scenarios": sub.shape[0],
             })
@@ -449,7 +507,8 @@ def figure3_adaptation_benefits(benefit_df: pd.DataFrame, groups: Sequence[str],
 
     fig.suptitle(
         "Figure 3. Population-group-specific access benefits of adaptation measures\n"
-        "(all 168 adaptation policies x 100 scenarios; distributions by category)",
+        f"(all {benefit_df['policy'].nunique()} adaptation policies x {benefit_df['scenario'].nunique()} "
+        "scenarios; distributions by category)",
         fontsize=15,
     )
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -555,7 +614,7 @@ def figure4_preference_consequences(benefit_df: pd.DataFrame, groups: Sequence[s
     ax.invert_yaxis()
     ax.yaxis.tick_right()
     ax.yaxis.set_label_position("right")
-    ax.set_ylabel("Rank (1 = best, among all 168 adaptation policies)")
+    ax.set_ylabel(f"Rank (1 = best, among all {len(ranks)} adaptation policies)")
     ax.set_title(
         "Figure 4. Influence of beneficiary differentiation on adaptation preference\n"
         f"(union of each group's top-{top_n} policies, ranked on cross-function access benefit)"
@@ -642,7 +701,7 @@ def main() -> None:
     print("Building Figure 2 (loss of access)...")
     figure2_loss_of_access(metric_df, baseline_policy, functions, groups, FIG_DIR)
 
-    print("Computing paired adaptation benefits (all 168 policies)...")
+    print("Computing paired adaptation benefits (all adaptation policies)...")
     benefit_df = compute_benefit_frame(metric_df, baseline_policy)
 
     print("Building Figure 3 (adaptation benefits by group)...")
