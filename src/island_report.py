@@ -77,6 +77,16 @@ def write_island_report(out_dir, stem, roads, island_ids, operational, asset_pop
             island_ids, operational = np.asarray(island_ids)[inside], np.asarray(operational)[inside]
             if asset_population is not None:
                 asset_population = np.asarray(asset_population)[inside]
+    roads_path = write_road_islands(out_dir, stem, roads, depth_by_rfid)
+    table_path = out_dir / f"{stem}_island_distribution.csv"
+    island_distribution(roads, island_ids, operational, asset_population).to_csv(table_path, index=False)
+    return roads_path, table_path
+
+
+def write_road_islands(out_dir, stem, roads, depth_by_rfid=None):
+    """Write ``<stem>_road_islands.parquet``: road centrelines with their island (GIS-ready)."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     sections = roads.copy()
     if "original_geometry" in sections:  # export the centrelines; the buffers only serve asset matching
         sections["geometry"] = gpd.GeoSeries(sections["original_geometry"], crs=roads.crs)
@@ -85,6 +95,4 @@ def write_island_report(out_dir, stem, roads, island_ids, operational, asset_pop
         sections["peak_depth_m"] = sections["rfid"].map(depth_by_rfid)
     roads_path = out_dir / f"{stem}_road_islands.parquet"
     sections.to_parquet(roads_path)
-    table_path = out_dir / f"{stem}_island_distribution.csv"
-    island_distribution(roads, island_ids, operational, asset_population).to_csv(table_path, index=False)
-    return roads_path, table_path
+    return roads_path

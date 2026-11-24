@@ -115,6 +115,19 @@ def _get_active_adaptation(adaptation, active_timesteps, timestep):
     return None
 
 
+def island_state_key(gdf_assets, hazard_column, flood_threshold, l1_area_geojson, l1_active_timesteps,
+                     timestep, config):
+    """Island-cache key of the road state at ``timestep``, as the simulation builds it."""
+    return create_island_cache_key(
+        hazard_column,
+        flood_threshold,
+        get_asset_centroid_hash(gdf_assets),
+        l1_area_geojson=_get_active_adaptation(l1_area_geojson, l1_active_timesteps, timestep),
+        l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(config),
+    )
+
+
 class SimulationState:
     def __init__(self, gdf_assets, num_assets):
         self.previous_map_counter = None
@@ -301,18 +314,12 @@ def _update_hazard_map_states(
     # Island-based crew management
     if 'island' in repair_crew_assignment_method:
         assert isinstance(available_repair_crews, dict), f"Island method requires dict of recpair crews at this point, got {type(available_repair_crews)}"
-        asset_hash = get_asset_centroid_hash(temp_gdf)
         previous_road_state_key = state.road_state_key
         active_l1_area_geojson = _get_active_adaptation(
             l1_area_geojson, l1_active_timesteps, timestep
         )
-        cache_key = create_island_cache_key(
-            haz_col_str, 
-            flood_threshold, 
-            asset_hash,
-            l1_area_geojson=active_l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps,
-            exemptions=_road_exemption_kwargs(_config),
+        cache_key = island_state_key(
+            temp_gdf, haz_col_str, flood_threshold, l1_area_geojson, l1_active_timesteps, timestep, _config,
         )
         state.road_state_key = cache_key
         try:
