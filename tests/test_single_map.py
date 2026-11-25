@@ -413,6 +413,15 @@ def test_run_single_map_experiment(tmp_path, assets):
         np.testing.assert_array_equal(out[key], again[key])
 
 
+def test_run_single_map_experiment_rejects_non_island_method(tmp_path, assets):
+    inputs = _experiment_inputs(tmp_path, assets)
+    with pytest.raises(ValueError, match="island-based"):
+        single_map.run_single_map_experiment(
+            **inputs, repair_crew_assignment_method="population impacts",
+            island_cache={}, hazard_extraction_cache={},
+        )
+
+
 def test_single_map_builds_capacity_reference_from_unfiltered_graph(tmp_path):
     import pickle
 

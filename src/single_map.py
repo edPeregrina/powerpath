@@ -595,7 +595,7 @@ def single_map_monetary_rate(operational, asset_ids, asset_to_lu):
 
 def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, societal_access_config,
                               flood_threshold=0.2, seed=0, l1_area_geojson=None, l2_asset_geojson=None,
-                              repair_crew_assignment_method="random", island_cache=None,
+                              repair_crew_assignment_method="islands", island_cache=None,
                               hazard_extraction_cache=None, asset_to_lu=None, asset_population_map=None,
                               capture=None, **kwargs):
     """EMA model function: every map of one experiment (scenario x policy), independent of each other.
@@ -607,7 +607,16 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
     :func:`return_periods`), each outcome also gets an ``annualised_`` counterpart.
     ``capture`` (a list) receives one dict per map (``map``, ``column``,
     ``hazard_value``, ``outcome``, ``roads``) for spatial-trace export.
+
+    Only island-based crew methods are supported: single-map always assigns crews and
+    access per road island, whereas multi-map's non-island methods use one global crew
+    pool and flat connectivity.
     """
+    if "island" not in str(repair_crew_assignment_method):
+        raise ValueError(
+            f"Single-map supports only island-based repair crew methods, got "
+            f"{repair_crew_assignment_method!r} (e.g. use 'population impacts islands')."
+        )
     combine_per_type_crew_kwargs(kwargs)
     combine_per_type_fragility_steepness_kwargs(kwargs)
     n_crews = kwargs.get("number_repair_crews", 1)

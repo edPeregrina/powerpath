@@ -90,6 +90,8 @@ def parse_args():
     args = parser.parse_args()
     if args.dev_config and args.hazard_dir:
         parser.error("--dev-config uses the bundled hazard maps; drop --hazard-dir or --dev-config")
+    if "island" not in args.repair_priority:
+        parser.error("single-map supports only island-based --repair-priority methods")
     args.adaptation_active_timesteps = 1  # policies carry it, single-map has no timesteps
     return args
 
