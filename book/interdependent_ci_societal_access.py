@@ -318,18 +318,24 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
 
 
 def write_multi_map_road_islands(trace_dir, stem, gdf_assets, config, island_cache, policy, timestep,
-                                 major_timestep, threshold):
+                                 major_timestep, threshold, repair_crew_assignment_method):
     """``<stem>_road_islands.parquet`` for one timestep of a trace, with the island labels the
-    simulation used (read from its island cache). Returns the path, or None on a cache miss."""
+    simulation used (read from its island cache). Returns the path, or None on a cache miss.
+
+    Islands are only built at map loads, so the column, active L1 and cache key come from the
+    load timestep. Non-island crew methods use flat connectivity, so nothing is written."""
     from src.island_analysis import _road_exemption_kwargs
     from src.island_report import write_road_islands
     from src.road_islands import compute_island_geodataframe_from_graph
     from src.simulation import _get_active_adaptation, island_state_key
     from src.single_map import road_peak_depths
 
+    if "island" not in repair_crew_assignment_method:
+        return None
+    loaded_timestep = int(timestep // major_timestep) * major_timestep
     column = f"EV{int(timestep // major_timestep)}_ma"
     l1, l1_active = policy.get("l1_area_geojson"), policy.get("l1_active_timesteps")
-    key = island_state_key(gdf_assets, column, threshold, l1, l1_active, timestep, config)
+    key = island_state_key(gdf_assets, column, threshold, l1, l1_active, loaded_timestep, config)
     entry = (island_cache or {}).get(key)
     if entry is None:
         LOGGER.warning("No island cache entry for %s at t=%s; skipping road islands.", policy.name, timestep)
@@ -337,7 +343,7 @@ def write_multi_map_road_islands(trace_dir, stem, gdf_assets, config, island_cac
     graph_path = Path(config["hazard_dir"]).parent / "static" / "output_graph" / "base_graph_hazard_editted.p"
     roads = compute_island_geodataframe_from_graph(
         graph_path, hazard_threshold=threshold, hazard_column=column, buffer_distance=20,
-        l1_area_geojson=_get_active_adaptation(l1, l1_active, timestep), **_road_exemption_kwargs(config),
+        l1_area_geojson=_get_active_adaptation(l1, l1_active, loaded_timestep), **_road_exemption_kwargs(config),
     )
     rfids_islands = entry["rfids_islands"]
     keep = [c for c in ("rfid", "island_id", "length_m", "island_size_km", "original_geometry", "geometry")
@@ -484,6 +490,7 @@ def run_spatial_trace(
             write_multi_map_road_islands(
                 trace_dir, f"{trace_path.stem}_day{int(t) // 24}", gdf_assets_combined, config_combined,
                 caches.get("island_cache"), policy, int(t), args.major_timestep, args.flood_threshold,
+                args.repair_priority,
             )
 
     road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
