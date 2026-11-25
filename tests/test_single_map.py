@@ -647,6 +647,17 @@ def test_concurrent_graph_builds_overlay_once(tmp_path, monkeypatch):
     assert not list(paths[0].parent.glob("build.lock"))
 
 
+def test_extent_state_keyed_on_exemptions_and_dependencies(tmp_path, assets):
+    config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
+    state = single_map._extent_state(assets, GRAPH, config)
+    assert single_map._extent_state(assets, GRAPH, config) is state
+    config["simulation_config"]["exempt_motorways"] = False
+    no_exempt = single_map._extent_state(assets, GRAPH, config)
+    assert no_exempt is not state
+    config["dependency_parameters"] = {**config["dependency_parameters"], "dependency_edges": []}
+    assert single_map._extent_state(assets, GRAPH, config) is not no_exempt
+
+
 def test_depth_cache_keyed_by_file(tmp_path, assets):
     inputs = _experiment_inputs(tmp_path, assets)
     cache = {}

@@ -1,6 +1,7 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
 import hashlib
 import heapq
+import pickle
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -541,13 +542,18 @@ _extent_state_cache = {}
 
 
 def _extent_state(gdf_assets, graph_path, config):
-    """Per-extent state shared by all experiments: undisrupted attachment and dependency runtime."""
-    key = (str(graph_path), file_fingerprint(graph_path), single_map_asset_hash(gdf_assets))
+    """Per-extent state shared by all experiments: undisrupted attachment and dependency runtime.
+
+    Keyed on the graph, the ordered asset set, the road exemptions and the dependency rules.
+    """
+    exemptions = _road_exemption_kwargs(config)
+    setup = hashlib.md5(pickle.dumps((sorted(exemptions.items()), config.get("dependency_parameters"))))
+    key = (str(graph_path), file_fingerprint(graph_path), single_map_asset_hash(gdf_assets), setup.hexdigest())
     state = _extent_state_cache.get(key)
     if state is None:
         knowledge_graph, edges = build_dependency_runtime(config, gdf_assets)
         state = {
-            "undisrupted": undisrupted_state(gdf_assets, graph_path, **_road_exemption_kwargs(config)),
+            "undisrupted": undisrupted_state(gdf_assets, graph_path, **exemptions),
             "knowledge_graph": knowledge_graph,
             "dependency_edges": edges,
             "exclusions": _fragility_exclusions_from_knowledge_graph(config, gdf_assets["type"].to_numpy()),
