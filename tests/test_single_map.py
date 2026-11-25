@@ -465,6 +465,18 @@ def test_edge_without_geometry_gets_endpoint_line(tmp_path):
     assert roads["geometry"].notna().all()
 
 
+def test_fully_flooded_map_leaves_assets_unreachable(tmp_path):
+    from shapely.geometry import Point
+
+    graph_path = _two_edge_graph(tmp_path)
+    assets = gpd.GeoDataFrame({"type": ["hospital"] * 2},
+                              geometry=[Point(100050, 450000), Point(100150, 450000)], crs="EPSG:28992")
+    undisrupted = single_map.undisrupted_state(assets, graph_path)
+    ids, roads = single_map.map_asset_islands(undisrupted, graph_path, "wet", 0.2)
+    assert roads.empty
+    assert (ids == -1).all()
+
+
 
 def test_single_map_trace_and_island_report(tmp_path, assets):
     from src import island_report

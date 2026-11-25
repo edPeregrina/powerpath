@@ -546,7 +546,8 @@ def road_state_asset_islands(islands_gdf, access_rfids, boundary_asset_indices, 
     finds the main island, assigns assets.
     Returns ``(asset_island_ids, rfids_islands, islands_gdf)`` (filtered gdf)."""
     islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
-    main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
+    lengths = islands_gdf.groupby('island_id')['length_m'].sum()
+    main_island_id = lengths.idxmax() if not lengths.empty else -1  # no surviving roads
     asset_island_ids, rfids_islands = assign_asset_islands(
         islands_gdf, access_rfids, boundary_asset_indices, main_island_id
     )
