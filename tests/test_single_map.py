@@ -90,6 +90,26 @@ def test_queued_repair_finish():
     np.testing.assert_array_equal(finish, [20.0, 10.0, 10.0, 4.0, np.inf, 0.0, np.inf])
 
 
+def test_model_extent_rejects_maps_with_different_bounds(tmp_path):
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from config import get_model_extent
+
+    def write(name, x0):
+        with rasterio.open(tmp_path / name, "w", driver="GTiff", height=2, width=2, count=1,
+                           dtype="float32", crs="EPSG:28992",
+                           transform=from_origin(x0, 450000, 10, 10)) as dst:
+            dst.write(np.zeros((1, 2, 2), dtype="float32"))
+
+    write("rp10.tif", 100000)
+    write("rp100.tif", 100002)  # within half a pixel
+    assert get_model_extent({"hazard_dir": tmp_path}).bounds == pytest.approx((100000, 449980, 100020, 450000))
+    write("rp1000.tif", 100100)
+    with pytest.raises(ValueError, match="differ in extent"):
+        get_model_extent({"hazard_dir": tmp_path})
+
+
 def test_fragility_common_random_numbers(assets):
     depth = np.linspace(0, 1.5, len(assets))
     types = assets["type"].to_numpy()

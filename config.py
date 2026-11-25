@@ -354,12 +354,14 @@ def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
             extent; only use >0 for Voronoi generator-point padding, never
             for the road network.
         hazard_filename: specific hazard raster to read; defaults to the
-            first ``*.tif`` in ``config['hazard_dir']``.
+            first ``*.tif`` in ``config['hazard_dir']``, after checking that
+            every ``*.tif`` there has the same CRS and bounds (to half a pixel).
 
     Returns:
         shapely.geometry.Polygon in EPSG:28992.
     """
     import geopandas as gpd
+    import numpy as np
     from rasterio import open as rio_open
     from shapely.geometry import box
 
@@ -371,6 +373,16 @@ def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
         if not candidates:
             raise FileNotFoundError(f"No hazard .tif files found in {hazard_dir}")
         hazard_path = candidates[0]
+        with rio_open(hazard_path) as src:
+            crs, bounds, tol = src.crs, np.array(src.bounds), min(map(abs, src.res)) / 2
+        for other in candidates[1:]:
+            with rio_open(other) as src:
+                if src.crs != crs or not np.allclose(src.bounds, bounds, rtol=0, atol=tol):
+                    raise ValueError(
+                        f"Hazard maps in {hazard_dir} differ in extent: {other.name} "
+                        f"{tuple(src.bounds)} vs {hazard_path.name} {tuple(bounds)}. "
+                        "Clip them to one extent (the road network is built for one)."
+                    )
 
     with rio_open(hazard_path) as src:
         raster_crs = src.crs
