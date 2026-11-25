@@ -647,6 +647,35 @@ def test_concurrent_graph_builds_overlay_once(tmp_path, monkeypatch):
     assert not list(paths[0].parent.glob("build.lock"))
 
 
+def test_graph_key_differs_for_same_named_maps_in_other_folders(tmp_path, monkeypatch):
+    import os
+    import pickle
+
+    import networkx as nx
+
+    from src import graph_manager
+
+    def overlay_hazard_on_network(extent_path, maps, crs, extent_dir, static_path, *args, **kwargs):
+        out = static_path / "output_graph"
+        out.mkdir(parents=True, exist_ok=True)
+        with open(out / "base_graph_hazard.p", "wb") as f:
+            pickle.dump(nx.Graph(), f)
+
+    monkeypatch.setattr(graph_manager, "run_ra2ce", overlay_hazard_on_network)
+    monkeypatch.setattr(graph_manager, "write_extent", lambda *a, **k: tmp_path / "extent.geojson")
+    source = HAZARD_DIR / "Frag_timesteps_test1.tif"
+    copies = []
+    for folder in ("event_a", "event_b"):
+        (tmp_path / folder).mkdir()
+        copy = tmp_path / folder / source.name
+        copy.write_bytes(source.read_bytes())
+        os.utime(copy, ns=(source.stat().st_atime_ns, source.stat().st_mtime_ns))
+        copies.append(copy)
+    assert graph_manager.file_fingerprint(copies[0]) == graph_manager.file_fingerprint(copies[1])
+    paths = [graph_manager.build_single_map_graph([c], tmp_path / "root") for c in copies]
+    assert paths[0] != paths[1]
+
+
 def test_extent_state_keyed_on_exemptions_and_dependencies(tmp_path, assets):
     config = get_config(root_dir=tmp_path, hazard_dir_override=HAZARD_DIR)
     state = single_map._extent_state(assets, GRAPH, config)

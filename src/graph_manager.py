@@ -217,7 +217,7 @@ def build_single_map_graph(hazard_maps, root_dir, road_types=DEFAULT_ROAD_TYPES,
 
     Stored as ``<root_dir>/static_single/extent_<extent key>/graph_<maps key>.p``. The network
     is shared by every map set with the same extent; the overlay file is keyed by the ordered
-    maps, their fingerprints and ``skip_fraction_flooded``, so a changed map gives a new file.
+    resolved map paths, their fingerprints and ``skip_fraction_flooded``, so a changed map gives a new file.
     Existing files are reused. Living streets are included unless ``include_living_streets=False``
     (they make large graphs much bigger and slower, hence the warning). The flooded fraction
     ``EV{i}_fr`` is kept unless ``skip_fraction_flooded=True`` (then it is all 0.0).
@@ -230,7 +230,7 @@ def build_single_map_graph(hazard_maps, root_dir, road_types=DEFAULT_ROAD_TYPES,
     extent_key, polygon, crs = single_map_extent_key(maps, road_types)
     extent_dir = Path(root_dir) / "static_single" / f"extent_{extent_key}"
     graph_key = _digest(extent_key, skip_fraction_flooded,
-                        *(f"{m.name}:{file_fingerprint(m)}" for m in maps))
+                        *(f"{os.path.normcase(m.resolve())}:{file_fingerprint(m)}" for m in maps))
     graph_path = extent_dir / f"graph_{graph_key}.p"
     if graph_path.exists():
         return graph_path
