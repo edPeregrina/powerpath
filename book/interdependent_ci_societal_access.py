@@ -490,7 +490,7 @@ def run_spatial_trace(
             write_multi_map_road_islands(
                 trace_dir, f"{trace_path.stem}_day{int(t) // 24}", gdf_assets_combined, config_combined,
                 caches.get("island_cache"), policy, int(t), args.major_timestep, args.flood_threshold,
-                args.repair_priority,
+                policy["repair_crew_assignment_method"],
             )
 
     road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
