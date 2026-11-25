@@ -43,7 +43,9 @@ def _get_integral_image(arr, nodata):
     # Identity check: ra2ce passes the same array object for every edge of a
     # given hazard file, so this is built once per file, not once per edge.
     st = _prefilter_state
-    if st["arr"] is not arr or st["nodata"] != nodata:
+    same_nodata = st["nodata"] == nodata or (
+        st["nodata"] is not None and nodata is not None and np.isnan(st["nodata"]) and np.isnan(nodata))
+    if st["arr"] is not arr or not same_nodata:
         st["arr"], st["nodata"] = arr, nodata
         st["cum"] = _nonzero_integral_image(arr, nodata)
     return st["cum"]

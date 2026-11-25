@@ -52,6 +52,20 @@ def test_prefilter_does_not_change_result():
     )
 
 
+def test_integral_image_reused_for_nan_nodata(monkeypatch):
+    from src import ra2ce_fast_overlay
+
+    builds = []
+    real = ra2ce_fast_overlay._nonzero_integral_image
+    monkeypatch.setattr(ra2ce_fast_overlay, "_nonzero_integral_image",
+                        lambda arr, nodata: builds.append(1) or real(arr, nodata))
+    ra2ce_fast_overlay._prefilter_state.update(arr=None, nodata=None, cum=None)
+    arr = np.zeros((4, 4))
+    for _ in range(3):
+        ra2ce_fast_overlay._get_integral_image(arr, float("nan"))
+    assert len(builds) == 1
+
+
 def test_patched_ra2ce_overlay_reproduces_fixture_graph_values():
     pytest.importorskip("ra2ce")
     from ra2ce.network.hazard.hazard_intersect.hazard_intersect_builder_for_tif import (
