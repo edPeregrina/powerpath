@@ -68,11 +68,26 @@ def test_simulate_single_map(assets):
     assert not all_fail["repair_crews_assigned"][~all_fail["flooded"]].any()
     assert all_fail["repair_crews_assigned"].sum() <= 5
     assert (all_fail["repair_time"][all_fail["flooded"]] > 0).all()
-    assert (all_fail["recovery_time"][all_fail["flooded"]]
-            == all_fail["repair_time"][all_fail["flooded"]] + 24.0).all()
+    crewed = all_fail["repair_crews_assigned"]
+    assert (all_fail["recovery_time"][crewed] == all_fail["repair_time"][crewed] + 24.0).all()
+    waiting = all_fail["flooded"] & ~crewed
+    assert waiting.any()
+    assert (all_fail["recovery_time"][waiting] > all_fail["repair_time"][waiting] + 24.0).all()
 
     u = np.random.default_rng(1).random(len(assets))
     assert (run(u)["intrinsic_operational"] == run(u)["intrinsic_operational"]).all()
+
+
+def test_queued_repair_finish():
+    repair = np.array([10.0, 10.0, 10.0, 4.0, 5.0, 0.0, 7.0])
+    islands = np.array([1, 1, 1, 1, 2, 1, -1])
+    assigned = np.array([False, True, True, False, False, False, False])
+    is_a = np.array([True, True, True, False, True, True, True])
+    pools = [(is_a, {1: 2, 2: 0}), (~is_a, {1: 1})]
+    finish = single_map.queued_repair_finish(repair, islands, assigned, pools, np.arange(7.0))
+    # two crews on island 1: assets 1, 2 first, asset 0 waits 10 h; asset 3 has its own pool;
+    # island 2 has no crews, island -1 is unreachable, asset 5 needs no repair
+    np.testing.assert_array_equal(finish, [20.0, 10.0, 10.0, 4.0, np.inf, 0.0, np.inf])
 
 
 def test_fragility_common_random_numbers(assets):

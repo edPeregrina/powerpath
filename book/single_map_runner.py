@@ -47,7 +47,7 @@ from src.utils import json_safe, write_run_manifest
 
 LOGGER = logging.getLogger(__name__)
 COUNT_OUTCOMES = [
-    "flooded_assets", "non_operational_assets", "max_recovery_time_h",
+    "flooded_assets", "non_operational_assets", "max_recovery_time_h", "unrepairable_assets",
     *(f"monetary_impact_{c}" for c in [*MONETARY_CATEGORIES, "total"]),  # EUR/h at peak
 ]
 

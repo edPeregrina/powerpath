@@ -1,4 +1,5 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
+import heapq
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -266,6 +267,30 @@ def map_draws(seed, map_id, asset_ids, duration_params=None):
     return u, float(duration)
 
 
+def queued_repair_finish(repair_time, island_ids, assigned, crew_pools, order_key):
+    """Hours after the flood until each asset's repair ends, with a limited crew queue.
+
+    ``crew_pools``: ``(asset mask, {island_id: crews})`` per pool. Within each pool and island,
+    crews take assets in order (``assigned`` first, then ascending ``order_key``); each next
+    asset goes to the crew that frees up first. ``inf`` if no crew can reach the asset;
+    0 if it needs no repair.
+    """
+    finish = np.where(repair_time > 0, np.inf, 0.0)
+    pending = (repair_time > 0) & (island_ids != -1)
+    order = np.lexsort((order_key, ~assigned))
+    for mask, island_crews in crew_pools:
+        for island_id, crews in island_crews.items():
+            if crews <= 0:
+                continue
+            queue = order[(pending & mask & (island_ids == island_id))[order]]
+            free_at = [0.0] * int(crews)
+            for i in queue:
+                end = heapq.heappop(free_at) + repair_time[i]
+                finish[i] = end
+                heapq.heappush(free_at, end)
+    return finish
+
+
 def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, random_values,
                         recovery_parameters, flood_threshold, flood_duration=0.0,
                         fragility_k=None, fragility_steepness_overrides=None,
@@ -280,8 +305,9 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
     With ``config`` (plus ``knowledge_graph``/``dependency_edges`` from
     ``simulation.build_dependency_runtime``), ``operational`` also applies hazard blocking
     (e.g. flooded hospitals) and dependencies; otherwise it equals ``intrinsic_operational``.
-    ``recovery_time`` = flood duration + ``repair_time`` if not intrinsically operational,
-    flood duration alone if only blocked while flooded, else 0 (dependency waits excluded).
+    ``recovery_time`` = flood duration + wait for a crew + ``repair_time`` if not intrinsically
+    operational (see :func:`queued_repair_finish`; ``inf`` if no crew can reach it), flood
+    duration alone if only blocked while flooded, else 0 (dependency waits excluded).
     """
     hazard_values = np.asarray(hazard_values, dtype=float)
     asset_type = np.asarray(asset_type)
@@ -322,6 +348,11 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
     crew_pools = _build_crew_pools(crews["typed"])
     for pool in (crew_pools or {"pools": []})["pools"]:
         pool["available"] = initial_distribution(pool["available"])
+    typed_types = list((crew_pools or {"asset_type_to_pool": {}})["asset_type_to_pool"])
+    queue_pools = [(~np.isin(asset_type, typed_types), dict(available_repair_crews))] + [
+        (np.isin(asset_type, list(pool["asset_types"])), dict(pool["available"]))
+        for pool in (crew_pools or {"pools": []})["pools"]
+    ]
     available_repair_crews, repair_crews_assigned = _assign_repair_crews(
         timestep=0,
         available_repair_crews=available_repair_crews,
@@ -336,6 +367,17 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
         crew_pools=crew_pools,
         asset_impact_map=asset_impact_map,
     )
+    method_name = str(method)
+    if "lowest" in method_name:
+        order_key = repair_time
+    elif "highest" in method_name:
+        order_key = -repair_time
+    elif "impact" in method_name and asset_impact_map:
+        order_key = -np.array([asset_impact_map.get(i, 0) for i in range(len(hazard_values))], dtype=float)
+    else:
+        order_key = np.random.random(len(hazard_values))  # random, as multi-map's shuffle
+    repair_finish = queued_repair_finish(
+        repair_time, island_ids, repair_crews_assigned, queue_pools, order_key)
 
     # Hazard blocking and dependencies: the multi-map evaluator, run once on the peak state.
     operational = intrinsic_operational
@@ -377,7 +419,7 @@ def simulate_single_map(hazard_values, asset_type, island_ids, roads, n_crews, r
         "repair_time": repair_time,
         "repair_crews_assigned": repair_crews_assigned,
         "recovery_time": np.where(
-            ~intrinsic_operational, repair_time + flood_duration,
+            ~intrinsic_operational, repair_finish + flood_duration,
             np.where(~operational & flooded, flood_duration, 0.0),
         ),
     }
@@ -588,10 +630,12 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
         )
         metrics = {k: v for k, v in metrics.items()
                    if k != "timestep" and isinstance(v, (int, float, np.number))}
+        recovery = outcome["recovery_time"]
         metrics.update(
             flooded_assets=int(outcome["flooded"].sum()),
             non_operational_assets=int((~outcome["operational"]).sum()),
-            max_recovery_time_h=float(outcome["recovery_time"].max(initial=0.0)),
+            max_recovery_time_h=float(recovery[np.isfinite(recovery)].max(initial=0.0)),
+            unrepairable_assets=int(np.isinf(recovery).sum()),
             **single_map_monetary_rate(outcome["operational"], asset_ids, asset_to_lu),
         )
         names.append(name)
