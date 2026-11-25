@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pandas as pd
 from ema_workbench import (
     ArrayOutcome,
@@ -176,12 +177,11 @@ def run_spatial_trace(model, inputs, graph_path, policies, args, execution_id, o
             LOGGER.info("Saved spatial trace and island reports for %s to %s", stem, trace_dir)
 
     if selected:
-        # Static baseline road match, as in multi-map; uses the first map's road state
+        # Static baseline road match on the undisrupted network (no road exceeds an infinite threshold)
         road_match = build_asset_road_match_table(
-            gdf_assets, config["hazard_dir"], hazard_threshold=args.flood_threshold,
-            hazard_column=capture[0]["column"], config=config,
-                        graph_path=graph_path,
-                    )
+            gdf_assets, config["hazard_dir"], hazard_threshold=np.inf,
+            hazard_column=capture[0]["column"], config=config, graph_path=graph_path,
+        )
         road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
         road_match.to_parquet(road_match_path)
         LOGGER.info("Saved static asset-to-road match table (%d rows) to %s", len(road_match), road_match_path)
