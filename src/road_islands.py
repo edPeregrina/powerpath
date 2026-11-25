@@ -92,7 +92,8 @@ def edge_exempt_mask(edge_data, exempt_motorways=True, exempt_bridges=True,
 
 
 def l1_edge_depth_reduction(edge_geoms, adapt_geoms, depth_red):
-    """Per-edge L1 reduction: max ``depth_red`` over intersecting polygons (0 if none)."""
+    """Per-edge L1 reduction: max ``depth_red`` over intersecting polygons (0 if none;
+    null ``depth_red`` values are ignored)."""
     reduction = np.zeros(len(edge_geoms))
     if len(edge_geoms) == 0 or len(adapt_geoms) == 0:
         return reduction
@@ -100,7 +101,7 @@ def l1_edge_depth_reduction(edge_geoms, adapt_geoms, depth_red):
     edge_idx, adapt_idx = tree.query(
         np.array(edge_geoms, dtype=object), predicate="intersects"
     )
-    np.maximum.at(reduction, edge_idx, depth_red[adapt_idx])
+    np.fmax.at(reduction, edge_idx, depth_red[adapt_idx])
     return reduction
 
 

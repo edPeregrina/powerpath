@@ -521,6 +521,17 @@ def test_fully_flooded_map_leaves_assets_unreachable(tmp_path):
     assert (ids == -1).all()
 
 
+def test_null_l1_depth_reduction_does_not_keep_flooded_roads():
+    from shapely.geometry import LineString
+
+    from src.road_islands import l1_edge_depth_reduction
+
+    roads = [LineString([(0, 0), (1, 0)])]
+    polygons = np.array([box(-1, -1, 2, 1), box(0, -1, 2, 1)], dtype=object)
+    assert l1_edge_depth_reduction(roads, polygons, np.array([np.nan, 0.3])).tolist() == [0.3]
+    assert l1_edge_depth_reduction(roads, polygons[:1], np.array([np.nan])).tolist() == [0.0]
+
+
 def test_multi_map_islands_of_fully_flooded_graph_are_empty(tmp_path):
     from src.road_islands import compute_island_geodataframe_from_graph, road_state_asset_islands
 
