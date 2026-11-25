@@ -436,6 +436,9 @@ def compute_island_geodataframe_from_graph(
         record["island_id"] = island_id
         records.append(record)
 
+    if not records:
+        # Everything flooded: an empty frame lets callers mark every asset unreachable (-1).
+        records = {"rfid": [], "geometry": [], "length_m": [], "island_id": []}
     gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:28992")
     gdf = gdf.drop_duplicates(subset=["geometry", "island_id"])
     

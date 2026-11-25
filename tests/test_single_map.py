@@ -521,6 +521,15 @@ def test_fully_flooded_map_leaves_assets_unreachable(tmp_path):
     assert (ids == -1).all()
 
 
+def test_multi_map_islands_of_fully_flooded_graph_are_empty(tmp_path):
+    from src.road_islands import compute_island_geodataframe_from_graph, road_state_asset_islands
+
+    islands = compute_island_geodataframe_from_graph(_two_edge_graph(tmp_path), 0.2, "wet")
+    assert islands.empty and {"rfid", "island_id", "island_size_km"} <= set(islands.columns)
+    ids, _, _ = road_state_asset_islands(islands, pd.Series([0, 1]), [], [])
+    assert (ids == -1).all()
+
+
 
 def test_single_map_trace_and_island_report(tmp_path, assets):
     from src import island_report
