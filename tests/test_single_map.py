@@ -110,6 +110,15 @@ def test_model_extent_rejects_maps_with_different_bounds(tmp_path):
         get_model_extent({"hazard_dir": tmp_path})
 
 
+def test_single_map_asset_hash_sees_order_and_edits(assets):
+    base = single_map.single_map_asset_hash(assets)
+    assert single_map.single_map_asset_hash(assets.copy()) == base
+    assert single_map.single_map_asset_hash(assets.iloc[::-1]) != base
+    retyped = assets.copy()
+    retyped.loc[retyped.index[0], "type"] = "other"
+    assert single_map.single_map_asset_hash(retyped) != base
+
+
 def test_fragility_common_random_numbers(assets):
     depth = np.linspace(0, 1.5, len(assets))
     types = assets["type"].to_numpy()

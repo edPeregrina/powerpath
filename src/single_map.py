@@ -1,4 +1,5 @@
 """Single-map mode: one independent hazard map, peak depth, no time stepping."""
+import hashlib
 import heapq
 import re
 from pathlib import Path
@@ -16,7 +17,7 @@ from src.damage_recovery import (
     with_steepness_overrides,
 )
 from src.hazard_analysis_electricity import find_hazard_value_at_points_optimized
-from src.caching import _compute_l1_hash, create_island_cache_key, get_asset_centroid_hash
+from src.caching import _compute_l1_hash, create_island_cache_key
 from src.island_analysis import _compute_initial_distribution, _road_exemption_kwargs
 from src.road_islands import (
     _load_and_project_graph,
@@ -185,6 +186,20 @@ def map_asset_islands(undisrupted, graph_path, hazard_column, hazard_threshold,
     return ids, roads
 
 
+def single_map_asset_hash(gdf_assets):
+    """Fingerprint of the asset set: CRS, types and geometries in order.
+
+    Single-map cache entries are positional per asset, so unlike
+    :func:`src.caching.get_asset_centroid_hash` (count + bbox, kept for multi-map's
+    existing keys) a reordered or edited asset set must give a different key.
+    """
+    digest = hashlib.md5(str(gdf_assets.crs).encode())
+    digest.update("\0".join(map(str, gdf_assets["type"])).encode())
+    for wkb in gdf_assets.geometry.to_wkb():
+        digest.update(wkb)
+    return f"n{len(gdf_assets)}_{digest.hexdigest()}"
+
+
 def adaptation_depth_reduction(gdf_assets, l1_area_geojson=None, l2_asset_geojson=None, config=None):
     """Per-asset depth reduction (m) from L1 areas and L2 assets, as multi-map applies it.
 
@@ -210,7 +225,7 @@ def map_asset_depths(hazard_map, gdf_assets, map_counter, config, hazard_cache=N
     """
     method = config["analysis_config"]["hazard_extraction_method"]
     key = (f"single_map_depths|{method}|{Path(hazard_map).name}|{file_fingerprint(hazard_map)}"
-           f"|map{map_counter}|{get_asset_centroid_hash(gdf_assets)}")
+           f"|map{map_counter}|{single_map_asset_hash(gdf_assets)}")
     depths = hazard_cache.get(key) if hazard_cache is not None else None
     if depths is None:
         extracted = find_hazard_value_at_points_optimized(
@@ -465,7 +480,7 @@ def single_map_societal_metrics(societal_access_config, gdf_assets, outcome, isl
         }
         ref_ids, ref_roads = undisrupted_reference(state, graph_path, island_cache)
         ref_key = (
-            create_island_cache_key("__undisrupted__", np.inf, get_asset_centroid_hash(gdf_assets))
+            create_island_cache_key("__undisrupted__", np.inf, single_map_asset_hash(gdf_assets))
             + f"_graph{file_fingerprint(graph_path)}_capacity_reference_v1"
         )
         reference = (ref_ids, ref_roads, ref_key)
@@ -527,7 +542,7 @@ _extent_state_cache = {}
 
 def _extent_state(gdf_assets, graph_path, config):
     """Per-extent state shared by all experiments: undisrupted attachment and dependency runtime."""
-    key = (str(graph_path), file_fingerprint(graph_path), get_asset_centroid_hash(gdf_assets))
+    key = (str(graph_path), file_fingerprint(graph_path), single_map_asset_hash(gdf_assets))
     state = _extent_state_cache.get(key)
     if state is None:
         knowledge_graph, edges = build_dependency_runtime(config, gdf_assets)
@@ -593,7 +608,7 @@ def run_single_map_experiment(*, gdf_assets, hazard_maps, config, graph_path, so
     steepness = kwargs.get("fragility_steepness_overrides")
     params = config["recovery_parameters"]
     state = _extent_state(gdf_assets, graph_path, config)
-    asset_hash = get_asset_centroid_hash(gdf_assets)
+    asset_hash = single_map_asset_hash(gdf_assets)
     reduction = adaptation_depth_reduction(gdf_assets, l1_area_geojson, l2_asset_geojson, config)
     asset_ids = np.arange(len(gdf_assets))
     allocation_cache = societal_access_config.get("allocation_cache")
