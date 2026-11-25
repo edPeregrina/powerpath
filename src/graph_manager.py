@@ -8,8 +8,11 @@ a hash of both, so a different extent or a changed map can never be served a sta
 
 import hashlib
 import logging
+import os
 import pickle
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import geopandas as gpd
@@ -232,13 +235,41 @@ def build_single_map_graph(hazard_maps, root_dir, road_types=DEFAULT_ROAD_TYPES,
     if graph_path.exists():
         return graph_path
 
-    static_path = extent_dir / "static"
-    extent_path = write_extent(polygon, crs, static_path / "network")
-    run_ra2ce(extent_path, maps, crs, extent_dir, static_path, road_types,
-              skip_fraction_flooded=skip_fraction_flooded)
-    graph = shift_overlay_columns(read_pickle(static_path / "output_graph" / "base_graph_hazard.p"), len(maps))
-    tmp = graph_path.with_suffix(".tmp")
-    with open(tmp, "wb") as file:
-        pickle.dump(graph, file)
-    tmp.replace(graph_path)
+    # Concurrent runs on one extent share RA2CE's output folder: build under a lock, then recheck.
+    with _extent_lock(extent_dir):
+        if graph_path.exists():
+            return graph_path
+        static_path = extent_dir / "static"
+        extent_path = write_extent(polygon, crs, static_path / "network")
+        run_ra2ce(extent_path, maps, crs, extent_dir, static_path, road_types,
+                  skip_fraction_flooded=skip_fraction_flooded)
+        graph = shift_overlay_columns(read_pickle(static_path / "output_graph" / "base_graph_hazard.p"), len(maps))
+        tmp = graph_path.with_suffix(f".tmp{os.getpid()}")
+        with open(tmp, "wb") as file:
+            pickle.dump(graph, file)
+        tmp.replace(graph_path)
     return graph_path
+
+
+@contextmanager
+def _extent_lock(extent_dir, timeout_s=6 * 3600, poll_s=5.0):
+    """Exclusive lock file ``<extent_dir>/build.lock`` (atomic create, polled).
+
+    A run killed mid-build leaves the file behind; delete it by hand (the timeout error names it).
+    """
+    extent_dir.mkdir(parents=True, exist_ok=True)
+    lock = extent_dir / "build.lock"
+    start = time.monotonic()
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            if time.monotonic() - start > timeout_s:
+                raise TimeoutError(f"Graph build lock held for over {timeout_s} s; delete {lock} if stale")
+            LOGGER.info("Waiting for another graph build on this extent (%s)", lock)
+            time.sleep(poll_s)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)

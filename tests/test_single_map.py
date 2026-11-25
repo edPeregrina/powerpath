@@ -611,6 +611,42 @@ def test_graph_manager_keys(tmp_path):
     assert file_fingerprint(copy) != file_fingerprint(maps[0]) or copy.stat().st_mtime_ns == maps[0].stat().st_mtime_ns
 
 
+def test_concurrent_graph_builds_overlay_once(tmp_path, monkeypatch):
+    import pickle
+    import threading
+    import time
+
+    import networkx as nx
+
+    from src import graph_manager
+
+    overlays = []
+
+    def overlay_hazard_on_network(extent_path, maps, crs, extent_dir, static_path, *args, **kwargs):
+        overlays.append(1)
+        time.sleep(0.3)  # long enough for the other build to hit the lock
+        out = static_path / "output_graph"
+        out.mkdir(parents=True, exist_ok=True)
+        with open(out / "base_graph_hazard.p", "wb") as f:
+            pickle.dump(nx.Graph(), f)
+
+    monkeypatch.setattr(graph_manager, "run_ra2ce", overlay_hazard_on_network)
+    monkeypatch.setattr(graph_manager, "write_extent", lambda *a, **k: tmp_path / "extent.geojson")
+    real_sleep = time.sleep
+    monkeypatch.setattr(time, "sleep", lambda s: real_sleep(min(s, 0.3)))
+    maps = [HAZARD_DIR / "Frag_timesteps_test1.tif"]
+    paths = []
+    builds = [threading.Thread(target=lambda: paths.append(
+        graph_manager.build_single_map_graph(maps, tmp_path))) for _ in range(2)]
+    for t in builds:
+        t.start()
+    for t in builds:
+        t.join()
+    assert len(overlays) == 1
+    assert paths[0] == paths[1] and paths[0].exists()
+    assert not list(paths[0].parent.glob("build.lock"))
+
+
 def test_depth_cache_keyed_by_file(tmp_path, assets):
     inputs = _experiment_inputs(tmp_path, assets)
     cache = {}
