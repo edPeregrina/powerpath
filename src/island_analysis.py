@@ -8,11 +8,7 @@ import pickle
 # Import hazard extraction method from config
 import sys
 
-import geopandas as gpd
-import networkx as nx
 import numpy as np
-from pyproj import Transformer
-from shapely.geometry import LineString
 
 # ---------------------------------------------------------------------------
 # Actor-by-island redistribution primitives
@@ -191,7 +187,13 @@ from src.caching import (
     save_overlap_cache,
     save_societal_allocation_cache,
 )
-from src.utils import create_spatial_index, filter_hazard_graph, project_graph_coords
+from src.utils import create_spatial_index
+from src.road_islands import (  # noqa: F401  re-exported; callers/tests resolve these here
+    _projected_graph_cache, _load_and_project_graph, label_road_islands,
+    compute_island_geodataframe_from_graph, nearest_road_rfids, baseline_boundary,
+    assign_asset_islands, filter_hazard_graph, project_graph_coords,
+    attach_assets_undisrupted, road_state_asset_islands, shadow_l1_islands,
+)
 
 sys.path.append(str(Path(__file__).parent.parent))
 # #progress apply 
@@ -213,186 +215,32 @@ def _load_pickle_cache(path):
         return {}
 
 
-# In-process cache of reprojected road-network graphs, keyed by
-# (path, from_crs, to_crs). Reprojection is deterministic, so a cached graph
-# is always returned via .copy(): filter_hazard_graph() mutates its input in
-# place, and callers must not share mutable state across calls.
-_projected_graph_cache = {}
-
-def _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPSG:28992"):
-    """Load and reproject the road network graph, cached per
-    (path, from_crs, to_crs). Returns an independent copy of the cached graph.
-    """
-    key = (str(graph_pickle_path), from_crs, to_crs)
-    cached = _projected_graph_cache.get(key)
-    if cached is None:
-        with open(graph_pickle_path, "rb") as f:
-            cached = pickle.load(f)
-        cached = project_graph_coords(cached, from_crs=from_crs, to_crs=to_crs)
-        _projected_graph_cache[key] = cached
-    return cached.copy()
+def _road_exemption_kwargs(config):
+    """Road hazard-exemption flags from ``simulation_config`` (all default True)."""
+    sim = config.get('simulation_config', {})
+    return {
+        'exempt_motorways': sim.get('exempt_motorways', True),
+        'exempt_bridges': sim.get('exempt_bridges', True),
+        'exempt_tunnels': sim.get('exempt_tunnels', True),
+    }
 
 
-def compute_island_geodataframe_from_graph(
-    graph_pickle_path: str, 
-    hazard_threshold: float, 
-    hazard_column: str, 
-    buffer_distance: float = 2.5, 
-    verbose: bool = False,
-    l1_area_geojson=None,
-    event_footprint=None,
-    outside_footprint_policy="permissive",
-) -> gpd.GeoDataFrame:
-    """
-    Create GeoDataFrame from graph with buffered road geometries.
-    Applies active L1 road adaptations before filtering if provided. L2
-    (asset-level) adaptations are deliberately not accepted here: they only
-    ever protect specific assets, never roads/islands.
+ROAD_EXEMPTION_TYPES = ('motorways', 'bridges', 'tunnels')
 
-    ``event_footprint``/``outside_footprint_policy`` are forwarded to
-    :func:`src.utils.filter_hazard_graph`: with ``outside_footprint_policy=
-    "strict"``, roads outside ``event_footprint`` cannot provide bypass
-    connectivity around the hazard; with ``"permissive"`` (default) they can.
-    """
-    G = _load_and_project_graph(graph_pickle_path, from_crs="EPSG:4326", to_crs="EPSG:28992")
 
-    G = filter_hazard_graph(
-        G, hazard_threshold, hazard_column, 
-        l1_area_geojson=l1_area_geojson,
-        event_footprint=event_footprint,
-        outside_footprint_policy=outside_footprint_policy,
-        verbose=verbose
-    )
+def add_road_exemption_args(parser):
+    """Add ``--no-exempt-<road type>`` switches to an argparse parser."""
+    for road_type in ROAD_EXEMPTION_TYPES:
+        parser.add_argument(f"--no-exempt-{road_type}", action="store_true",
+                            help=f"Let flooding cut {road_type} (default: exempt from the flood threshold).")
 
-    # # DEBUG 1: Check graph structure after filtering
-    # print(f"DEBUG 1: Graph has {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-    
-    # Identify strongly connected components
-    if G.is_directed():
-        components = list(nx.strongly_connected_components(G))
-    else:
-        components = list(nx.connected_components(G))
-    
-    # # DEBUG 2: Check component distribution
-    # print(f"DEBUG 2: Found {len(components)} connected components")
-    # component_sizes = sorted([len(comp) for comp in components], reverse=True)
-    # print(f"DEBUG 2: Component sizes: {component_sizes[:10]}")  # Top 10
-    
-    fid_to_island = {}
 
-    # Assign island_id to each fid
-    for i, comp in enumerate(components):
-        subgraph = G.subgraph(comp)
-        for u, v, data in subgraph.edges(data=True):
-            fid_to_island[u] = i
-            fid_to_island[v] = i
+def apply_road_exemption_args(config, args):
+    """Write the parsed ``--no-exempt-*`` switches into ``simulation_config``."""
+    for road_type in ROAD_EXEMPTION_TYPES:
+        if getattr(args, f"no_exempt_{road_type}"):
+            config['simulation_config'][f'exempt_{road_type}'] = False
 
-    # # DEBUG 3: Check fid_to_island mapping
-    # print(f"DEBUG 3: fid_to_island has {len(fid_to_island)} entries")
-    # print(f"DEBUG 3: Island IDs in fid_to_island: {sorted(set(fid_to_island.values()))[:20]}")  # First 20
-
-    # Fallback transformer only for edges missing the precomputed 'geometry_m'
-    # (e.g. a graph that bypassed project_graph_coords); the normal path reuses
-    # the projection already done once in project_graph_coords instead of
-    # re-transforming every edge's coordinates on every cache miss.
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:28992", always_xy=True)
-    
-    # Build edge records with geometry and length 
-    records = []
-    # missing_island_count = 0  # DEBUG counter
-
-    for u, v, data in G.edges(data=True):
-        projected_geom = data.get('geometry_m')
-        if projected_geom is None:
-            original_geom = data.get('geometry')
-            if original_geom is not None and hasattr(original_geom, 'coords'):
-                projected_coords = [transformer.transform(x, y) for x, y in original_geom.coords]
-                projected_geom = LineString(projected_coords)
-            else:
-                projected_geom = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]),
-                                           (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
-        
-        length_m = data.get("length", None)
-        if length_m is None:
-            length_m = projected_geom.length
-
-        island_id = fid_to_island.get(v, -1)
-        
-        # # DEBUG 4: Track edges that get island_id = -1
-        # if island_id == -1:
-        #     missing_island_count += 1
-        #     if missing_island_count <= 5:  # Print first 5 cases
-        #         print(f"DEBUG 4: Edge ({u}, {v}) has island_id = -1")
-        #         print(f"         u in fid_to_island: {u in fid_to_island}")
-        #         print(f"         v in fid_to_island: {v in fid_to_island}")
-
-        record = data.copy()
-        record["geometry"] = projected_geom
-        record["length_m"] = length_m
-        record["island_id"] = island_id
-        records.append(record)
-
-    # # DEBUG 5: Check how many edges got -1
-    # print(f"DEBUG 5: {missing_island_count} edges assigned island_id = -1 out of {len(records)}")
-
-    # Create initial GeoDataFrame with linestring geometries
-    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:28992")
-
-    # # DEBUG 6: Check GeoDataFrame island distribution BEFORE deduplication
-    # print(f"DEBUG 6: BEFORE dedup - island_id distribution:")
-    # print(gdf['island_id'].value_counts().sort_index())
-
-    # Deduplication and buffering
-    gdf = gdf.drop_duplicates(subset=["geometry", "island_id"])
-    
-    # # DEBUG 7: Check GeoDataFrame island distribution AFTER deduplication
-    # print(f"DEBUG 7: AFTER dedup - island_id distribution:")
-    # print(gdf['island_id'].value_counts().sort_index())
-    
-    if verbose:
-        print(f"After deduplication: {len(gdf)} road segments")
-
-    original_geometries = gdf.geometry.values
-    # Vectorized buffer for the common case; per-row fallback only for the
-    # rare empty/invalid result.
-    buffered_geometries = gdf.geometry.buffer(
-        buffer_distance, cap_style='square', join_style='mitre'
-    ).values
-    bad_mask = np.array([
-        geom is None or geom.is_empty or not geom.is_valid for geom in buffered_geometries
-    ])
-    if bad_mask.any():
-        buffered_geometries = buffered_geometries.copy()
-        for i in np.flatnonzero(bad_mask):
-            original_geom = original_geometries[i]
-            try:
-                buffered_geom = original_geom.make_valid().buffer(
-                    buffer_distance, cap_style='square', join_style='mitre'
-                )
-            except Exception as e:
-                print(f"Warning: Error buffering geometry: {e}, using original")
-                buffered_geom = original_geom
-            buffered_geometries[i] = buffered_geom
-    
-    # Update geometries
-    gdf['original_geometry'] = original_geometries
-    gdf['geometry'] = buffered_geometries  # Replace with buffered geometries
-    
-    if verbose:
-        print(f"Buffered {len(gdf)} road segments with {buffer_distance}m buffer")
-
-    # Compute island sizes using original linestring lengths (more accurate for road network analysis)
-    island_sizes = gdf.groupby("island_id")["length_m"].sum().reset_index()
-    island_sizes["island_size_km"] = island_sizes["length_m"] / 1000.0
-    island_sizes = island_sizes[["island_id", "island_size_km"]]
-
-    # Merge island sizes back into GeoDataFrame
-    gdf = gdf.merge(island_sizes, on="island_id", how="left")
-    gdf["island_size_km"] = gdf["island_size_km"].fillna(0.0)
-
-    if verbose:
-        print(f"Island distribution: {gdf['island_id'].value_counts().sort_index().to_dict()}")
-    return gdf
 
 def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
                        config=None, island_cache=None, cache_dir=None, hazard_dir=None,
@@ -421,6 +269,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(_config),
     )
 
     # Check if cached or initialize empty dictionaries
@@ -460,6 +309,7 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
+            **_road_exemption_kwargs(_config),
         )
         rfids_lengths = dict(zip(islands_gdf['rfid'], islands_gdf['length_m']))
 
@@ -469,87 +319,12 @@ def match_assets_access(temp_gdf, hazard_threshold=0.2, hazard_column='EV0_ma',
         islands_gdf = islands_gdf.to_crs(projected_crs)
         temp_gdf = temp_gdf.to_crs(projected_crs) 
 
-        # Build spatial index for road sections
-        spatial_idx = create_spatial_index(islands_gdf)
-
-        # Find main island id (largest by road length)
-        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
-
-        # For each asset, find nearest road section within a reasonable search radius
         search_radius = 100  # meters
-
-        # Precompute centroids and buffers
-        temp_gdf['centroid'] = temp_gdf.geometry.centroid
-        temp_gdf['buffer'] = temp_gdf['centroid'].apply(lambda c: c.buffer(search_radius))
-
-        # For each asset, get candidate road indices and assign closest
-        def find_nearest_road(asset_row, spatial_idx, islands_gdf):
-            asset_centroid = asset_row['centroid']
-            asset_buffer = asset_row['buffer']
-            candidate_idxs = list(spatial_idx.intersection(asset_buffer.bounds))
-            if candidate_idxs:
-                candidates = islands_gdf.iloc[candidate_idxs]
-                if not candidates.empty:
-                    distances = candidates.geometry.distance(asset_centroid)
-                    if not distances.empty:
-                        nearest_idx = distances.idxmin()
-                        return candidates.loc[nearest_idx, 'rfid']
-            return -1
-        
-        temp_gdf['access_rfid'] = temp_gdf.apply(
-            lambda row: find_nearest_road(row, spatial_idx, islands_gdf), axis=1
+        access_rfids, boundary_asset_indices, boundary_islands_rfids = attach_assets_undisrupted(
+            temp_gdf, islands_gdf, search_radius
         )
-        # # DEBUG 8: Check rfid assignments
-        # print(f"DEBUG 8: access_rfid distribution:")
-        # rfid_counts = temp_gdf['access_rfid'].value_counts()
-        # print(f"         Assets with rfid = -1: {(temp_gdf['access_rfid'] == -1).sum()}")
-        # print(f"         Assets with valid rfid: {(temp_gdf['access_rfid'] != -1).sum()}")
-
-        def safe_island_lookup(rfid, islands_gdf):
-            if rfid == -1:
-                return -1
-            matches = islands_gdf[islands_gdf['rfid'] == rfid]['island_id'].values
-            
-            # # DEBUG 9: Track failed lookups
-            # if len(matches) == 0:
-            #     print(f"DEBUG 9: rfid {rfid} not found in islands_gdf")
-            #     return -1
-            
-            island_id = matches[0]
-            
-            # # DEBUG 10: Track if matched island_id is -1
-            # if island_id == -1:
-            #     print(f"DEBUG 10: rfid {rfid} has island_id = -1 in islands_gdf")
-            
-            return island_id
-
-        temp_gdf['island_id'] = [safe_island_lookup(rfid, islands_gdf) for rfid in temp_gdf['access_rfid']]
-
-        # # DEBUG 11: Final asset island distribution
-        # print(f"DEBUG 11: Final asset island_id distribution:")
-        # print(temp_gdf['island_id'].value_counts().sort_index())
-        # print(f"          Assets on island -1: {(temp_gdf['island_id'] == -1).sum()}")
-        
-        # # DEBUG 12: Check specific asset 66 if it exists
-        # if 66 in temp_gdf.index:
-        #     asset_66_rfid = temp_gdf.loc[66, 'access_rfid']
-        #     asset_66_island = temp_gdf.loc[66, 'island_id']
-        #     print(f"DEBUG 12: Asset 66 -> rfid {asset_66_rfid} -> island {asset_66_island}")
-            
-        #     if asset_66_rfid != -1:
-        #         matching_roads = islands_gdf[islands_gdf['rfid'] == asset_66_rfid]
-        #         if len(matching_roads) > 0:
-        #             print(f"          Road segment for asset 66 has island_id: {matching_roads['island_id'].iloc[0]}")
-        #         else:
-        #             print(f"          WARNING: rfid {asset_66_rfid} not found in islands_gdf!")
-
-        # Now, boundary assets are those with island_id != main_island_id or still -1
-        boundary_asset_mask = (temp_gdf['island_id'] != main_island_id) | (temp_gdf['island_id'] == -1)
-        boundary_asset_indices = temp_gdf[boundary_asset_mask].index.tolist()
+        temp_gdf['access_rfid'] = access_rfids
         print(f"Identified {len(boundary_asset_indices)} boundary assets out of {len(temp_gdf)} total assets.")
-
-        # Identify boundary islands (non-main islands that exist in baseline)
-        boundary_islands_rfids = islands_gdf[islands_gdf['island_id'] != main_island_id]['rfid'].to_list()
         
         # Pickle for future use. Uses the same atomic-merge-and-lock save as
         # island_cache/overlap_cache/etc (src/caching.py::_atomic_merge_save)
@@ -607,6 +382,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
         asset_hash,
         l1_area_geojson=l1_area_geojson,
         l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(_config),
     )
 
     cache_hit = (
@@ -680,20 +456,21 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
             buffer_distance=20, 
             verbose=verbose,
             l1_area_geojson=l1_area_geojson,
+            **_road_exemption_kwargs(_config),
         )
+        if l1_area_geojson is not None and _config['simulation_config'].get('shadow_l1_islands'):
+            shadow = shadow_l1_islands(
+                hazard_graph_path, hazard_threshold, hazard_column, l1_area_geojson,
+                **_road_exemption_kwargs(_config),
+            )
+            print(f"SHADOW_L1 {cache_key} " + " ".join(
+                f"{k}={v:.3f}" if isinstance(v, float) else f"{k}={v}" for k, v in shadow.items()))
 
-        # Drop the boundary rfids and find the main island
-        islands_gdf = islands_gdf[~islands_gdf['rfid'].isin(boundary_islands_rfids)].copy()
-        main_island_id = islands_gdf.groupby('island_id')['length_m'].sum().idxmax()
-
+        computed_ids, computed_rfids_islands, islands_gdf = road_state_asset_islands(
+            islands_gdf, temp_gdf['access_rfid'], boundary_asset_indices, boundary_islands_rfids
+        )
         if asset_island_ids is None or rfids_islands is None:
-            # Map assets to island ids
-            rfid_to_island = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
-            asset_island_ids = [rfid_to_island.get(rfid, -1) for rfid in temp_gdf['access_rfid']]
-            asset_island_ids = [asset_island_ids[i] if i not in boundary_asset_indices else main_island_id
-                                for i in range(len(asset_island_ids))]
-            asset_island_ids = np.array(asset_island_ids, dtype=int)
-            rfids_islands = dict(zip(islands_gdf['rfid'], islands_gdf['island_id']))
+            asset_island_ids, rfids_islands = computed_ids, computed_rfids_islands
 
         # Cache the results only when this road state was not already cached.
         if island_cache is not None and cache_dir is not None and not cache_hit:
@@ -762,7 +539,7 @@ def match_island_ids_assets(temp_gdf, boundary_asset_indices=None, boundary_isla
 
 def build_asset_road_match_table(
     gdf_assets, hazard_dir, hazard_threshold=0.2, hazard_column="EV1_ma",
-    config=None, l1_area_geojson=None, search_radius=100.0,
+    config=None, l1_area_geojson=None, search_radius=100.0, graph_path=None,
 ):
     """Build a static "asset -> nearest road segment" reverse lookup table.
 
@@ -779,6 +556,10 @@ def build_asset_road_match_table(
     per road state of interest (e.g. the baseline, no-adaptation state),
     not once per timestep or experiment.
 
+    ``graph_path``: hazard-annotated road graph. Default: the single-map graph of the maps in
+    ``config['hazard_dir']`` (default road types, fraction flooded kept); multi-map passes its
+    ``static/output_graph/base_graph_hazard_editted.p``.
+
     Returns:
         GeoDataFrame indexed like ``gdf_assets``, with columns
         ``asset_id`` (the original index), ``access_rfid`` (-1 if no road
@@ -789,14 +570,20 @@ def build_asset_road_match_table(
     if config is None:
         config = get_config()
 
-    hazard_graph_path = config['hazard_dir'].parent / 'static' / 'output_graph' / 'base_graph_hazard_editted.p'
+    if graph_path is None:
+        from src.data_loader import load_hazard_maps
+        from src.graph_manager import build_single_map_graph
+        graph_path = build_single_map_graph(
+            load_hazard_maps(config['hazard_dir'], max_days=None), config['hazard_dir'].parent
+        )
     islands_gdf = compute_island_geodataframe_from_graph(
-        hazard_graph_path,
+        graph_path,
         hazard_threshold=hazard_threshold,
         hazard_column=hazard_column,
         buffer_distance=20,
         verbose=False,
         l1_area_geojson=l1_area_geojson,
+        **_road_exemption_kwargs(config),
     )
 
     projected_crs = 'epsg:28992'

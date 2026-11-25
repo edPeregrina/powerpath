@@ -1,9 +1,9 @@
 
+import json
+from pathlib import Path
+
 import geopandas as gpd
-import networkx as nx
 import pandas as pd
-import shapely.geometry as sg
-from pyproj import Transformer
 from rtree import index
 from scipy.spatial import Voronoi
 
@@ -29,254 +29,6 @@ def create_spatial_index(gdf):
     
     return idx
 
-
-def project_graph_coords(G: nx.Graph, from_crs: str, to_crs: str) -> nx.Graph:
-    transformer = Transformer.from_crs(from_crs, to_crs, always_xy=True)
-    for n, d in G.nodes(data=True):
-        d["x_m"], d["y_m"] = transformer.transform(d["x"], d["y"])
-    for u, v, d in G.edges(data=True):
-        if 'geometry' in d and d['geometry'] is not None:
-            # Transform the geometry coordinates
-            if hasattr(d['geometry'], 'coords'):
-                coords = list(d['geometry'].coords)
-                transformed_coords = [transformer.transform(x, y) for x, y in coords]
-                transformed_geometry = sg.LineString(transformed_coords)
-                d["length"] = transformed_geometry.length
-                # Cache the projected geometry itself (not just its length) so
-                # downstream consumers (e.g. compute_island_geodataframe_from_graph,
-                # called once per hazard-state cache miss) don't repeat this
-                # transform -- 'geometry' is kept in from_crs for callers that
-                # need it (e.g. event_footprint intersection, assumed EPSG:4326).
-                d["geometry_m"] = transformed_geometry
-            else:
-                # Fallback to straight-line distance if geometry doesn't have coords
-                x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
-                x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
-                d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-        else:
-            # No geometry available, use straight-line distance between nodes
-            x1, y1 = G.nodes[u]["x_m"], G.nodes[u]["y_m"]
-            x2, y2 = G.nodes[v]["x_m"], G.nodes[v]["y_m"]
-            d["length"] = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
-
-    return G
-
-def filter_hazard_graph(G: nx.Graph, threshold: float, hazard_column: str, 
-                        l1_area_geojson=None,
-                        event_footprint=None, outside_footprint_policy="permissive",
-                        verbose=False) -> nx.Graph:
-    """
-    Filter graph edges based on hazard values, excluding protected infrastructure.
-    Applies active L1 depth reductions by adjusting each edge threshold.
-
-    L2 (asset-level) adaptations are deliberately NOT accepted here: L2 barriers
-    protect specific CI assets, not roads, and must never be intersected against
-    road edges even if their geometries happen to overlap.
-
-    Connectivity-boundary policy (``outside_footprint_policy``):
-        - ``"permissive"`` (default): roads outside ``event_footprint`` are left
-          untouched by the footprint check (only the usual hazard-threshold
-          filtering applies). This preserves existing behaviour and is the
-          default when no footprint is supplied.
-        - ``"strict"``: roads that do not intersect ``event_footprint`` at all
-          are removed *before* hazard-threshold filtering, so they cannot act
-          as an exterior bypass that reconnects components separated by the
-          hazard inside the footprint. Requires a usable ``event_footprint``;
-          calling with ``"strict"`` and no footprint raises ``ValueError``
-          rather than silently falling back to permissive behaviour.
-
-    Args:
-        G: NetworkX graph with hazard values on edges
-        threshold: Base hazard value threshold for edge removal
-        hazard_column: Name of edge attribute containing hazard values
-        l1_area_geojson: Optional path/GeoDataFrame for L1 depth reductions
-        event_footprint: Optional footprint geometry defining the domain within
-            which connectivity is evaluated. Accepts a path/``GeoDataFrame``
-            (assumed/reprojected to EPSG:4326, matching the graph CRS) or a
-            shapely geometry already in the graph CRS. ``None`` means no
-            footprint restriction.
-        outside_footprint_policy: ``"strict"`` or ``"permissive"`` (default).
-            Any other value raises ``ValueError``.
-        verbose: Print progress messages
-    
-    Returns:
-        Filtered graph with hazard edges removed
-    """
-    from pathlib import Path
-
-    import geopandas as gpd
-    import pandas as pd
-    import shapely
-
-    if outside_footprint_policy not in ("strict", "permissive"):
-        raise ValueError(
-            f"Invalid outside_footprint_policy: {outside_footprint_policy!r}. "
-            "Must be 'strict' or 'permissive'."
-        )
-    if outside_footprint_policy == "strict" and event_footprint is None:
-        raise ValueError(
-            "outside_footprint_policy='strict' requires an 'event_footprint' "
-            "(none was provided). Provide a footprint geometry/GeoDataFrame/path, "
-            "or use outside_footprint_policy='permissive'."
-        )
-
-    def is_motorway(highway):
-        if isinstance(highway, str):
-            return "motorway" in highway.lower()
-        elif isinstance(highway, list):
-            return any("motorway" in str(h).lower() for h in highway)
-        return False
-
-    def is_protected(d):
-        """Check if an edge represents protected infrastructure (bridge/tunnel)"""
-        def check_attribute(val):
-            if val is None:
-                return False
-            
-            if isinstance(val, list):
-                return any(
-                    item is not None and 
-                    str(item).strip().lower() not in ['', 'nan', 'none', 'no'] 
-                    for item in val
-                )
-            elif isinstance(val, str):
-                val_clean = val.strip().lower()
-                return val_clean not in ['', 'nan', 'none', 'no']
-            else:
-                return pd.notna(val)
-
-        return check_attribute(d.get("bridge")) or check_attribute(d.get("tunnel")) or check_attribute(d.get("protected"))
-
-    edge_depth_reductions = {}
-
-    def iter_edges_with_keys():
-        if G.is_multigraph():
-            return G.edges(keys=True, data=True)
-        return ((u, v, None, data) for u, v, data in G.edges(data=True))
-
-    def add_adaptation_depth_reductions(adaptation, label, default_reduction):
-        if adaptation is None:
-            return
-
-        adaptation_gdf = (
-            gpd.read_file(adaptation)
-            if isinstance(adaptation, (str, Path))
-            else adaptation.copy()
-        )
-        if "depth_red" not in adaptation_gdf.columns:
-            adaptation_gdf['depth_red'] = default_reduction
-            if verbose:
-                print(
-                    f"Warning: {label} GeoJSON missing 'depth_red' column, "
-                    f"using default {default_reduction}m"
-                )
-
-        # Ensure correct CRS (graph is in EPSG:4326)
-        if adaptation_gdf.crs != "EPSG:4326":
-            adaptation_gdf = adaptation_gdf.to_crs("EPSG:4326")
-
-        adaptation_tree = shapely.STRtree(adaptation_gdf.geometry.values)
-        adapted_edge_count = 0
-        for u, v, edge_key, data in iter_edges_with_keys():
-            edge_geom = data.get('geometry')
-
-            if edge_geom is None:
-                from shapely.geometry import LineString
-                edge_geom = LineString([
-                    (G.nodes[u]['x'], G.nodes[u]['y']),
-                    (G.nodes[v]['x'], G.nodes[v]['y'])
-                ])
-
-            intersecting_indices = adaptation_tree.query(
-                edge_geom, predicate='intersects'
-            )
-            if len(intersecting_indices) > 0:
-                max_reduction = adaptation_gdf.iloc[
-                    intersecting_indices
-                ]['depth_red'].max()
-                cache_key = (u, v, edge_key)
-                edge_depth_reductions[cache_key] = (
-                    edge_depth_reductions.get(cache_key, 0.0) + max_reduction
-                )
-                adapted_edge_count += 1
-
-        if verbose:
-            print(f"Applied {label} to {adapted_edge_count} edges")
-
-    add_adaptation_depth_reductions(l1_area_geojson, "L1", 0.3)
-    # L2 (asset-level) adaptations are intentionally not applied to road edges:
-    # they protect specific assets, not roads, regardless of spatial overlap.
-
-    # Resolve the footprint into a single shapely geometry (graph CRS, EPSG:4326)
-    footprint_geom = None
-    if event_footprint is not None:
-        if isinstance(event_footprint, (str, Path)):
-            footprint_gdf = gpd.read_file(event_footprint)
-        elif isinstance(event_footprint, gpd.GeoDataFrame):
-            footprint_gdf = event_footprint
-        elif isinstance(event_footprint, gpd.GeoSeries):
-            footprint_gdf = gpd.GeoDataFrame(geometry=event_footprint)
-        else:
-            # Assume a shapely geometry already in the graph CRS
-            footprint_gdf = None
-            footprint_geom = event_footprint
-
-        if footprint_gdf is not None:
-            if footprint_gdf.crs is not None and str(footprint_gdf.crs) != "EPSG:4326":
-                footprint_gdf = footprint_gdf.to_crs("EPSG:4326")
-            footprint_geom = (
-                footprint_gdf.union_all()
-                if hasattr(footprint_gdf, "union_all")
-                else footprint_gdf.unary_union
-            )
-
-    # Filter edges based on adjusted thresholds
-    edges_to_remove = []
-    footprint_edges_removed = 0
-
-    for u, v, edge_key, d in iter_edges_with_keys():
-        edge = (u, v, edge_key) if G.is_multigraph() else (u, v)
-
-        # Strict connectivity-boundary policy: an edge that does not intersect
-        # the event footprint at all cannot be used as an exterior bypass to
-        # reconnect components separated by the hazard inside the footprint,
-        # so it is removed regardless of its hazard value.
-        if outside_footprint_policy == "strict" and footprint_geom is not None:
-            edge_geom = d.get("geometry")
-            if edge_geom is None:
-                from shapely.geometry import LineString
-                edge_geom = LineString([
-                    (G.nodes[u]["x"], G.nodes[u]["y"]),
-                    (G.nodes[v]["x"], G.nodes[v]["y"]),
-                ])
-            if not edge_geom.intersects(footprint_geom):
-                edges_to_remove.append(edge)
-                footprint_edges_removed += 1
-                continue
-
-        hazard_value = d.get(hazard_column, 0)
-        
-        # Get edge-specific depth reduction
-        depth_reduction = edge_depth_reductions.get((u, v, edge_key), 0.0)
-        
-        # Adjusted threshold: hazard must exceed (base_threshold + reduction)
-        adjusted_threshold = threshold + depth_reduction
-        
-        # Remove edge if hazard exceeds adjusted threshold (and not protected)
-        if (hazard_value > adjusted_threshold and 
-            not is_motorway(d.get("highway")) and 
-            not is_protected(d)):
-            edges_to_remove.append(edge)
-    
-    G.remove_edges_from(edges_to_remove)
-    G.remove_nodes_from(list(nx.isolates(G)))
-    
-    if verbose:
-        print(f"Removed {len(edges_to_remove)} edges (adjusted thresholds)")
-        if outside_footprint_policy == "strict" and footprint_geom is not None:
-            print(f"  of which {footprint_edges_removed} removed as outside the event footprint (strict policy)")
-    
-    return G
 
 def compile_asset_gdfs(gdf_list: list) -> "gpd.GeoDataFrame":
     """Concatenate multiple per-type asset GeoDataFrames into one unified GeoDataFrame.
@@ -507,3 +259,45 @@ def build_voronoi_service_area_map(
     if return_diagnostics:
         return service_area_map, diagnostics
     return service_area_map
+
+
+def json_safe(obj):
+    """Best-effort JSON-safe conversion for the run manifest.
+
+    Config/CLI values routinely include ``Path``, ``set``/``frozenset`` and
+    other objects ``json.dump`` cannot serialize directly (e.g. nested
+    knowledge-graph dicts are already plain, but ``l1_dir``/``l2_dir`` etc.
+    are ``Path``). Falls back to ``str()`` for anything else unrecognized
+    rather than raising, since this manifest is a human-readable record, not
+    a round-trippable format.
+    """
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, (set, frozenset)):
+        return sorted(json_safe(v) for v in obj)
+    if isinstance(obj, dict):
+        return {str(k): json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def write_run_manifest(out_dir, execution_id, input_parameters, output_parameters):
+    """Write the run's input/output parameters as a single JSON manifest.
+
+    Saved alongside the EMA results archive (``out_dir``) so a run's full
+    configuration and outcome summary travel together when archived (e.g.
+    copied to a results backup folder), instead of relying on manually
+    captured console/log output.
+    """
+    manifest = {
+        "execution_id": execution_id,
+        "input_parameters": json_safe(input_parameters),
+        "output_parameters": json_safe(output_parameters),
+    }
+    manifest_path = Path(out_dir) / f"run_manifest_{execution_id}.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=False)
+    return manifest_path

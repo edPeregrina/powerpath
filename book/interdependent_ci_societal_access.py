@@ -56,10 +56,7 @@ Usage:
     python book/interdependent_ci_societal_access.py --scenarios 100
 """
 import argparse
-import itertools
-import json
 import logging
-import pickle
 import sys
 import time
 from datetime import datetime, timezone
@@ -67,14 +64,12 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-import geopandas as gpd
 import numpy as np
 import pandas as pd
 from ema_workbench import (
     Constant,
     Model,
     MultiprocessingEvaluator,
-    Policy,
     Samplers,
     SequentialEvaluator,
     TimeSeriesOutcome,
@@ -83,97 +78,41 @@ from ema_workbench import (
 from ema_workbench.util.utilities import save_results
 
 from config import (
+    DEFAULT_CREW_RANGES,
+    DEFAULT_FRAGILITY_STEEPNESS_RANGES,
     get_config,
     get_development_config,
-    get_model_extent,
-    get_societal_access_config,
     print_config_summary,
     setup_directories,
     validate_config,
 )
+from src.adaptation import build_adaptation_policies
 from src.caching import (
-    load_simulation_caches,
     flush_dirty_caches,
     save_hazard_extraction_cache,
     save_island_cache,
     save_overlap_cache,
     save_societal_allocation_cache,
-    get_asset_centroid_hash,
 )
-from src.data_loader import load_electricity_assets, load_hazard_maps, load_osm_assets
-from src.dependency_knowledge_graph import build_default_knowledge_graph
-from src.impacts import (
-    create_voronoi_for_asset_type,
-    prepare_land_use_impact_data,
-    prepare_population_impact_data,
-    update_voll_rates,
-)
+from src.data_loader import prepare_model_inputs
+from src.impacts import MONETARY_CATEGORIES
+from src.island_analysis import add_road_exemption_args, apply_road_exemption_args
+from src.island_report import DEFAULT_SPATIAL_TRACE_FIELDS
 from src.simulation import (
     build_per_type_crew_uncertainties,
     build_per_type_fragility_steepness_uncertainties,
     fragility_steepness_from_param,
+    resolve_crew_ranges,
+    resolve_fragility_steepness_ranges,
     simulate_with_per_type_crews,
 )
-from src.societal_access import clip_population_to_service_area, list_societal_metric_names
-from src.utils import build_voronoi_service_area_map, compile_asset_gdfs
+from src.societal_access import list_societal_metric_names
+from src.utils import json_safe, write_run_manifest
 
 LOGGER = logging.getLogger(__name__)
 
-AMENITY_CATEGORY_LABELS = {
-    "ems": "EMS",
-    "hospital": "Hospitals",
-    "primary_care": "Primary Care",
-    "pharmacy": "Pharmacies",
-    "supermarket": "Supermarkets",
-}
-
 # Aggregated 2D outcome variables (per-timestep, summed across assets).
 KEEP_2D_VARS = ["flooded", "operational", "damage_ratio", "repair_time"]
-
-# Default per-asset, per-timestep fields captured by --spatial-trace-policies
-# (see run_spatial_trace). 'blocking_reason' is derived (see
-# src.adaptation.BLOCKING_REASON_LABELS for the code -> label mapping).
-DEFAULT_SPATIAL_TRACE_FIELDS = [
-    "island_id", "operational", "intrinsic_operational",
-    "accessible", "unreachable", "flooded", "blocking_reason",
-]
-
-MONETARY_CATEGORIES = [
-    "residential",
-    "commercial",
-    "industrial",
-    "transport",
-    "public_sector",
-]
-
-# Asset types that may receive their own repair-crew uncertainty range.
-# 'msls' = electricity substations; the rest are the OSM-derived amenity
-# categories (healthcare + supermarket).
-ASSET_TYPES_FOR_CREWS = ["msls", *AMENITY_CATEGORY_LABELS.keys()]
-
-# Default (min, max) repair-crew ranges per asset type.
-DEFAULT_CREW_RANGES = {
-    "msls": (10, 20),
-    "ems": (1, 3),
-    "hospital": (1, 3),
-    "primary_care": (1, 3),
-    "pharmacy": (1, 3),
-    "supermarket": (1, 1),
-}
-
-# Asset types that may receive their own fragility-steepness uncertainty
-# range. Only types with an explicit hazard_blocks_operation=False flooding
-# rule in the knowledge graph are fragility-eligible (see
-# src.simulation._fragility_exclusions_from_knowledge_graph); currently only
-# 'msls' substations.
-ASSET_TYPES_FOR_FRAGILITY = ["msls"]
-
-# Default (min, max) fragility-steepness (k) ranges per asset type, sampled
-# in 0.5 increments (see src.simulation.fragility_steepness_uncertainty).
-DEFAULT_FRAGILITY_STEEPNESS_RANGES = {
-    "msls": (5.0, 7.5),
-}
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -194,7 +133,7 @@ def parse_args():
         help=(
             "Override the repair-crew uncertainty range for one asset type, e.g. "
             "'--repair-crews-range msls 10 20'. Repeat for multiple asset types. "
-            f"Valid asset types: {', '.join(ASSET_TYPES_FOR_CREWS)}. "
+            f"Valid asset types: {', '.join(DEFAULT_CREW_RANGES)}. "
             f"Defaults: {DEFAULT_CREW_RANGES}."
         ),
     )
@@ -204,11 +143,12 @@ def parse_args():
                              "Override the fragility-steepness (k) uncertainty range for one "
                              "fragility-eligible asset type, sampled in 0.5 increments, e.g. "
                              "'--fragility-steepness-range msls 5.0 7.5'. Repeat for multiple "
-                             f"asset types. Valid asset types: {', '.join(ASSET_TYPES_FOR_FRAGILITY)}. "
+                             f"asset types. Valid asset types: {', '.join(DEFAULT_FRAGILITY_STEEPNESS_RANGES)}. "
                              f"Defaults: {DEFAULT_FRAGILITY_STEEPNESS_RANGES}."
                          ))
     parser.add_argument("--flood-threshold", type=float, default=0.2,
                          help="Flood depth threshold (m) above which an asset is considered flooded. Default: 0.2.")
+    add_road_exemption_args(parser)
     parser.add_argument("--adaptation-active-timesteps", type=int, default=198,
                          help="Number of leading timesteps during which L1/L2 adaptation measures are active. Default: 198.")
     parser.add_argument(
@@ -284,185 +224,10 @@ def parse_args():
     parser.add_argument("--repair-priority", type=str, default="population impacts islands",
                          help="repair_crew_assignment_method used for the baseline and all L1/L2 "
                               "policies. Default: 'population impacts islands'.")
+    parser.add_argument("--shadow-l1-islands", action="store_true",
+                         help="Diagnostic: on each L1 island-cache miss also run the incremental "
+                              "L1 partition and log SHADOW_L1 timings/equality (results unchanged).")
     return parser.parse_args()
-
-
-def resolve_crew_ranges(args):
-    """Merge CLI ``--repair-crews-range`` overrides into `DEFAULT_CREW_RANGES`.
-
-    Returns:
-        dict: ``{asset_type: (min_crews, max_crews)}`` for every asset type in
-        `ASSET_TYPES_FOR_CREWS`.
-    """
-    crew_ranges = dict(DEFAULT_CREW_RANGES)
-    for asset_type, min_crews, max_crews in args.repair_crews_range or []:
-        if asset_type not in ASSET_TYPES_FOR_CREWS:
-            raise ValueError(
-                f"Unknown asset type '{asset_type}' in --repair-crews-range; "
-                f"expected one of {ASSET_TYPES_FOR_CREWS}."
-            )
-        crew_ranges[asset_type] = (int(min_crews), int(max_crews))
-    return crew_ranges
-
-
-def resolve_fragility_steepness_ranges(args):
-    """Merge CLI ``--fragility-steepness-range`` overrides into
-    `DEFAULT_FRAGILITY_STEEPNESS_RANGES`.
-
-    Returns:
-        dict: ``{asset_type: (min_k, max_k)}`` for every asset type in
-        `ASSET_TYPES_FOR_FRAGILITY`.
-    """
-    steepness_ranges = dict(DEFAULT_FRAGILITY_STEEPNESS_RANGES)
-    for asset_type, min_k, max_k in args.fragility_steepness_range or []:
-        if asset_type not in ASSET_TYPES_FOR_FRAGILITY:
-            raise ValueError(
-                f"Unknown asset type '{asset_type}' in --fragility-steepness-range; "
-                f"expected one of {ASSET_TYPES_FOR_FRAGILITY}."
-            )
-        steepness_ranges[asset_type] = (float(min_k), float(max_k))
-    return steepness_ranges
-
-
-def load_combined_assets(config):
-    """Load full-extent electricity substations + OSM-derived service
-    amenities and combine them into a single GeoDataFrame with a shared
-    positional index.
-
-    Returns:
-        tuple: (gdf_assets_combined, substation_idx, osm_asset_idx)
-    """
-    gdf_electricity = load_electricity_assets(config["electricity_dir"], asset_types=["msls"])
-
-    hc_assets = load_osm_assets(
-        config["osm_asset_dir"],
-        asset_types=list(AMENITY_CATEGORY_LABELS.keys()),
-    ).to_crs("EPSG:4326")
-
-    gdf_assets_combined = compile_asset_gdfs([gdf_electricity, hc_assets])
-
-    substation_idx = list(gdf_assets_combined[gdf_assets_combined["type"] == "msls"].index)
-    osm_asset_idx = list(gdf_assets_combined[gdf_assets_combined["type"].isin(AMENITY_CATEGORY_LABELS)].index)
-
-    LOGGER.info(
-        "Combined assets: %d (substations: %d, OSM service amenities: %d)",
-        len(gdf_assets_combined), len(substation_idx), len(osm_asset_idx),
-    )
-    hc_counts = gdf_assets_combined.loc[osm_asset_idx, "type"].value_counts()
-    for category, label in AMENITY_CATEGORY_LABELS.items():
-        LOGGER.info("  %s: %d", label, int(hc_counts.get(category, 0)))
-
-    return gdf_assets_combined, substation_idx, osm_asset_idx
-
-
-def build_dependency_config(config, gdf_assets_combined, substation_voronoi, osm_asset_idx):
-    """Attach the shared dependency knowledge graph (electricity -> healthcare)
-    to a copy of *config*. The substation <-> OSM-asset Voronoi service-area
-    map is also attached for traceability, even though the simulation's
-    dependency engine derives its own provider assignment internally.
-    """
-    knowledge_graph = build_default_knowledge_graph()
-
-    gdf_osm_assets_proj = gdf_assets_combined.loc[osm_asset_idx].to_crs(substation_voronoi.crs)
-    service_area_map, _ = build_voronoi_service_area_map(
-        substation_voronoi, gdf_osm_assets_proj, return_diagnostics=True,
-    )
-
-    config_combined = {**config}
-    config_combined["dependency_parameters"] = {
-        **config["dependency_parameters"],
-        "knowledge_graph": knowledge_graph.to_config(),
-        "service_area_map": service_area_map,
-    }
-    return config_combined, service_area_map
-
-
-def prepare_population_and_land_use(config, gdf_assets_combined, substation_idx,
-                                     substation_voronoi, root_dir, model_extent):
-    """Build a flat {asset_id: population} exposure map for the electricity
-    substations, the substation land-use/VOLL lookup used for monetary
-    impact outcomes, and the population grid used by societal-access
-    postprocessing.
-
-    Only substations get a population entry: each one directly serves the
-    population within its Voronoi cell. OSM service amenities (hospital,
-    primary_care, pharmacy, ems, supermarket) are intentionally excluded --
-    population-weighted access to them is computed separately by
-    ``src.societal_access`` (see this script's module docstring), which
-    builds its own population-to-function mapping from the population grid.
-    Merging a substation-derived proxy population into this same map would
-    double-count population already counted via the substation entry in the
-    generic ``affected_population``/``served_population``/``total_population``
-    outcomes.
-
-    ``model_extent`` (config.get_model_extent) clips population, replacing
-    stedin_area.geojson as the clip boundary.
-    """
-    population_buffer = gpd.GeoDataFrame(geometry=[model_extent], crs="EPSG:28992")
-
-    pop_suffix = "_sample" if config.get("use_sample_population_data") else ""
-    population_data_path = root_dir / "data" / "population" / f"cbs_vk100_2025_v1{pop_suffix}.gpkg"
-    LOGGER.info("Loading population data from %s", population_data_path)
-    population_data = gpd.read_file(
-        population_data_path, driver="GPKG", bbox=tuple(model_extent.bounds),
-    ).to_crs("EPSG:28992")
-
-    pop_group_cols = list(config["service_node_config"]["population_groups"].values())
-
-    # CBS encodes suppressed/unavailable group counts as negative sentinels
-    # (e.g. -99997 secret, -99995 not available); clamp to 0.
-    for col in pop_group_cols:
-        population_data[col] = population_data[col].clip(lower=0)
-
-    population_data = population_data[
-        (population_data["aantal_inwoners"] > 0) & (~population_data.geometry.isna())
-    ].dropna(subset=["geometry"])
-    population_study_area = gpd.clip(population_data, population_buffer)
-    population_above_0 = population_study_area[["aantal_inwoners", "geometry"]].set_crs("EPSG:28992")
-
-    # Population grid for societal-access postprocessing (demographic group
-    # columns + a stable cell_id), independent of asset_population_map.
-    population_for_societal = population_study_area[[*pop_group_cols, "geometry"]].set_crs("EPSG:28992")
-    population_for_societal = population_for_societal.reset_index(drop=True)
-    population_for_societal["cell_id"] = population_for_societal.index.astype(str)
-
-    asset_population_map = prepare_population_impact_data(
-        population_data=population_above_0, voronoi_gdf=substation_voronoi,
-    )
-    LOGGER.info(
-        "asset_population_map ready for %d substations (total population: %.0f)",
-        len(asset_population_map), sum(asset_population_map.values()),
-    )
-
-    # Land use / VOLL monetary-impact lookup, computed on the substation Voronoi only.
-    land_use_suffix = "_sample" if config.get("use_sample_population_data") else ""
-    land_use_path = root_dir / "data" / "land_use" / f"CBS_Publicatiebestand_BBG2017_v1{land_use_suffix}.gpkg"
-    # Voronoi geometry hash keeps the cache from going stale when the extent
-    # (e.g. model_extent_raw) changes but the land-use filename doesn't.
-    voronoi_hash = get_asset_centroid_hash(substation_voronoi[["geometry"]])
-    asset_to_lu_cache_path = config["interim_dir"] / f"{land_use_path.stem}_{voronoi_hash}_asset_to_lu.pkl"
-
-    if asset_to_lu_cache_path.exists():
-        LOGGER.info("Loading asset_to_lu from cache: %s", asset_to_lu_cache_path)
-        with open(asset_to_lu_cache_path, "rb") as f:
-            asset_to_lu = pickle.load(f)
-    else:
-        LOGGER.info("Computing asset_to_lu from scratch (land use x substation Voronoi intersection)...")
-        land_use_data = gpd.read_file(land_use_path, driver="GPKG")
-        _, voll_per_sqm = update_voll_rates(land_use_data)
-        asset_land_use_map = prepare_land_use_impact_data(land_use_data, voronoi_gdf=substation_voronoi)
-
-        asset_to_lu = {
-            aid: [(lu_type, area, voll_per_sqm[lu_type])
-                  for lu_type, area in lu_dict.items() if lu_type in voll_per_sqm]
-            for aid, lu_dict in asset_land_use_map.items()
-        }
-        with open(asset_to_lu_cache_path, "wb") as f:
-            pickle.dump(asset_to_lu, f)
-        LOGGER.info("Saved asset_to_lu to cache: %s", asset_to_lu_cache_path)
-
-    LOGGER.info("asset_to_lu ready with %d substations", len(asset_to_lu))
-    return asset_population_map, asset_to_lu, population_for_societal
 
 
 def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
@@ -543,6 +308,8 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
             all_functions=societal_access_config["all_functions"],
             pop_group_columns=societal_access_config["pop_group_columns"],
             reference_group=societal_access_config.get("reference_group", "total"),
+            capacity_groups=societal_access_config.get("capacity_groups"),
+            service_area_function_provider_types=societal_access_config.get("service_area_function_provider_types"),
         )
     )
     model.outcomes = outcomes_list
@@ -550,46 +317,40 @@ def build_ema_model(config_combined, gdf_assets_combined, hazard_maps, caches,
     return model
 
 
-def _json_safe(obj):
-    """Best-effort JSON-safe conversion for the run manifest.
+def write_multi_map_road_islands(trace_dir, stem, gdf_assets, config, island_cache, policy, timestep,
+                                 major_timestep, threshold, repair_crew_assignment_method):
+    """``<stem>_road_islands.parquet`` for one timestep of a trace, with the island labels the
+    simulation used (read from its island cache). Returns the path, or None on a cache miss.
 
-    Config/CLI values routinely include ``Path``, ``set``/``frozenset`` and
-    other objects ``json.dump`` cannot serialize directly (e.g. nested
-    knowledge-graph dicts are already plain, but ``l1_dir``/``l2_dir`` etc.
-    are ``Path``). Falls back to ``str()`` for anything else unrecognized
-    rather than raising, since this manifest is a human-readable record, not
-    a round-trippable format.
-    """
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, (set, frozenset)):
-        return sorted(_json_safe(v) for v in obj)
-    if isinstance(obj, dict):
-        return {str(k): _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_json_safe(v) for v in obj]
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
-        return obj
-    return str(obj)
+    Islands are only built at map loads, so the column, active L1 and cache key come from the
+    load timestep. Non-island crew methods use flat connectivity, so nothing is written."""
+    from src.island_analysis import _road_exemption_kwargs
+    from src.island_report import write_road_islands
+    from src.road_islands import compute_island_geodataframe_from_graph
+    from src.simulation import _get_active_adaptation, island_state_key
+    from src.single_map import road_peak_depths
 
-
-def write_run_manifest(out_dir, execution_id, input_parameters, output_parameters):
-    """Write the run's input/output parameters as a single JSON manifest.
-
-    Saved alongside the EMA results archive (``out_dir``) so a run's full
-    configuration and outcome summary travel together when archived (e.g.
-    copied to a results backup folder), instead of relying on manually
-    captured console/log output.
-    """
-    manifest = {
-        "execution_id": execution_id,
-        "input_parameters": _json_safe(input_parameters),
-        "output_parameters": _json_safe(output_parameters),
-    }
-    manifest_path = Path(out_dir) / f"run_manifest_{execution_id}.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, sort_keys=False)
-    return manifest_path
+    if "island" not in repair_crew_assignment_method:
+        return None
+    loaded_timestep = int(timestep // major_timestep) * major_timestep
+    column = f"EV{int(timestep // major_timestep)}_ma"
+    l1, l1_active = policy.get("l1_area_geojson"), policy.get("l1_active_timesteps")
+    key = island_state_key(gdf_assets, column, threshold, l1, l1_active, loaded_timestep, config)
+    entry = (island_cache or {}).get(key)
+    if entry is None:
+        LOGGER.warning("No island cache entry for %s at t=%s; skipping road islands.", policy.name, timestep)
+        return None
+    graph_path = Path(config["hazard_dir"]).parent / "static" / "output_graph" / "base_graph_hazard_editted.p"
+    roads = compute_island_geodataframe_from_graph(
+        graph_path, hazard_threshold=threshold, hazard_column=column, buffer_distance=20,
+        l1_area_geojson=_get_active_adaptation(l1, l1_active, loaded_timestep), **_road_exemption_kwargs(config),
+    )
+    rfids_islands = entry["rfids_islands"]
+    keep = [c for c in ("rfid", "island_id", "length_m", "island_size_km", "original_geometry", "geometry")
+            if c in roads]
+    roads = roads.loc[roads["rfid"].isin(rfids_islands), keep].copy()
+    roads["island_id"] = roads["rfid"].map(rfids_islands)
+    return write_road_islands(trace_dir, stem, roads, road_peak_depths(graph_path, column))
 
 
 def run_spatial_trace(
@@ -615,6 +376,7 @@ def run_spatial_trace(
     """
     import geopandas as gpd
 
+    from src import island_report
     from src.island_analysis import build_asset_road_match_table
 
     requested_names = [n.strip() for n in args.spatial_trace_policies.split(",") if n.strip()]
@@ -633,6 +395,9 @@ def run_spatial_trace(
         [f.strip() for f in args.spatial_trace_fields.split(",") if f.strip()]
         if args.spatial_trace_fields else DEFAULT_SPATIAL_TRACE_FIELDS
     )
+
+    # always trace island_id/operational, whatever --spatial-trace-fields says
+    trace_fields = list(dict.fromkeys([*trace_fields, "island_id", "operational"]))
 
     LOGGER.info(
         "Running spatial trace capture for %d polic(y/ies) x %d scenario(s): fields=%s",
@@ -704,15 +469,8 @@ def run_spatial_trace(
         for field in trace_fields:
             rows[field] = np.asarray(outcomes[field][exp_idx]).reshape(n_timesteps * n_assets)
 
-        trace_df = pd.DataFrame(rows)
-        trace_gdf = trace_df.merge(asset_geometry, on="asset_id", how="left")
-        trace_gdf = gpd.GeoDataFrame(trace_gdf, geometry="geometry", crs=gdf_assets_combined.crs)
-
         safe_policy = str(policy_name).replace(" ", "_")
         trace_path = trace_dir / f"spatial_trace_{execution_id}_{safe_policy}_scenario{scenario_name}.parquet"
-        trace_gdf.to_parquet(trace_path)
-        LOGGER.info("Saved spatial trace (%d rows) to %s", len(trace_gdf), trace_path)
-
         # Persist the sampled uncertainty values for this draw alongside the
         # trace -- otherwise this scenario's parameters (repair-crew counts,
         # fragility steepness, etc.) are only known in-memory here and get
@@ -720,96 +478,30 @@ def run_spatial_trace(
         # asset explorer dashboard) with only an arbitrary scenario index and
         # no way to say *what* draw they're looking at.
         uncertainty_cols = [c for c in experiments_df.columns if c not in ("scenario", "policy", "model")]
-        uncertainties = _json_safe(experiments_df.loc[exp_idx, uncertainty_cols].to_dict())
-        uncertainties_path = trace_path.with_name(trace_path.stem + "_uncertainties.json")
-        with open(uncertainties_path, "w", encoding="utf-8") as f:
-            json.dump(uncertainties, f, indent=2)
+        island_report.write_trace_file(
+            trace_path, rows, asset_geometry, gdf_assets_combined.crs,
+            json_safe(experiments_df.loc[exp_idx, uncertainty_cols].to_dict()),
+        )
+
+        policy = next(p for p in trace_policies if p.name == policy_name)
+        for t in timesteps:
+            if not t % 24 == 0:
+                continue
+            write_multi_map_road_islands(
+                trace_dir, f"{trace_path.stem}_day{int(t) // 24}", gdf_assets_combined, config_combined,
+                caches.get("island_cache"), policy, int(t), args.major_timestep, args.flood_threshold,
+                args.repair_priority,
+            )
 
     road_match_path = trace_dir / f"asset_road_match_{execution_id}.parquet"
     road_match_gdf = build_asset_road_match_table(
         gdf_assets_combined, config_combined["hazard_dir"],
         hazard_threshold=args.flood_threshold, hazard_column="EV0_ma",
         config=config_combined,
+        graph_path=config_combined["hazard_dir"].parent / "static" / "output_graph" / "base_graph_hazard_editted.p",
     )
     road_match_gdf.to_parquet(road_match_path)
     LOGGER.info("Saved static asset-to-road match table (%d rows) to %s", len(road_match_gdf), road_match_path)
-
-
-def build_adaptation_policies(root_dir, args, l1_dir=None, l2_dir=None,
-                               repair_priority="population impacts islands"):
-    """Build the adaptation-measure policy set: base (no-adaptation) repair
-    policies, plus L1-only, L2-only and all L1 x L2 combinations, read from
-    pre-generated adaptation GeoJSON files.
-
-    Args:
-        l1_dir, l2_dir (Path, optional): L1/L2 adaptation GeoJSON directories.
-            Default: args.l1_dir/args.l2_dir, falling back to the repo's
-            data/test_samples/adaptation subdirs.
-        repair_priority (str): repair_crew_assignment_method for the baseline
-            and all L1/L2 policies, e.g. "population impacts islands" or
-            "monetary impacts islands".
-    """
-    l1_dir = l1_dir or args.l1_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L1_adaptations")
-    l2_dir = l2_dir or args.l2_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L2_adaptations")
-
-    l1_files = sorted(l1_dir.glob("*.geojson")) if l1_dir.exists() else []
-    l2_files = sorted(l2_dir.glob("*.geojson")) if l2_dir.exists() else []
-    if args.max_l1_files is not None:
-        l1_files = l1_files[: args.max_l1_files]
-    if args.max_l2_files is not None:
-        l2_files = l2_files[: args.max_l2_files]
-    LOGGER.info("Found %d L1 adaptation files in %s", len(l1_files), l1_dir)
-    LOGGER.info("Found %d L2 adaptation files in %s", len(l2_files), l2_dir)
-
-    active_timesteps = list(range(0, args.adaptation_active_timesteps))
-
-    priority_label = repair_priority.replace(" ", "_")
-    unconstrained_priority = repair_priority.replace(" islands", "")
-    policies = [
-        Policy(f"{priority_label}_policy", repair_crew_assignment_method=repair_priority),
-        Policy(f"{unconstrained_priority.replace(' ', '_')}_unconstrained", repair_crew_assignment_method=unconstrained_priority),
-    ]
-
-    adaptation_policies = [
-        Policy("baseline_no_prioritisation", repair_crew_assignment_method="islands"),
-    ]
-
-    for l1_file in l1_files:
-        adaptation_policies.append(
-            Policy(f"L1_only_{l1_file.stem}",
-                   repair_crew_assignment_method=repair_priority,
-                   l1_area_geojson=str(l1_file),
-                   l1_active_timesteps=active_timesteps)
-        )
-
-    for l2_file in l2_files:
-        adaptation_policies.append(
-            Policy(f"L2_only_{l2_file.stem}",
-                   repair_crew_assignment_method=repair_priority,
-                   l2_asset_geojson=str(l2_file),
-                   l2_active_timesteps=active_timesteps)
-        )
-
-    for l1_file, l2_file in itertools.product(l1_files, l2_files):
-        adaptation_policies.append(
-            Policy(f"L1L2_{l1_file.stem}_{l2_file.stem}",
-                   repair_crew_assignment_method=repair_priority,
-                   l1_area_geojson=str(l1_file),
-                   l1_active_timesteps=active_timesteps,
-                   l2_asset_geojson=str(l2_file),
-                   l2_active_timesteps=active_timesteps)
-        )
-
-    policies.extend(adaptation_policies)
-
-    LOGGER.info("Total policies to evaluate: %d", len(policies))
-    LOGGER.info("  - Base repair policies: 2")
-    LOGGER.info("  - Baseline (no adaptation): 1")
-    LOGGER.info("  - L1-only policies: %d", len(l1_files))
-    LOGGER.info("  - L2-only policies: %d", len(l2_files))
-    LOGGER.info("  - L1+L2 combined: %d", len(l1_files) * len(l2_files))
-
-    return policies
 
 
 def main():
@@ -823,6 +515,8 @@ def main():
         LOGGER.info("[warm-up] %s (+%.1fs)", label, time.time() - t_start)
 
     config = get_development_config() if args.dev_config else get_config()
+    config['simulation_config']['shadow_l1_islands'] = args.shadow_l1_islands
+    apply_road_exemption_args(config, args)
     is_valid, missing_dirs, warnings = validate_config(config)
     if not is_valid:
         LOGGER.warning("Configuration issues detected: missing=%s warnings=%s", missing_dirs, warnings)
@@ -841,51 +535,14 @@ def main():
 
     root_dir = Path(config["root_dir"])
 
-    gdf_assets_combined, substation_idx, osm_asset_idx = load_combined_assets(config)
-    _checkpoint("combined assets loaded")
-
-    LOGGER.info("Loading hazard maps from %s", config["hazard_dir"])
-    hazard_maps = load_hazard_maps(config["hazard_dir"], max_days=None)
-    LOGGER.info("Loaded %d hazard maps", len(hazard_maps))
-    _checkpoint("hazard maps loaded")
-
-    # Voronoi generators padded beyond the true extent shape boundary cells
-    # correctly; results are clipped to model_extent_raw before any
-    # downstream use (see CLAUDE.md "Dataset-extent alignment").
-    model_extent_raw = get_model_extent(config)
-    model_extent_buffered = get_model_extent(config, buffer_frac=0.05)
-
-    LOGGER.info("Building Voronoi service areas for electricity substations...")
-    substation_voronoi = create_voronoi_for_asset_type(
-        gdf_assets_combined, "msls", boundary=model_extent_buffered,
-    )
-    substation_voronoi_clipped = gpd.clip(substation_voronoi, model_extent_raw)
-    _checkpoint("substation Voronoi built")
-
-    config_combined, service_area_map = build_dependency_config(
-        config, gdf_assets_combined, substation_voronoi_clipped, osm_asset_idx,
-    )
-    _checkpoint("dependency config + service-area map built")
-
-    asset_population_map, asset_to_lu, population_for_societal = prepare_population_and_land_use(
-        config_combined, gdf_assets_combined, substation_idx,
-        substation_voronoi_clipped, root_dir, model_extent_raw,
-    )
-    population_for_societal = clip_population_to_service_area(
-        population_for_societal, gdf_assets_combined,
-    )
-    _checkpoint("population + land-use data ready")
-
-    caches = load_simulation_caches(config["interim_dir"], config["hazard_dir"])
-    LOGGER.info("Loaded caches: %s", [k for k in caches if caches[k] is not None])
-    _checkpoint("simulation caches loaded")
-
-    societal_access_config = get_societal_access_config(
-        config_combined, population_for_societal, caches=caches,
-        asset_types=["msls", *AMENITY_CATEGORY_LABELS.keys()],
-        namespace="interdependent_ci_societal_access",
-    )
-    LOGGER.info("Societal access functions: %s", societal_access_config["all_functions"])
+    inputs = prepare_model_inputs(config, _checkpoint)
+    config_combined = inputs["config_combined"]
+    gdf_assets_combined = inputs["gdf_assets"]
+    hazard_maps = inputs["hazard_maps"]
+    asset_population_map = inputs["asset_population_map"]
+    asset_to_lu = inputs["asset_to_lu"]
+    caches = inputs["caches"]
+    societal_access_config = inputs["societal_access_config"]
 
     execution_id = int(time.time())
     profiler = None

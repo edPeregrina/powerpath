@@ -792,10 +792,24 @@ def clip_population_to_service_area(
     return clipped.reset_index(drop=True)
 
 
+_HULL_AREA_MEMO: Dict[tuple, Optional[float]] = {}
+
+
 def _service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
-    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``."""
+    """Area of the buffered convex hull of *gdf_assets* in *crs*, or ``None``.
+
+    Memoised on the asset geometries (the union dominates and the assets are identical across calls).
+    """
     if gdf_assets.empty:
         return None
+    geom_hash = hashlib.sha1(b"".join(gdf_assets.geometry.to_wkb())).hexdigest()
+    memo_key = (str(gdf_assets.crs), str(crs), float(buffer_m), geom_hash)
+    if memo_key not in _HULL_AREA_MEMO:
+        _HULL_AREA_MEMO[memo_key] = _compute_service_area_hull_area(gdf_assets, crs, buffer_m)
+    return _HULL_AREA_MEMO[memo_key]
+
+
+def _compute_service_area_hull_area(gdf_assets: gpd.GeoDataFrame, crs, buffer_m: float) -> Optional[float]:
     try:
         assets_in_crs = gdf_assets.to_crs(crs) if gdf_assets.crs != crs else gdf_assets
         _geom = assets_in_crs.geometry
@@ -1759,9 +1773,16 @@ def postprocess_societal_access_results(
     shared_cache_fail_hard: bool = False,
     cache_telemetry: Optional[Dict[str, int]] = None,
     cache_telemetry_lock: Optional[Any] = None,
+    capacity_groups: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
     """Compute societal access metrics per timestep and merge into summary results.
 
+    ``capacity_groups`` (labels of ``pop_group_columns``) adds provider-count
+    metrics for the island-based functions: mean operational providers per
+    person, the same for the initial state (fixed per person, taken from
+    the initial timestep, or from a timestep whose detail has
+    ``capacity_reference=True``; such a timestep only sets the reference and
+    emits nothing), and their ratio in %.
     This function is the realization-aware postprocessor.  It must be called
     **after** the simulation loop completes so that dependency-adjusted
     ``operational`` states are already recorded in *detailed_results*.
@@ -1988,6 +2009,14 @@ def postprocess_societal_access_results(
     if all_functions is None:
         all_functions = sorted(set(taxonomy.values()))
 
+    capacity_groups = tuple(capacity_groups or ())
+    unknown_groups = [g for g in capacity_groups if g not in pop_group_columns]
+    if unknown_groups:
+        raise ValueError(f"capacity_groups {unknown_groups} are not in pop_group_columns")
+    capacity_functions = island_capacity_functions(all_functions, service_area_function_provider_types)
+    capacity_names = capacity_metric_names(capacity_functions, capacity_groups)
+    capacity_reference_means: Optional[Dict[Tuple[str, str], float]] = None
+
     # Build a lookup: summary_results keyed by timestep
     summary_by_ts: Dict[int, Dict[str, Any]] = {d["timestep"]: d for d in summary_results}
 
@@ -2053,7 +2082,7 @@ def postprocess_societal_access_results(
                 # Prepare the state for this timestep, including early-exit checks and reading operational data
                 if ts_detail is None:
                     # No detailed data → emit NaN
-                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group, capacity_names)
                     continue
 
                 # Read dependency-adjusted operational states
@@ -2061,7 +2090,7 @@ def postprocess_societal_access_results(
                 island_ids = np.asarray(ts_detail.get("island_id", []))
 
                 if len(operational) == 0 or len(island_ids) == 0:
-                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group, capacity_names)
                     continue
 
             with profiler.section("societal_access.build_operational_provider_map"):
@@ -2100,7 +2129,7 @@ def postprocess_societal_access_results(
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                    _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group, capacity_names)
                     continue
                 road_state_key = str(road_state_key_raw)
 
@@ -2134,7 +2163,7 @@ def postprocess_societal_access_results(
                             RuntimeWarning,
                             stacklevel=2,
                         )
-                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group, capacity_names)
                         continue
                     allocation_df, allocation_cache_key, _ = get_or_build_allocation(
                         allocation_cache,
@@ -2185,7 +2214,7 @@ def postprocess_societal_access_results(
                         if fail_on_missing_allocation:
                             raise RuntimeError(message)
                         warnings.warn(message, RuntimeWarning, stacklevel=2)
-                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group)
+                        _merge_zero_societal_metrics(ts_summary, all_functions, pop_group_columns, reference_group, capacity_names)
                         continue
 
             with profiler.section("societal_access.compute_scalars"):
@@ -2213,6 +2242,21 @@ def postprocess_societal_access_results(
                                     pass
                         _cached_entry = _pop_alloc_cache.get(allocation_cache_key)
 
+                is_capacity_reference = bool(ts_detail.get("capacity_reference"))
+                if capacity_groups and (is_capacity_reference or ts_idx == 0):
+                    with profiler.section("societal_access.capacity_reference"):
+                        capacity_reference_means = _mean_providers_per_person(
+                            _provider_counts_by_island(
+                                island_ids, None, provider_positions, asset_func_aliases,
+                                unknown_func_aliases, _num_assets_static,
+                            ),
+                            _cached_entry["island_pop"] if _cached_entry else None,
+                            _cached_entry["total_pop"] if _cached_entry else None,
+                            _cached_entry["available_group_cols"] if _cached_entry else None,
+                            capacity_functions, capacity_groups,
+                        )
+                if is_capacity_reference:
+                    continue
                 # Compute the cache key for the scalar fields and compute scalar values if cache miss.
                 with profiler.section("societal_access.compute_scalars.cache_key"):
                     _frozen_ifm_key = frozenset(frozen_island_function_map.items())
@@ -2334,6 +2378,19 @@ def postprocess_societal_access_results(
                             reference_group=reference_group,
                             remote_fraction_by_function=weighted_voronoi_remote_fraction,
                         )
+                if capacity_groups:
+                    # Keep new fields outside the caches so warm entries need no schema change.
+                    ts_summary.update(_capacity_fields(
+                        _provider_counts_by_island(
+                            island_ids, operational, provider_positions, asset_func_aliases,
+                            unknown_func_aliases, _num_assets_static,
+                        ),
+                        capacity_reference_means,
+                        _cached_entry["island_pop"] if _cached_entry else None,
+                        _cached_entry["total_pop"] if _cached_entry else None,
+                        _cached_entry["available_group_cols"] if _cached_entry else None,
+                        capacity_functions, capacity_groups,
+                    ))
                 ts_summary.update(societal_fields)
                 ts_summary["allocation_cache_key"] = allocation_cache_key
                 ts_summary["allocation_road_state_key"] = road_state_key
@@ -2502,8 +2559,11 @@ def _merge_zero_societal_metrics(
     all_functions: List[str],
     pop_group_columns: Dict[str, str],
     reference_group: str,
+    capacity_names: Iterable[str] = (),
 ) -> None:
     """Emit NaN societal metrics when no detailed data is available."""
+    for name in capacity_names:
+        ts_summary[name] = float("nan")
     for func in all_functions:
         for group in pop_group_columns:
             ts_summary[f"societal_access_pct__{func}__{group}"] = float("nan")
@@ -2519,14 +2579,171 @@ def _merge_zero_societal_metrics(
             ts_summary[f"societal_equity_relative_gap__{func}__{group}"] = float("nan")
 
 
+CAPACITY_METRIC_KINDS = ("mean_providers", "mean_providers_reference", "capacity_retained_pct")
+
+
+def island_capacity_functions(
+    all_functions: Iterable[str],
+    service_area_function_provider_types: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Functions whose provider count is meaningful: the island-based ones.
+
+    Service-area functions (electricity, schools) have one fixed provider per
+    cell, so a count would only ever be 0 or 1; they stay binary.
+    """
+    service_area = (
+        SERVICE_AREA_FUNCTION_PROVIDER_TYPES
+        if service_area_function_provider_types is None
+        else service_area_function_provider_types
+    )
+    return [f for f in all_functions if f != "electricity" and f not in service_area]
+
+
+def capacity_metric_names(functions: Iterable[str], groups: Iterable[str]) -> List[str]:
+    """Flat names of the provider-count metrics per function and group."""
+    groups = list(groups)
+    return [
+        f"societal_{kind}__{func}__{group}"
+        for func in functions for group in groups for kind in CAPACITY_METRIC_KINDS
+    ]
+
+
+def _provider_counts_by_island(
+    island_ids: np.ndarray,
+    operational: Optional[np.ndarray],
+    provider_positions: List[int],
+    asset_func_aliases: List[Tuple[str, ...]],
+    unknown_func_aliases: Tuple[str, ...],
+    num_static_assets: int,
+) -> Dict[str, Dict[int, int]]:
+    """``{function: {island: number of providers}}``; ``operational=None`` counts every provider."""
+    n = len(island_ids) if operational is None else min(len(island_ids), len(operational))
+    counts: Dict[str, Dict[int, int]] = {}
+
+    def _add(i: int, aliases: Iterable[str]) -> None:
+        island = int(island_ids[i])
+        for func in aliases:
+            by_island = counts.setdefault(func, {})
+            by_island[island] = by_island.get(island, 0) + 1
+
+    for i in provider_positions:
+        if i < n and (operational is None or operational[i]):
+            _add(i, asset_func_aliases[i])
+    if unknown_func_aliases:
+        for i in range(num_static_assets, n):
+            if operational is None or operational[i]:
+                _add(i, unknown_func_aliases)
+    return counts
+
+
+def _mean_providers_per_person(
+    counts: Dict[str, Dict[int, int]],
+    island_pop: Optional[pd.DataFrame],
+    total_pop: Optional[Dict[str, float]],
+    available_group_cols: Optional[Dict[str, str]],
+    functions: Iterable[str],
+    groups: Iterable[str],
+) -> Dict[Tuple[str, str], float]:
+    """Population-weighted mean number of providers on a person's island, per (function, group)."""
+    result: Dict[Tuple[str, str], float] = {}
+    for func in functions:
+        by_island = {i: c for i, c in counts.get(func, {}).items() if i != -1}
+        for group in groups:
+            col = (available_group_cols or {}).get(group)
+            total = (total_pop or {}).get(group, 0.0)
+            if island_pop is None or col is None or not total > 0:
+                result[(func, group)] = float("nan")
+                continue
+            ids = [i for i in by_island if i in island_pop.index]
+            weighted = sum(float(island_pop.at[i, col]) * by_island[i] for i in ids)
+            result[(func, group)] = weighted / total
+    return result
+
+
+def _capacity_fields(
+    counts: Dict[str, Dict[int, int]],
+    reference_means: Optional[Dict[Tuple[str, str], float]],
+    island_pop: Optional[pd.DataFrame],
+    total_pop: Optional[Dict[str, float]],
+    available_group_cols: Optional[Dict[str, str]],
+    functions: Iterable[str],
+    groups: Iterable[str],
+) -> Dict[str, float]:
+    """Provider-count proxy: current/reference means and 100 * current mean / reference mean.
+
+    This is a ratio of population-weighted means, not the population-weighted
+    mean of each person's retained fraction. Every provider counts as one,
+    irrespective of facility size, beds or staffing.
+    """
+    nan = float("nan")
+    current = _mean_providers_per_person(
+        counts, island_pop, total_pop, available_group_cols, functions, groups
+    )
+    fields: Dict[str, float] = {}
+    for (func, group), mean_now in current.items():
+        mean_ref = (reference_means or {}).get((func, group), nan)
+        retained = round(100.0 * mean_now / mean_ref, 2) if mean_ref > 0 else nan
+        fields[f"societal_mean_providers__{func}__{group}"] = mean_now
+        fields[f"societal_mean_providers_reference__{func}__{group}"] = mean_ref
+        fields[f"societal_capacity_retained_pct__{func}__{group}"] = retained
+    return fields
+
+
+def postprocess_societal_access_from_config(
+    societal_access_config: Dict[str, Any],
+    summary_results: List[Dict[str, Any]],
+    detailed_results: List[Dict[str, Any]],
+    gdf_assets: gpd.GeoDataFrame,
+    allocation_cache: Dict[str, pd.DataFrame],
+    verbose: bool = False,
+    **overrides: Any,
+) -> Tuple[List[Dict[str, Any]], Dict[str, pd.DataFrame]]:
+    """Run :func:`postprocess_societal_access_results` from a societal config.
+
+    Single place mapping ``get_societal_access_config`` keys (and their
+    defaults) to postprocessor kwargs, shared by the time-explicit and
+    single-map pipelines.  *overrides* are passed through unchanged.
+    """
+    cfg = societal_access_config
+    kwargs = dict(
+        pop_grid_gdf=cfg.get("pop_grid_gdf"),
+        cell_id_column=cfg.get("cell_id_column", "cell_id"),
+        pop_group_columns=cfg.get("pop_group_columns"),
+        taxonomy=cfg.get("taxonomy"),
+        asset_type_column=cfg.get("asset_type_column", "type"),
+        asset_id_column=cfg.get("asset_id_column"),
+        allocation_cache=allocation_cache,
+        all_functions=cfg.get("all_functions"),
+        reference_group=cfg.get("reference_group", "total"),
+        capacity_groups=cfg.get("capacity_groups"),
+        nearest_max_distance=cfg.get("nearest_max_distance", 200.0),
+        service_area_function_provider_types=cfg.get(
+            "service_area_function_provider_types"
+        ),
+        fail_on_missing_allocation=cfg.get("fail_on_missing_allocation", True),
+        verbose=cfg.get("verbose", verbose),
+    )
+    kwargs.update(overrides)
+    return postprocess_societal_access_results(
+        summary_results=summary_results,
+        detailed_results=detailed_results,
+        gdf_assets=gdf_assets,
+        **kwargs,
+    )
+
+
 def list_societal_metric_names(
     all_functions: List[str],
     pop_group_columns: Dict[str, str],
     reference_group: str = "total",
+    capacity_groups: Optional[Iterable[str]] = None,
+    service_area_function_provider_types: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Return the complete list of flat societal metric field names.
 
     Used to pre-initialise EMA output arrays before running experiments.
+    ``capacity_groups`` adds the provider-count metrics (see
+    :func:`capacity_metric_names`).
     """
     names: List[str] = []
     for func in all_functions:
@@ -2542,4 +2759,9 @@ def list_societal_metric_names(
                 continue
             names.append(f"societal_equity_absolute_gap__{func}__{group}")
             names.append(f"societal_equity_relative_gap__{func}__{group}")
+    if capacity_groups:
+        names.extend(capacity_metric_names(
+            island_capacity_functions(all_functions, service_area_function_provider_types),
+            capacity_groups,
+        ))
     return names

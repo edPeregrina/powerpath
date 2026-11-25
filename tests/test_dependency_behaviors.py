@@ -28,6 +28,7 @@ from src.dependency_knowledge_graph import (
     POLICY_ANY,
     POLICY_AT_LEAST_N,
     POLICY_EXCLUSIVE,
+    build_default_knowledge_graph,
 )
 from src.dependency_topology import DependencyEdge
 from src.simulation import SimulationState, _update_operational_state
@@ -435,6 +436,51 @@ def test_dependency_blocking_does_not_trigger_physical_delayed_failure():
     assert report["dependency_available"].tolist() == [True, False]
     assert not any(k.startswith("hazard_recovery_wait::") for k in wait_vectors)
     assert hazard_active_masks == {}
+
+
+def test_repair_complete_trigger_only_blocks_failed_assets():
+    """A flooded asset that survived fragility keeps operating while awaiting repair; only a
+    failed one stays blocked (default knowledge graph: msls has repair_complete, no hazard block)."""
+    asset_type = np.array(["msls", "msls", "msls"])
+    _, report = evaluate_operational_state(
+        intrinsic_operational=np.array([True, False, True]),
+        asset_type=asset_type,
+        hazard_type="flooding",
+        knowledge_graph=build_default_knowledge_graph(),
+        flooded_mask=np.array([True, True, False]),
+        repair_time=np.array([40.0, 40.0, 40.0]),
+        dependency_edges=[],
+        wait_vectors={"repair_time": np.array([40.0, 40.0, 40.0])},
+        hazard_active_masks={},
+        restart_active_masks={},
+    )
+    assert report["hazard_available"].tolist() == [True, False, True]
+    assert report["effective_operational"].tolist() == [True, False, True]
+
+
+def test_delayed_trigger_holds_assets_that_did_not_fail():
+    """The delayed hazard-recovery wait holds every asset of the type, failed or not."""
+    kg = DependencyKnowledgeGraph.from_config([{
+        "relation": "hazard",
+        "hazard_type": "flooding",
+        "source_type": "hospital",
+        "hazard_blocks_operation": True,
+        "return_to_operational": {"trigger": "delayed", "delay_steps": 5.0, "wait_vector": "recovery"},
+    }])
+    wait_key = hazard_recovery_wait_key("recovery")
+    _, report = evaluate_operational_state(
+        intrinsic_operational=np.array([True, False, True]),
+        asset_type=np.array(["hospital", "hospital", "hospital"]),
+        hazard_type="flooding",
+        knowledge_graph=kg,
+        flooded_mask=np.zeros(3, dtype=bool),
+        repair_time=np.zeros(3),
+        dependency_edges=[],
+        wait_vectors={wait_key: np.array([5.0, 5.0, 0.0])},
+        hazard_active_masks={wait_key: np.array([True, True, False])},
+        restart_active_masks={},
+    )
+    assert report["hazard_available"].tolist() == [False, False, True]
 
 
 def test_evaluate_operational_state_via_simulation_wiring():

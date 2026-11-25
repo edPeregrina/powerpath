@@ -10,6 +10,9 @@ from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
 from shapely.geometry import box
 
+#: Land-use categories of the monetary impact outcomes (``monetary_impact_<category>``).
+MONETARY_CATEGORIES = ["residential", "commercial", "industrial", "transport", "public_sector"]
+
 _VORONOI_CACHE = {}
 _VORONOI_CACHE_VERSION = "1.0.0"
 

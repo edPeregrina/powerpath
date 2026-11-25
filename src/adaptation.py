@@ -3,6 +3,9 @@ Adaptation measures for L1 (area-based depth reduction) and L2 (asset-specific d
 Uses STRtree for optimal spatial queries (query smaller dataset against larger).
 All spatial operations are performed once per simulation run and cached.
 """
+import itertools
+import logging
+
 import numpy as np
 import geopandas as gpd
 from pathlib import Path
@@ -11,6 +14,10 @@ import pickle
 import networkx as nx
 import hashlib
 from typing import Optional, Tuple, List, Dict
+
+from ema_workbench import Policy
+
+LOGGER = logging.getLogger(__name__)
 
 
 
@@ -26,6 +33,25 @@ BLOCKING_REASON_LABELS = {
     3: "dependency_blocked",
     4: "other_blocked",
 }
+
+def blocking_reason_codes(operational, intrinsic, hazard_avail, dependency_avail):
+    """Per-asset code (see ``BLOCKING_REASON_LABELS``) for why an asset is non-operational.
+
+    1=physically_damaged (not intrinsically operational), 2=hazard_blocked, 3=dependency_blocked,
+    4=other_blocked (e.g. a dependency-restart delay), 0=operational.
+    """
+    operational = np.asarray(operational).astype(bool)
+    intrinsic = np.asarray(intrinsic).astype(bool)
+    hazard_avail = np.asarray(hazard_avail).astype(bool)
+    dependency_avail = np.asarray(dependency_avail).astype(bool)
+    reason = np.zeros(len(operational), dtype=int)
+    blocked = ~operational
+    reason[blocked & ~intrinsic] = 1
+    reason[blocked & intrinsic & ~hazard_avail] = 2
+    reason[blocked & intrinsic & hazard_avail & ~dependency_avail] = 3
+    reason[blocked & intrinsic & hazard_avail & dependency_avail] = 4
+    return reason
+
 
 def _build_adaptation_arrays_cached(
     gdf_assets: gpd.GeoDataFrame,
@@ -616,6 +642,8 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
             all_functions=all_functions,
             pop_group_columns=pop_group_columns,
             reference_group=reference_group,
+            capacity_groups=societal_access_config.get('capacity_groups'),
+            service_area_function_provider_types=societal_access_config.get('service_area_function_provider_types'),
         )
 
     def _get_metric_value(ts, metric, summary_to_metric, count_to_binary):
@@ -651,13 +679,7 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
         hazard_avail = np.asarray(detailed_ts.get('hazard_available', np.ones(n_assets)))[:n_assets].astype(bool)
         dependency_avail = np.asarray(detailed_ts.get('dependency_available', np.ones(n_assets)))[:n_assets].astype(bool)
 
-        reason = np.zeros(n_assets, dtype=int)
-        blocked = ~operational
-        reason[blocked & ~intrinsic] = 1
-        reason[blocked & intrinsic & ~hazard_avail] = 2
-        reason[blocked & intrinsic & hazard_avail & ~dependency_avail] = 3
-        reason[blocked & intrinsic & hazard_avail & dependency_avail] = 4
-        return reason
+        return blocking_reason_codes(operational, intrinsic, hazard_avail, dependency_avail)
 
     def _store_2d_metric(result, metric, t_idx, value, n_assets, count_to_binary):
         """Aggregate and store metric as scalar in 2D array."""
@@ -733,3 +755,80 @@ def simulate_asset_damage_recovery_access_breakdown_ema(*args, **kwargs):
     )
     
     return result
+
+
+def build_adaptation_policies(root_dir, args, l1_dir=None, l2_dir=None,
+                               repair_priority="population impacts islands"):
+    """Build the adaptation-measure policy set: base (no-adaptation) repair
+    policies, plus L1-only, L2-only and all L1 x L2 combinations, read from
+    pre-generated adaptation GeoJSON files.
+
+    Args:
+        l1_dir, l2_dir (Path, optional): L1/L2 adaptation GeoJSON directories.
+            Default: args.l1_dir/args.l2_dir, falling back to the repo's
+            data/test_samples/adaptation subdirs.
+        repair_priority (str): repair_crew_assignment_method for the baseline
+            and all L1/L2 policies, e.g. "population impacts islands" or
+            "monetary impacts islands".
+    """
+    l1_dir = l1_dir or args.l1_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L1_adaptations")
+    l2_dir = l2_dir or args.l2_dir or (root_dir / "data" / "test_samples" / "adaptation" / "L2_adaptations")
+
+    l1_files = sorted(l1_dir.glob("*.geojson")) if l1_dir.exists() else []
+    l2_files = sorted(l2_dir.glob("*.geojson")) if l2_dir.exists() else []
+    if args.max_l1_files is not None:
+        l1_files = l1_files[: args.max_l1_files]
+    if args.max_l2_files is not None:
+        l2_files = l2_files[: args.max_l2_files]
+    LOGGER.info("Found %d L1 adaptation files in %s", len(l1_files), l1_dir)
+    LOGGER.info("Found %d L2 adaptation files in %s", len(l2_files), l2_dir)
+
+    active_timesteps = list(range(0, args.adaptation_active_timesteps))
+
+    priority_label = repair_priority.replace(" ", "_")
+    unconstrained_priority = repair_priority.replace(" islands", "")
+    policies = [
+        Policy(f"{priority_label}_policy", repair_crew_assignment_method=repair_priority),
+        Policy(f"{unconstrained_priority.replace(' ', '_')}_unconstrained", repair_crew_assignment_method=unconstrained_priority),
+    ]
+
+    adaptation_policies = [
+        Policy("baseline_no_prioritisation", repair_crew_assignment_method="islands"),
+    ]
+
+    for l1_file in l1_files:
+        adaptation_policies.append(
+            Policy(f"L1_only_{l1_file.stem}",
+                   repair_crew_assignment_method=repair_priority,
+                   l1_area_geojson=str(l1_file),
+                   l1_active_timesteps=active_timesteps)
+        )
+
+    for l2_file in l2_files:
+        adaptation_policies.append(
+            Policy(f"L2_only_{l2_file.stem}",
+                   repair_crew_assignment_method=repair_priority,
+                   l2_asset_geojson=str(l2_file),
+                   l2_active_timesteps=active_timesteps)
+        )
+
+    for l1_file, l2_file in itertools.product(l1_files, l2_files):
+        adaptation_policies.append(
+            Policy(f"L1L2_{l1_file.stem}_{l2_file.stem}",
+                   repair_crew_assignment_method=repair_priority,
+                   l1_area_geojson=str(l1_file),
+                   l1_active_timesteps=active_timesteps,
+                   l2_asset_geojson=str(l2_file),
+                   l2_active_timesteps=active_timesteps)
+        )
+
+    policies.extend(adaptation_policies)
+
+    LOGGER.info("Total policies to evaluate: %d", len(policies))
+    LOGGER.info("  - Base repair policies: 2")
+    LOGGER.info("  - Baseline (no adaptation): 1")
+    LOGGER.info("  - L1-only policies: %d", len(l1_files))
+    LOGGER.info("  - L2-only policies: %d", len(l2_files))
+    LOGGER.info("  - L1+L2 combined: %d", len(l1_files) * len(l2_files))
+
+    return policies

@@ -29,6 +29,23 @@ SCHOOL_WEIGHTED_VORONOI_SCALE_FACTORS = {
     "school_so": 8e6,
 }
 
+# Default (min, max) repair crews per asset type; runners override via --repair-crews-range.
+DEFAULT_CREW_RANGES = {
+    "msls": (10, 20),
+    "ems": (1, 3),
+    "hospital": (1, 3),
+    "primary_care": (1, 3),
+    "pharmacy": (1, 3),
+    "supermarket": (1, 1),
+}
+
+# Default (min, max) fragility steepness k, sampled in 0.5 steps; runners override via
+# --fragility-steepness-range. Only types whose flooding rule has hazard_blocks_operation=False
+# in the knowledge graph are fragility-eligible (currently 'msls').
+DEFAULT_FRAGILITY_STEEPNESS_RANGES = {
+    "msls": (5.0, 7.5),
+}
+
 
 def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=None,
                                 cell_id_column="cell_id", namespace="societal_access"):
@@ -93,6 +110,7 @@ def get_societal_access_config(config, pop_grid_gdf, caches=None, asset_types=No
         "cell_id_column": cell_id_column,
         "pop_group_columns": service_node_config["population_groups"],
         "reference_group": service_node_config["reference_group"],
+        "capacity_groups": service_node_config["capacity_groups"],
         "taxonomy": taxonomy,
         "asset_type_column": "type",
         "all_functions": sorted(set(taxonomy.values())),
@@ -186,8 +204,11 @@ def get_config(root_dir=None, hazard_dir_override=None):
             'repair_crew_assignment_method': 'islands',  # Options: 'islands', 'islands lowest repair time', 'lowest repair time', 'highest repair time', 'random'
             'flood_threshold': 0.2,
             'verbose': False,
-            'accessibility_model': None,  # Default to None, can be set to grid_hex.accessibility_model
-            # Event connectivity-boundary policy (see src.utils.filter_hazard_graph):
+            # Diagnostic: on each L1 island-cache miss also run the incremental L1 partition
+            # (l1_node_islands) and log SHADOW_L1 timings/equality; results are unchanged.
+            'shadow_l1_islands': False,
+            'accessibility_model': None,  # Must stay None: grid-based model removed; island-based access is used
+            # Event connectivity-boundary policy (see src.road_islands.filter_hazard_graph):
             #   event_footprint_path=None restricts nothing (no footprint).
             #   outside_footprint_policy='permissive' (default) preserves existing
             #     behaviour: roads outside the footprint may still provide bypass
@@ -197,6 +218,14 @@ def get_config(root_dir=None, hazard_dir_override=None):
             #     from reconnecting components separated by the hazard.
             'event_footprint_path': None,
             'outside_footprint_policy': 'permissive',
+            # Road hazard exemptions (see src.road_islands.filter_hazard_graph): when True
+            # (default, existing behaviour) these roads are never failed by the
+            # flood threshold; set False to let flooding cut them. Edges tagged
+            # 'protected' are always exempt. Changing these changes island
+            # results, so clear data/interim island/access caches when you do.
+            'exempt_motorways': True,
+            'exempt_bridges': True,
+            'exempt_tunnels': True,
         },
         
         # Recovery model parameters
@@ -215,6 +244,9 @@ def get_config(root_dir=None, hazard_dir_override=None):
                     'activation_threshold': 0.0,
                 },
             },
+            # Single-map mode only (multi-map reads durations from the flood maps):
+            # per-map flood duration, truncated lognormal in days.
+            'flood_duration_days': {'min': 0.0, 'max': 7.0, 'median': 1.0, 'sigma': 1.0},
             # 'time_step_hours': 1,
             'damage_threshold': 0.01,    # Minimum damage ratio to consider asset damaged
             'repair_threshold': 2.0      # Minimum repair time threshold for repairable assets
@@ -267,6 +299,8 @@ def get_config(root_dir=None, hazard_dir_override=None):
                 'working_age': 'aantal_inwoners_25_tot_45_jaar',
             },
             'reference_group': 'total',
+            # Groups for which provider-count (capacity) metrics are emitted; labels from population_groups.
+            'capacity_groups': ('total', 'elderly'),
         },
 
         'dependency_parameters': {
@@ -320,12 +354,14 @@ def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
             extent; only use >0 for Voronoi generator-point padding, never
             for the road network.
         hazard_filename: specific hazard raster to read; defaults to the
-            first ``*.tif`` in ``config['hazard_dir']``.
+            first ``*.tif`` in ``config['hazard_dir']``, after checking that
+            every ``*.tif`` there has the same CRS and bounds (to half a pixel).
 
     Returns:
         shapely.geometry.Polygon in EPSG:28992.
     """
     import geopandas as gpd
+    import numpy as np
     from rasterio import open as rio_open
     from shapely.geometry import box
 
@@ -337,6 +373,16 @@ def get_model_extent(config, buffer_frac=0.0, hazard_filename=None):
         if not candidates:
             raise FileNotFoundError(f"No hazard .tif files found in {hazard_dir}")
         hazard_path = candidates[0]
+        with rio_open(hazard_path) as src:
+            crs, bounds, tol = src.crs, np.array(src.bounds), min(map(abs, src.res)) / 2
+        for other in candidates[1:]:
+            with rio_open(other) as src:
+                if src.crs != crs or not np.allclose(src.bounds, bounds, rtol=0, atol=tol):
+                    raise ValueError(
+                        f"Hazard maps in {hazard_dir} differ in extent: {other.name} "
+                        f"{tuple(src.bounds)} vs {hazard_path.name} {tuple(bounds)}. "
+                        "Clip them to one extent (the road network is built for one)."
+                    )
 
     with rio_open(hazard_path) as src:
         raster_crs = src.crs

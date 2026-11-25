@@ -55,6 +55,29 @@ def vectorized_damage_ratio_solver(repair_times, coefficients):
     # Clamp to valid range [0, 1]
     return np.clip(damage_ratios, 0.0, 1.0)
 
+def update_damage_and_repair(depth, damage_ratio, repair_time, flood_threshold,
+                             damage_ratio_coefficients, repair_time_coefficients,
+                             repair_threshold=2.0):
+    """Raise damage ratio / set repair time for assets flooded above threshold, then
+    re-solve damage ratio for assets still above ``repair_threshold``.
+    Mutates ``damage_ratio`` and ``repair_time`` in place; returns the newly-damaged mask."""
+    flooded_mask = depth > flood_threshold
+    newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
+    if np.any(flooded_mask):
+        dr_new = default_damage_ratio_function(depth[flooded_mask], damage_ratio_coefficients)
+        newly_damaged_mask[np.where(flooded_mask)[0]] = dr_new > damage_ratio[flooded_mask]
+        damage_ratio[flooded_mask] = np.maximum(damage_ratio[flooded_mask], dr_new)
+        repair_time[flooded_mask] = default_repair_time_function(
+            damage_ratio[flooded_mask], repair_time_coefficients
+        )
+    recalc_repair_mask = repair_time > repair_threshold
+    if np.any(recalc_repair_mask):
+        damage_ratio[recalc_repair_mask] = vectorized_damage_ratio_solver(
+            repair_time[recalc_repair_mask], repair_time_coefficients
+        )
+    return newly_damaged_mask
+
+
 def _per_timestep_failure_probability(failure_probability, major_timestep):
     """Convert daily failure probability to the active timestep probability."""
     failure_probability = np.clip(np.asarray(failure_probability, dtype=np.float64), 0.0, 1.0)
@@ -157,15 +180,18 @@ def _sample_fragility_operational_status(
     model,
     k=None,
     major_timestep=24,
+    random_values=None,
 ):
-    """Sample operational status from an explicit fragility model."""
+    """Sample operational status from an explicit fragility model.
+    ``random_values`` (uniform [0,1), same shape) replaces the internal draw."""
     failure_probability = _build_failure_probability(
         hazard_values,
         model,
         k=k,
         major_timestep=major_timestep,
     )
-    random_values = np.random.random(size=hazard_values.shape)
+    if random_values is None:
+        random_values = np.random.random(size=hazard_values.shape)
     return (random_values >= failure_probability).astype(int)
 
 
@@ -191,6 +217,35 @@ def hospital_fragility_function(
     )
 
 
+def with_steepness_overrides(fragility_models, steepness_overrides=None):
+    """``fragility_models`` with per-asset-type ``steepness`` layered on, without mutating the input
+    (the config dict is shared across every EMA experiment)."""
+    base = fragility_models or {}
+    if not steepness_overrides:
+        return base
+    models = dict(base)
+    for asset_type, steepness in steepness_overrides.items():
+        models[asset_type] = {**models.get(asset_type, {}), "steepness": steepness}
+    return models
+
+
+def resolve_fragility_model(asset_name, fragility_models=None):
+    """Explicit model for ``asset_name`` if given, else the default depth-logistic model."""
+    model = (fragility_models or {}).get(str(asset_name))
+    if model is not None:
+        return model
+    if str(asset_name) == "hospital":
+        median = 0.5
+    else:
+        median = 0.3 if str(asset_name) == "ls" else 0.6 if str(asset_name) == "msls" else 0.0
+    return {
+        "mode": "depth_logistic",
+        "median_failure_depth": median,
+        "steepness_range": (5.0, 7.5),
+        "activation_threshold": 0.0,
+    }
+
+
 def default_fragility_function(
     hazard_values,
     asset_type,
@@ -198,9 +253,12 @@ def default_fragility_function(
     major_timestep=24,
     fragility_models: Mapping[str, Mapping[str, object]] | None = None,
     fragility_exclusions=None,
+    random_values=None,
 ):
     """
     Calculate binary operational status from hazard values using fragility curve.
+    ``random_values`` (one uniform draw per asset) replaces the internal sampling, enabling
+    common random numbers across runs.
     Failure probability is determined (by default daily, major_timestep=24 hours) and sampled for each asset.
     Returns 1 for operational, 0 for failed, based on probabilistic sampling.
     
@@ -240,28 +298,14 @@ def default_fragility_function(
         if not np.any(asset_mask):
             continue
 
-        model = fragility_models.get(str(asset_name))
-        if model is None:
-            if str(asset_name) == "hospital":
-                model = {
-                    "mode": "depth_logistic",
-                    "median_failure_depth": 0.5,
-                    "steepness_range": (5.0, 7.5),
-                    "activation_threshold": 0.0,
-                }
-            else:
-                model = {
-                    "mode": "depth_logistic",
-                    "median_failure_depth": 0.3 if str(asset_name) == "ls" else 0.6 if str(asset_name) == "msls" else 0.0,
-                    "steepness_range": (5.0, 7.5),
-                    "activation_threshold": 0.0,
-                }
+        model = resolve_fragility_model(asset_name, fragility_models)
 
         operational_status[asset_mask] = _sample_fragility_operational_status(
             hazard_values[asset_mask],
             model=model,
             k=k,
             major_timestep=major_timestep,
+            random_values=None if random_values is None else np.asarray(random_values)[asset_mask],
         )
 
     return operational_status

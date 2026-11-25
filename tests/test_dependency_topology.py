@@ -182,6 +182,32 @@ def test_voronoi_topology_assigns_exactly_one_provider_per_target():
     assert all(len(e.provider_indices) <= 1 for e in edges)
 
 
+def test_voronoi_topology_falls_back_to_nearest_source_outside_all_cells():
+    gdf = _make_assets(
+        [
+            ("msls", 0, 0),
+            ("msls", 1000, 0),
+            ("msls", -100_000, -100_000),
+            ("msls", -100_000, 100_000),
+            ("msls", 1_100_000, -100_000),
+            ("msls", 1_100_000, 100_000),
+            ("hospital", -100_000, -100_300),  # outside the hull, next to index 2
+        ]
+    )
+    kg = _single_dependency_graph(
+        {
+            "relation": "dependency",
+            "source_type": "msls",
+            "target_type": "hospital",
+            "topology": "voronoi",
+            "availability_policy": "exclusive",
+        }
+    )
+    edges = expand_dependency_edges(gdf, kg)
+    assert edges[0].provider_indices == (2,)
+    assert targets_without_providers(edges) == []
+
+
 def test_voronoi_topology_no_providers_when_targets_exist():
     gdf = _make_assets([("hospital", 0, 0), ("hospital", 10, 0)])
     kg = _single_dependency_graph(

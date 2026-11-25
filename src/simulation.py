@@ -18,7 +18,6 @@ from src.adaptation import (
     build_l1_l2_reduction_array,
 )
 from src.caching import (
-    create_accessibility_cache_key,
     create_island_cache_key,
     get_asset_centroid_hash,
     load_accessibility_cache,
@@ -32,10 +31,9 @@ from src.realized_state_cache import (
     build_shared_realized_state_cache_from_config,
 )
 from src.damage_recovery import (
-    default_damage_ratio_function,
     default_fragility_function,
-    default_repair_time_function,
-    vectorized_damage_ratio_solver,
+    with_steepness_overrides,
+    update_damage_and_repair,
 )
 from src.dependency_evaluator import (
     activate_hazard_recovery_waits,
@@ -46,6 +44,7 @@ from src.hazard_analysis_electricity import (
     find_hazard_value_at_points_optimized,
 )
 from src.island_analysis import (
+    _road_exemption_kwargs,
     match_assets_access,
     match_island_ids_assets,
     update_repair_crew_islands,
@@ -59,7 +58,7 @@ from src.timing_profiler import NULL_PROFILER
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import get_config
+from config import DEFAULT_CREW_RANGES, DEFAULT_FRAGILITY_STEEPNESS_RANGES, get_config
 from shutil import copyfile
 
 _WORKER_SHARED_REALIZED_STATE_CACHE_BACKENDS = {}
@@ -114,6 +113,19 @@ def _get_active_adaptation(adaptation, active_timesteps, timestep):
     if active_timesteps is None or timestep in active_timesteps:
         return adaptation
     return None
+
+
+def island_state_key(gdf_assets, hazard_column, flood_threshold, l1_area_geojson, l1_active_timesteps,
+                     timestep, config):
+    """Island-cache key of the road state at ``timestep``, as the simulation builds it."""
+    return create_island_cache_key(
+        hazard_column,
+        flood_threshold,
+        get_asset_centroid_hash(gdf_assets),
+        l1_area_geojson=_get_active_adaptation(l1_area_geojson, l1_active_timesteps, timestep),
+        l1_active_timesteps=l1_active_timesteps,
+        exemptions=_road_exemption_kwargs(config),
+    )
 
 
 class SimulationState:
@@ -302,17 +314,12 @@ def _update_hazard_map_states(
     # Island-based crew management
     if 'island' in repair_crew_assignment_method:
         assert isinstance(available_repair_crews, dict), f"Island method requires dict of recpair crews at this point, got {type(available_repair_crews)}"
-        asset_hash = get_asset_centroid_hash(temp_gdf)
         previous_road_state_key = state.road_state_key
         active_l1_area_geojson = _get_active_adaptation(
             l1_area_geojson, l1_active_timesteps, timestep
         )
-        cache_key = create_island_cache_key(
-            haz_col_str, 
-            flood_threshold, 
-            asset_hash,
-            l1_area_geojson=active_l1_area_geojson,
-            l1_active_timesteps=l1_active_timesteps,
+        cache_key = island_state_key(
+            temp_gdf, haz_col_str, flood_threshold, l1_area_geojson, l1_active_timesteps, timestep, _config,
         )
         state.road_state_key = cache_key
         try:
@@ -430,19 +437,11 @@ def _update_hazard_map_states(
             # they aren't also forced through a repair cycle. See
             # `_fragility_exclusions_from_knowledge_graph`.
             fragility_exclusions = _fragility_exclusions_from_knowledge_graph(_config, asset_type_subset)
-            # Non-destructively layer per-asset-type steepness overrides (e.g. from
-            # EMA uncertainties, see combine_per_type_fragility_steepness_kwargs)
-            # on top of the configured fragility_models, without mutating the
-            # shared config dict (it is reused across every EMA experiment).
-            base_fragility_models = _config['recovery_parameters'].get('fragility_models') or {}
-            fragility_models = base_fragility_models
-            if fragility_steepness_overrides:
-                fragility_models = dict(base_fragility_models)
-                for override_type, steepness in fragility_steepness_overrides.items():
-                    fragility_models[override_type] = {
-                        **fragility_models.get(override_type, {}),
-                        'steepness': steepness,
-                    }
+            # Per-asset-type steepness overrides (e.g. from EMA uncertainties, see
+            # combine_per_type_fragility_steepness_kwargs) layered on the configured models.
+            fragility_models = with_steepness_overrides(
+                _config['recovery_parameters'].get('fragility_models'), fragility_steepness_overrides
+            )
             fragility_result = default_fragility_function(
                 hazard_subset,
                 asset_type_subset,
@@ -456,76 +455,32 @@ def _update_hazard_map_states(
 
     # Update damage ratio and repair time for assets flooded above threshold this timestep
     with profiler.section("simulation._update_hazard_map_states.damage_repair_update"):
-        if np.any(flooded_mask):
-            dr_new = default_damage_ratio_function(state.current_hazard_values[flooded_mask], damage_ratio_coefficients)
-            newly_damaged_mask = np.zeros_like(flooded_mask, dtype=bool)
-            flooded_indices = np.where(flooded_mask)[0]
-            new_damage_check = dr_new > state.damage_ratio[flooded_mask]
-            newly_damaged_mask[flooded_indices] = new_damage_check
-            state.damage_ratio[flooded_mask] = np.maximum(state.damage_ratio[flooded_mask], dr_new)
-            repair_time = state.recovery_wait_vectors["repair_time"]
-            repair_time[flooded_mask] = default_repair_time_function(
-                state.damage_ratio[flooded_mask], repair_time_coefficients
-            )
-            if verbose:
-                try:
-                    damage_count = newly_damaged_mask.sum()
-                    print(f"  New damage at timestep {timestep}: {damage_count} assets")
-                    if damage_count > 0:
-                        print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
-                        print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
-                except Exception as e:
-                    print(f"  Error occurred while logging damage information: {e}, {timestep}")
-
-        # For assets needing repair, solve for current damage ratio excluding assets under repair threshold
         repair_time = state.recovery_wait_vectors["repair_time"]
-        recalc_repair_mask = (repair_time > repair_threshold)
-        if np.any(recalc_repair_mask):
-            repair_times_under_repair = repair_time[recalc_repair_mask]
-            damage_ratios_from_repair = vectorized_damage_ratio_solver(
-                repair_times_under_repair, repair_time_coefficients
-            )
-            state.damage_ratio[recalc_repair_mask] = damage_ratios_from_repair
-
-    accessibility_model = _config['simulation_config']['accessibility_model']
-    if accessibility_model is not None:
-        # Daily accessibility update
-        accessibility_cache_key = create_accessibility_cache_key(
-            map_counter, flood_threshold, hazard_dir,
-            accessibility_model=accessibility_model
+        newly_damaged_mask = update_damage_and_repair(
+            state.current_hazard_values, state.damage_ratio, repair_time, flood_threshold,
+            damage_ratio_coefficients, repair_time_coefficients, repair_threshold,
         )
-        if accessibility_cache_key in accessibility_cache:
-            state.accessible = accessibility_cache[accessibility_cache_key]
-            if verbose:
-                print(f"Using cached accessibility for map {map_counter} (hazard dir: {haz_dir_name})")
-        else:
+        if verbose and np.any(flooded_mask):
             try:
-                assets_copy = temp_gdf.copy()
-                accessibility_result = grid_hex.accessibility_model(
-                    assets_copy.geometry, 
-                    hazard_map, 
-                    state.current_hazard_values,
-                    verbose=verbose,
-                    day_string=str(state.day_counter).zfill(2),
-                    project_root=_config['paths']['root_dir'],
-                )
-                # accessibility_result = state.accessible  # Defaulting to accessible, to use only islands logic
-                state.accessible = np.array(accessibility_result, dtype=bool)
-                accessibility_cache[accessibility_cache_key] = state.accessible
-                cache_updated['accessibility_cache'] = accessibility_cache
-
-                if verbose:
-                    print(f"Accessibility updated for timestep {timestep} (map {map_counter})")
-                    print(f"Accessible assets: {state.accessible.sum()} out of {num_assets}")
+                damage_count = newly_damaged_mask.sum()
+                print(f"  New damage at timestep {timestep}: {damage_count} assets")
+                if damage_count > 0:
+                    print(f"  Damage ratios: {state.damage_ratio[newly_damaged_mask].min():.3f} to {state.damage_ratio[newly_damaged_mask].max():.3f}")
+                    print(f"  Repair times: {repair_time[newly_damaged_mask].min():.1f} to {repair_time[newly_damaged_mask].max():.1f} hours")
             except Exception as e:
-                print(f"Warning: Accessibility model failed: {e}")
-                print("Keeping current accessibility status")
-    else:
-        pass
+                print(f"  Error occurred while logging damage information: {e}, {timestep}")
 
     return available_repair_crews, previous_rfids_islands, previous_map_counter, cache_updated
 
-def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned, 
+def repair_impact_map(method, asset_to_lu=None, asset_population_map=None):
+    """Per-asset value that impact-based crew assignment ranks by."""
+    if "monetary" in method and asset_to_lu is not None:
+        return {a: sum(area * rate for (_, area, rate) in uses) for a, uses in asset_to_lu.items()}
+    if "population" in method and asset_population_map is not None:
+        return asset_population_map
+    return None
+
+def update_repair_crew_assignment_optimized(timestep, available_repair_crews, repair_crews_assigned,
                                            accessible, flooded_mask, repair_time, island_ids=None, method=None, verbose=False, asset_impact_map=None):    
     """
     Assign repair crews to assets based on accessibility, flooding status, repair time, and assignment method.
@@ -830,6 +785,27 @@ def repair_crew_uncertainty(asset_type, min_crews, max_crews):
     return IntegerParameter(f'{REPAIR_CREWS_PARAM_PREFIX}__{asset_type}', min_crews, max_crews)
 
 
+def resolve_per_type_ranges(defaults, overrides, flag, cast):
+    """Merge CLI ``(asset_type, min, max)`` overrides into ``defaults``; only types in ``defaults`` are valid."""
+    ranges = dict(defaults)
+    for asset_type, low, high in overrides or []:
+        if asset_type not in defaults:
+            raise ValueError(f"Unknown asset type '{asset_type}' in {flag}; expected one of {list(defaults)}.")
+        ranges[asset_type] = (cast(low), cast(high))
+    return ranges
+
+
+def resolve_crew_ranges(args):
+    """``DEFAULT_CREW_RANGES`` with ``--repair-crews-range`` overrides."""
+    return resolve_per_type_ranges(DEFAULT_CREW_RANGES, args.repair_crews_range, "--repair-crews-range", int)
+
+
+def resolve_fragility_steepness_ranges(args):
+    """``DEFAULT_FRAGILITY_STEEPNESS_RANGES`` with ``--fragility-steepness-range`` overrides."""
+    return resolve_per_type_ranges(DEFAULT_FRAGILITY_STEEPNESS_RANGES, args.fragility_steepness_range,
+                                   "--fragility-steepness-range", float)
+
+
 def build_per_type_crew_uncertainties(asset_type_ranges):
     """Build one repair-crew uncertainty per asset type.
 
@@ -1120,11 +1096,12 @@ def _initialize_simulation(
     elif not isinstance(recovery_parameters, dict):
         raise TypeError("recovery_parameters must be a dictionary or None")
 
-    # Initialize grid-based accessibility if configured
     if _config['simulation_config']['accessibility_model'] is not None:
-        print("Initializing grid-based accessibility analysis...")
-        grid_hex.initialize_grid_analysis(root_dir)
-        
+        raise NotImplementedError(
+            "The grid-based accessibility model was removed; set "
+            "simulation_config['accessibility_model'] to None (island-based access is used)."
+        )
+
     # Load caches if not provided
     if accessibility_cache is None:
         print("\nLoading accessibility cache...")
@@ -1405,6 +1382,20 @@ def _update_repair_progress(state, flooded_mask, elapsed_time=1.0):
         elapsed_time=elapsed_time,
         active_masks={"repair_time": can_repair_mask},
     )
+
+def build_dependency_runtime(config, gdf_assets):
+    """``(knowledge_graph, dependency_edges)`` for a config and asset set; ``(None, [])`` without rules."""
+    dep_config = config.get('dependency_parameters', {})
+    kg_config = dep_config.get('knowledge_graph', None) or []
+    if not kg_config:
+        return None, []
+    from src.dependency_knowledge_graph import DependencyKnowledgeGraph
+    knowledge_graph = DependencyKnowledgeGraph.from_config(kg_config)
+    edges = dep_config.get('dependency_edges', None)
+    if edges is None:
+        edges = expand_dependency_edges(gdf_assets, knowledge_graph)
+    return knowledge_graph, edges
+
 
 def _update_operational_state(
     state, asset_type, flooded_mask, config, repair_threshold, knowledge_graph=None, dependency_edges=None,
@@ -1838,31 +1829,15 @@ def simulate_asset_damage_recovery_access_breakdown(
         boundary_asset_indices = None
         boundary_islands_rfids = None
 
-    if 'monetary' in repair_crew_assignment_method and asset_to_lu is not None:
-        asset_impact_map = {
-            aid: sum(area * rate for (lu, area, rate) in asset_to_lu[aid])
-            for aid in asset_to_lu
-        }
-    elif 'population' in repair_crew_assignment_method and asset_population_map is not None:
-        asset_impact_map = asset_population_map
-    else:
-        asset_impact_map = None
+    asset_impact_map = repair_impact_map(repair_crew_assignment_method, asset_to_lu, asset_population_map)
 
     timesteps = np.arange(0, len(hazard_maps) * major_timestep)
     cache_updated = {}  # Track cache updates throughout the simulation
 
     # Pre-build the knowledge graph and runtime dependency edges once to avoid
     # reconstructing/expanding them every timestep.
-    _knowledge_graph = None
-    _dependency_edges = []
+    _knowledge_graph, _dependency_edges = build_dependency_runtime(_config, gdf_assets)
     _dep_config = _config.get('dependency_parameters', {})
-    _kg_config = _dep_config.get('knowledge_graph', None) or []
-    if _kg_config:
-        from src.dependency_knowledge_graph import DependencyKnowledgeGraph
-        _knowledge_graph = DependencyKnowledgeGraph.from_config(_kg_config)
-        _dependency_edges = _dep_config.get('dependency_edges', None)
-        if _dependency_edges is None:
-            _dependency_edges = expand_dependency_edges(gdf_assets, _knowledge_graph)
 
     # Named distinctly from the per-timestep "simulation.total" aggregate produced by
     # profiler.timestep(loop="simulation") below -- both would otherwise share the
@@ -2001,7 +1976,7 @@ def simulate_asset_damage_recovery_access_breakdown(
     if societal_access_config is not None and timestep_output:
         from src.societal_access import (
             SharedRealizedStateCacheError,
-            postprocess_societal_access_results,
+            postprocess_societal_access_from_config,
         )
         try:
             _sa_cfg = societal_access_config
@@ -2012,23 +1987,13 @@ def simulate_asset_damage_recovery_access_breakdown(
                 )
                 _sa_cfg["allocation_cache"] = allocation_cache
             _run_shared_realized_state_cache = _shared_realized_state_cache
-            results, alloc_cache_updated = postprocess_societal_access_results(
+            results, alloc_cache_updated = postprocess_societal_access_from_config(
+                _sa_cfg,
                 summary_results=results,
                 detailed_results=timestep_results,
                 gdf_assets=gdf_assets,
-                pop_grid_gdf=_sa_cfg.get("pop_grid_gdf"),
-                cell_id_column=_sa_cfg.get("cell_id_column", "cell_id"),
-                pop_group_columns=_sa_cfg.get("pop_group_columns"),
-                taxonomy=_sa_cfg.get("taxonomy"),
-                asset_type_column=_sa_cfg.get("asset_type_column", "type"),
-                asset_id_column=_sa_cfg.get("asset_id_column"),
                 allocation_cache=allocation_cache,
-                all_functions=_sa_cfg.get("all_functions"),
-                reference_group=_sa_cfg.get("reference_group", "total"),
-                nearest_max_distance=_sa_cfg.get("nearest_max_distance", 200.0),
-                service_area_function_provider_types=_sa_cfg.get("service_area_function_provider_types"),
-                fail_on_missing_allocation=_sa_cfg.get("fail_on_missing_allocation", True),
-                verbose=_sa_cfg.get("verbose", verbose),
+                verbose=verbose,
                 profiler=profiler,
                 shared_realized_state_cache=_run_shared_realized_state_cache,
                 shared_cache_fail_hard=_shared_cache_fail_hard,
