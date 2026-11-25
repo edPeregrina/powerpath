@@ -228,6 +228,8 @@ def main():
         Path(config["root_dir"]), args, l1_dir=args.l1_dir, l2_dir=args.l2_dir,
         repair_priority=args.repair_priority,
     )
+    # The shared builder also adds a non-island ("unconstrained") policy, unsupported here.
+    policies = [p for p in policies if "island" in p["repair_crew_assignment_method"]]
     LOGGER.info("%d scenarios x %d policies = %d runs, %d maps each",
                 args.scenarios, len(policies), args.scenarios * len(policies), len(inputs["hazard_maps"]))
     if args.dry_run:
