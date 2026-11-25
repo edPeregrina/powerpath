@@ -83,9 +83,12 @@ def parse_args():
                         help="Comma-separated trace fields; default as in the multi-map trace.")
     parser.add_argument("--output-name", type=str, default=None)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--dev-config", action="store_true")
+    parser.add_argument("--dev-config", action="store_true",
+                        help="Bundled sample data, including its hazard maps (not combinable with --hazard-dir).")
     parser.add_argument("--log-level", type=str, default="INFO")
     args = parser.parse_args()
+    if args.dev_config and args.hazard_dir:
+        parser.error("--dev-config uses the bundled hazard maps; drop --hazard-dir or --dev-config")
     args.adaptation_active_timesteps = 1  # policies carry it, single-map has no timesteps
     return args
 
