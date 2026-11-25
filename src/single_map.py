@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+from shapely.geometry import LineString
 
 from src.adaptation import blocking_reason_codes, build_l1_l2_reduction_array
 from src.damage_recovery import (
@@ -131,10 +132,12 @@ def _road_geometries(graph_path):
     geoms = _road_geometry_cache.get(str(graph_path))
     if geoms is None:
         G = _load_and_project_graph(graph_path, from_crs="EPSG:4326", to_crs=PROJECTED_CRS)
-        geoms = {
-            d["rfid"]: (d["geometry_m"], d["geometry_m"].buffer(BUFFER_M, cap_style="square", join_style="mitre"))
-            for _, _, d in G.edges(data=True) if d.get("geometry_m") is not None
-        }
+        geoms = {}
+        for u, v, d in G.edges(data=True):
+            line = d.get("geometry_m")
+            if line is None:  # endpoint fallback, as in compute_island_geodataframe_from_graph
+                line = LineString([(G.nodes[u]["x_m"], G.nodes[u]["y_m"]), (G.nodes[v]["x_m"], G.nodes[v]["y_m"])])
+            geoms[d["rfid"]] = (line, line.buffer(BUFFER_M, cap_style="square", join_style="mitre"))
         _road_geometry_cache[str(graph_path)] = geoms
     return geoms
 

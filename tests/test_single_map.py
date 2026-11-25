@@ -432,6 +432,40 @@ def test_single_map_builds_capacity_reference_from_unfiltered_graph(tmp_path):
         assert pickle.load(stream).number_of_edges() == 3
 
 
+def _two_edge_graph(tmp_path, with_geometry=True):
+    """Two 100 m roads; the second lacks ``geometry`` unless ``with_geometry``.
+    Columns ``dry`` (0 m) and ``wet`` (1 m)."""
+    import pickle
+
+    import networkx as nx
+    from pyproj import Transformer
+    from shapely.geometry import LineString
+    from shapely.ops import transform
+
+    project = Transformer.from_crs("EPSG:28992", "EPSG:4326", always_xy=True).transform
+    graph = nx.Graph()
+    coords = {0: (100000, 450000), 1: (100100, 450000), 2: (100200, 450000)}
+    for node, xy in coords.items():
+        x, y = project(*xy)
+        graph.add_node(node, x=x, y=y)
+    for rfid, (u, v) in enumerate([(0, 1), (1, 2)]):
+        attrs = dict(rfid=rfid, length=100, dry=0.0, wet=1.0)
+        if with_geometry or rfid == 0:
+            attrs["geometry"] = transform(project, LineString([coords[u], coords[v]]))
+        graph.add_edge(u, v, **attrs)
+    graph_path = tmp_path / "two_edges.p"
+    with graph_path.open("wb") as stream:
+        pickle.dump(graph, stream)
+    return graph_path
+
+
+def test_edge_without_geometry_gets_endpoint_line(tmp_path):
+    roads = single_map.island_road_sections(_two_edge_graph(tmp_path, with_geometry=False), "dry", 0.2)
+    assert roads.loc[roads["rfid"] == 1, "original_geometry"].iloc[0].length == pytest.approx(100, abs=1)
+    assert roads["geometry"].notna().all()
+
+
+
 def test_single_map_trace_and_island_report(tmp_path, assets):
     from src import island_report
 
