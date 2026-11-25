@@ -145,9 +145,10 @@ def compute_hazard_availability(
     contents -- it never mutates ``asset_type``, ``flooded_mask``, or
     ``repair_time``, and never touches dependency edges.
 
-    ``return_to_operational`` triggers only apply to assets that have failed
-    (``intrinsic_operational`` False): an asset that survived keeps operating
-    while it awaits repair. ``None`` applies the triggers to every asset.
+    ``repair_complete``/``repair_below`` triggers only apply to assets that have
+    failed (``intrinsic_operational`` False): an asset that survived keeps
+    operating while it awaits repair. ``delayed`` applies to every asset of the
+    type. ``None`` applies all triggers to every asset.
     """
     num_assets = len(asset_type)
     if flooded_mask is None:
@@ -172,8 +173,10 @@ def compute_hazard_availability(
         for rule in rules:
             if rule.hazard_blocks_operation:
                 blocked |= a_mask & flooded_mask
+            # delayed is a post-flood recovery wait, so it also holds assets that did not fail
+            rule_mask = a_mask if rule.return_to_operational.trigger == TRIGGER_DELAYED else repair_mask
             blocked |= _hazard_repair_blocked_mask(
-                repair_time, repair_mask, rule.return_to_operational, wait_vectors
+                repair_time, rule_mask, rule.return_to_operational, wait_vectors
             )
         hazard_available &= ~blocked
     return hazard_available

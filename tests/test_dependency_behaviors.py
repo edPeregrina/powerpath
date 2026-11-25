@@ -458,6 +458,31 @@ def test_repair_complete_trigger_only_blocks_failed_assets():
     assert report["effective_operational"].tolist() == [True, False, True]
 
 
+def test_delayed_trigger_holds_assets_that_did_not_fail():
+    """The delayed hazard-recovery wait holds every asset of the type, failed or not."""
+    kg = DependencyKnowledgeGraph.from_config([{
+        "relation": "hazard",
+        "hazard_type": "flooding",
+        "source_type": "hospital",
+        "hazard_blocks_operation": True,
+        "return_to_operational": {"trigger": "delayed", "delay_steps": 5.0, "wait_vector": "recovery"},
+    }])
+    wait_key = hazard_recovery_wait_key("recovery")
+    _, report = evaluate_operational_state(
+        intrinsic_operational=np.array([True, False, True]),
+        asset_type=np.array(["hospital", "hospital", "hospital"]),
+        hazard_type="flooding",
+        knowledge_graph=kg,
+        flooded_mask=np.zeros(3, dtype=bool),
+        repair_time=np.zeros(3),
+        dependency_edges=[],
+        wait_vectors={wait_key: np.array([5.0, 5.0, 0.0])},
+        hazard_active_masks={wait_key: np.array([True, True, False])},
+        restart_active_masks={},
+    )
+    assert report["hazard_available"].tolist() == [False, False, True]
+
+
 def test_evaluate_operational_state_via_simulation_wiring():
     """Integration check that _update_operational_state publishes the same
     5-way separated state and that state.operational == effective_operational.
